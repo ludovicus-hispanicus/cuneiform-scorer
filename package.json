@@ -1,0 +1,8 @@
+{
+  "name": "cuneiform-scorer",
+  "version": "1.0.0",
+  "description": "Manuscript collation and synoptic score editor",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

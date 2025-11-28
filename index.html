@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Manuscript Scorer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="header">
+    <h1>Manuscript Scorer</h1>
+    <div class="header-actions">
+      <button id="add-manuscript-btn">+ Add Manuscript</button>
+      <button id="export-btn">Export Score</button>
+    </div>
+  </header>
+
+  <main class="content">
+    <aside class="manuscript-list">
+      <h2>Mss</h2>
+      <ul id="manuscript-list">
+        <!-- Loaded from manuscripts/*.txt -->
+      </ul>
+    </aside>
+
+    <section class="work-area">
+      <div class="editor-pane">
+        <div class="pane-header">
+          <h2>Manuscript Text</h2>
+          <span class="help-hint">Use §[score-line] [ms-line]. to map lines</span>
+        </div>
+        <div
+          id="editor"
+          class="editor"
+          contenteditable="true"
+          spellcheck="false"
+        >Loading...</div>
+      </div>
+
+      <div class="score-pane">
+        <div class="pane-header">
+          <h2>Synoptic Score</h2>
+        </div>
+        <div id="score" class="score"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
