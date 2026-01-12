@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Manage Project - Manuscript Scorer</title>
+  <link rel="stylesheet" href="index.css">
+  <style>
+    .manage-content {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    .section {
+      background: var(--bg-white);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .section h2 {
+      font-size: 1.1rem;
+      margin-bottom: 1rem;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .section p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 0.6rem 1.2rem;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn:hover {
+      background: #3d5d8a;
+    }
+
+    .btn:disabled {
+      background: #999;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: var(--bg-light);
+      color: var(--text-dark);
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-secondary:hover {
+      background: #e8e8e8;
+    }
+
+    .btn-danger {
+      background: #dc3545;
+    }
+
+    .btn-danger:hover {
+      background: #c82333;
+    }
+
+    .file-list {
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      margin-bottom: 1rem;
+    }
+
+    .file-item {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 0.85rem;
+    }
+
+    .file-item:last-child {
+      border-bottom: none;
+    }
+
+    .file-item.indexed {
+      background: #e8f5e9;
+    }
+
+    .file-item.not-indexed {
+      background: #fff3e0;
+    }
+
+    .file-item .status {
+      font-size: 0.75rem;
+      padding: 0.15rem 0.4rem;
+      border-radius: 3px;
+      margin-left: auto;
+    }
+
+    .file-item .status.indexed {
+      background: #4caf50;
+      color: white;
+    }
+
+    .file-item .status.not-indexed {
+      background: #ff9800;
+      color: white;
+    }
+
+    .import-zone {
+      border: 2px dashed var(--border-color);
+      border-radius: 8px;
+      padding: 2rem;
+      text-align: center;
+      transition: border-color 0.2s, background 0.2s;
+      cursor: pointer;
+    }
+
+    .import-zone:hover,
+    .import-zone.dragover {
+      border-color: var(--accent);
+      background: var(--accent-light);
+    }
+
+    .import-zone input {
+      display: none;
+    }
+
+    .import-zone p {
+      margin: 0;
+    }
+
+    .import-preview {
+      margin-top: 1rem;
+      display: none;
+    }
+
+    .import-preview.has-files {
+      display: block;
+    }
+
+    .actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    .status-message {
+      padding: 0.75rem 1rem;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+      display: none;
+    }
+
+    .status-message.success {
+      display: block;
+      background: #e8f5e9;
+      color: #2e7d32;
+      border: 1px solid #a5d6a7;
+    }
+
+    .status-message.error {
+      display: block;
+      background: #ffebee;
+      color: #c62828;
+      border: 1px solid #ef9a9a;
+    }
+
+    .back-header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .back-header a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 1.2rem;
+    }
+
+    .back-header h1 {
+      font-size: 1.4rem;
+      color: var(--text-dark);
+    }
+
+    /* Siglum mapping table */
+    .mapping-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1rem;
+    }
+
+    .mapping-table th,
+    .mapping-table td {
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .mapping-table th {
+      background: var(--bg-light);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .mapping-table td input {
+      width: 100%;
+      padding: 0.4rem 0.5rem;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-size: 0.9rem;
+      font-family: "Consolas", "Monaco", monospace;
+    }
+
+    .mapping-table td input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .mapping-table .museum-num {
+      font-family: "Consolas", "Monaco", monospace;
+      font-weight: 500;
+    }
+
+    .mapping-table .siglum-input {
+      min-width: 120px;
+    }
+
+    .mapping-empty {
+      color: var(--text-muted);
+      font-style: italic;
+      padding: 1rem;
+      text-align: center;
+    }
+
+    .save-indicator {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-left: 0.5rem;
+    }
+
+    .save-indicator.saving {
+      color: var(--accent);
+    }
+
+    .save-indicator.saved {
+      color: #4caf50;
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1>Manage Project</h1>
+  </header>
+
+  <main class="manage-content">
+    <div class="back-header">
+      <a href="index.html">&larr; Projects</a>
+      <h1 id="project-name">Loading...</h1>
+    </div>
+
+    <div id="status-message" class="status-message"></div>
+
+    <!-- Manuscript Files Section -->
+    <div class="section">
+      <h2>Manuscript Files</h2>
+      <p>These are the .txt files in your project's manuscripts folder. Files marked "Not indexed" won't appear in the scorer until you regenerate the index.</p>
+
+      <div id="file-list" class="file-list">
+        <div class="file-item">Loading...</div>
+      </div>
+
+      <div class="actions">
+        <button id="regenerate-btn" class="btn">Regenerate Index</button>
+        <a id="open-scorer-btn" class="btn btn-secondary" href="#">Open Scorer</a>
+      </div>
+    </div>
+
+    <!-- Siglum Mapping Section -->
+    <div class="section">
+      <h2>Siglum Mapping <span id="mapping-save-indicator" class="save-indicator"></span></h2>
+      <p>Map museum numbers (filenames) to scholarly sigla. These sigla will be used in the manuscript sidebar and score display.</p>
+
+      <div id="mapping-container">
+        <table class="mapping-table">
+          <thead>
+            <tr>
+              <th>Museum Number (Filename)</th>
+              <th>Siglum</th>
+            </tr>
+          </thead>
+          <tbody id="mapping-tbody">
+            <tr><td colspan="2" class="mapping-empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Import Section -->
+    <div class="section">
+      <h2>Import Manuscripts</h2>
+      <p>Drag and drop .txt files here or click to select files to import into this project.</p>
+
+      <div id="import-zone" class="import-zone">
+        <input type="file" id="file-input" multiple accept=".txt">
+        <p>Drop .txt files here or click to browse</p>
+      </div>
+
+      <div id="import-preview" class="import-preview">
+        <h3>Files to import:</h3>
+        <div id="import-list" class="file-list"></div>
+        <div class="actions">
+          <button id="import-btn" class="btn">Import Files</button>
+          <button id="clear-import-btn" class="btn btn-secondary">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Danger Zone -->
+    <div class="section">
+      <h2>Danger Zone</h2>
+      <p>Delete this project and all its manuscripts. This action cannot be undone.</p>
+      <button id="delete-btn" class="btn btn-danger">Delete Project</button>
+    </div>
+  </main>
+
+  <script>
+    // Get project from URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const projectFolder = urlParams.get('project');
+
+    if (!projectFolder) {
+      window.location.href = 'index.html';
+    }
+
+    // Update scorer link
+    document.getElementById('open-scorer-btn').href = `scorer.html?project=${encodeURIComponent(projectFolder)}`;
+
+    // State
+    let projectConfig = null;
+    let manuscriptFiles = [];
+    let indexedFiles = [];
+    let filesToImport = [];
+    let siglaMappings = {}; // Museum number -> Siglum
+    let mappingSaveTimeout = null;
+
+    // Load project info
+    async function loadProject() {
+      try {
+        // Load project config
+        const configRes = await fetch(`/api/projects/${projectFolder}`);
+        if (!configRes.ok) throw new Error('Project not found');
+        projectConfig = await configRes.json();
+        document.getElementById('project-name').textContent = projectConfig.name;
+        document.title = `Manage ${projectConfig.name} - Manuscript Scorer`;
+
+        // Load sigla mappings from config
+        siglaMappings = projectConfig.sigla || {};
+
+        // Load file list
+        await loadFiles();
+      } catch (err) {
+        showStatus('Failed to load project: ' + err.message, 'error');
+      }
+    }
+
+    // Load manuscript files
+    async function loadFiles() {
+      try {
+        const res = await fetch(`/api/projects/${projectFolder}/files`);
+        if (!res.ok) throw new Error('Failed to load files');
+
+        const data = await res.json();
+        manuscriptFiles = data.files || [];
+        indexedFiles = data.indexed || [];
+
+        renderFileList();
+        renderMappingTable();
+      } catch (err) {
+        showStatus('Failed to load files: ' + err.message, 'error');
+      }
+    }
+
+    // Render file list
+    function renderFileList() {
+      const container = document.getElementById('file-list');
+
+      if (manuscriptFiles.length === 0) {
+        container.innerHTML = '<div class="file-item">No manuscript files found</div>';
+        return;
+      }
+
+      container.innerHTML = manuscriptFiles.map(file => {
+        const isIndexed = indexedFiles.includes(file.replace('.txt', ''));
+        return `
+          <div class="file-item ${isIndexed ? 'indexed' : 'not-indexed'}">
+            <span>${file}</span>
+            <span class="status ${isIndexed ? 'indexed' : 'not-indexed'}">${isIndexed ? 'Indexed' : 'Not indexed'}</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // Render siglum mapping table
+    function renderMappingTable() {
+      const tbody = document.getElementById('mapping-tbody');
+
+      if (indexedFiles.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="2" class="mapping-empty">No manuscripts indexed yet</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = indexedFiles.map(museumNum => {
+        const siglum = siglaMappings[museumNum] || '';
+        return `
+          <tr>
+            <td class="museum-num">${escapeHtml(museumNum)}</td>
+            <td>
+              <input type="text"
+                     class="siglum-input"
+                     data-museum="${escapeHtml(museumNum)}"
+                     value="${escapeHtml(siglum)}"
+                     placeholder="e.g., NinNB₂">
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      // Add input listeners for auto-save
+      tbody.querySelectorAll('.siglum-input').forEach(input => {
+        input.addEventListener('input', (e) => {
+          const museumNum = e.target.dataset.museum;
+          const value = e.target.value.trim();
+
+          if (value) {
+            siglaMappings[museumNum] = value;
+          } else {
+            delete siglaMappings[museumNum];
+          }
+
+          debouncedSaveMappings();
+        });
+      });
+    }
+
+    // Escape HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Debounced save for mappings
+    function debouncedSaveMappings() {
+      const indicator = document.getElementById('mapping-save-indicator');
+      indicator.textContent = 'Saving...';
+      indicator.className = 'save-indicator saving';
+
+      if (mappingSaveTimeout) clearTimeout(mappingSaveTimeout);
+      mappingSaveTimeout = setTimeout(async () => {
+        try {
+          const res = await fetch(`/api/projects/${projectFolder}/sigla`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(siglaMappings)
+          });
+
+          if (res.ok) {
+            indicator.textContent = 'Saved';
+            indicator.className = 'save-indicator saved';
+            setTimeout(() => {
+              indicator.textContent = '';
+              indicator.className = 'save-indicator';
+            }, 2000);
+          } else {
+            throw new Error('Failed to save');
+          }
+        } catch (err) {
+          indicator.textContent = 'Error saving';
+          indicator.className = 'save-indicator';
+          showStatus('Failed to save sigla mappings', 'error');
+        }
+      }, 500);
+    }
+
+    // Show status message
+    function showStatus(message, type) {
+      const el = document.getElementById('status-message');
+      el.textContent = message;
+      el.className = 'status-message ' + type;
+
+      if (type === 'success') {
+        setTimeout(() => {
+          el.className = 'status-message';
+        }, 3000);
+      }
+    }
+
+    // Regenerate index
+    document.getElementById('regenerate-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('regenerate-btn');
+      btn.disabled = true;
+      btn.textContent = 'Regenerating...';
+
+      try {
+        const res = await fetch(`/api/projects/${projectFolder}/regenerate-index`, {
+          method: 'POST'
+        });
+
+        if (!res.ok) throw new Error('Failed to regenerate index');
+
+        const data = await res.json();
+        showStatus(`Index regenerated with ${data.count} manuscripts`, 'success');
+        await loadFiles();
+      } catch (err) {
+        showStatus('Failed to regenerate index: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Regenerate Index';
+      }
+    });
+
+    // Import zone drag/drop
+    const importZone = document.getElementById('import-zone');
+    const fileInput = document.getElementById('file-input');
+
+    importZone.addEventListener('click', () => fileInput.click());
+
+    importZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      importZone.classList.add('dragover');
+    });
+
+    importZone.addEventListener('dragleave', () => {
+      importZone.classList.remove('dragover');
+    });
+
+    importZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      importZone.classList.remove('dragover');
+      handleFiles(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener('change', () => {
+      handleFiles(fileInput.files);
+    });
+
+    // Handle selected files
+    function handleFiles(files) {
+      filesToImport = Array.from(files).filter(f => f.name.endsWith('.txt'));
+      renderImportPreview();
+    }
+
+    // Render import preview
+    function renderImportPreview() {
+      const preview = document.getElementById('import-preview');
+      const list = document.getElementById('import-list');
+
+      if (filesToImport.length === 0) {
+        preview.classList.remove('has-files');
+        return;
+      }
+
+      preview.classList.add('has-files');
+      list.innerHTML = filesToImport.map(f => `
+        <div class="file-item">
+          <span>${f.name}</span>
+          <span style="margin-left: auto; color: var(--text-muted);">${(f.size / 1024).toFixed(1)} KB</span>
+        </div>
+      `).join('');
+    }
+
+    // Clear import
+    document.getElementById('clear-import-btn').addEventListener('click', () => {
+      filesToImport = [];
+      fileInput.value = '';
+      renderImportPreview();
+    });
+
+    // Import files
+    document.getElementById('import-btn').addEventListener('click', async () => {
+      if (filesToImport.length === 0) return;
+
+      const btn = document.getElementById('import-btn');
+      btn.disabled = true;
+      btn.textContent = 'Importing...';
+
+      try {
+        let imported = 0;
+        for (const file of filesToImport) {
+          const content = await file.text();
+          const res = await fetch(`/api/projects/${projectFolder}/import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: file.name, content })
+          });
+
+          if (res.ok) imported++;
+        }
+
+        showStatus(`Imported ${imported} file(s)`, 'success');
+        filesToImport = [];
+        fileInput.value = '';
+        renderImportPreview();
+        await loadFiles();
+      } catch (err) {
+        showStatus('Failed to import files: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Import Files';
+      }
+    });
+
+    // Delete project
+    document.getElementById('delete-btn').addEventListener('click', async () => {
+      const confirmed = confirm(`Are you sure you want to delete "${projectConfig?.name || projectFolder}"?\n\nThis will delete all manuscripts and cannot be undone.`);
+      if (!confirmed) return;
+
+      const doubleConfirm = confirm('This is your last chance to cancel. Delete this project?');
+      if (!doubleConfirm) return;
+
+      try {
+        const res = await fetch(`/api/projects/${projectFolder}`, {
+          method: 'DELETE'
+        });
+
+        if (!res.ok) throw new Error('Failed to delete project');
+
+        window.location.href = 'index.html';
+      } catch (err) {
+        showStatus('Failed to delete project: ' + err.message, 'error');
+      }
+    });
+
+    // Initial load
+    loadProject();
+  </script>
+</body>
+</html>

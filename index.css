@@ -1,0 +1,489 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --border-color: #ddd;
+  --bg-light: #f5f5f5;
+  --bg-white: #fff;
+  --accent: #4a6fa5;
+  --accent-light: #e8f0fe;
+  --text-dark: #333;
+  --text-muted: #666;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  background: var(--bg-light);
+  color: var(--text-dark);
+}
+
+/* Header */
+.header {
+  background: var(--accent);
+  color: white;
+  padding: 1rem 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.header h1 {
+  font-size: 1.4rem;
+  font-weight: 500;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.subtitle {
+  font-size: 1rem;
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+
+/* Google Drive button and status */
+.gdrive-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  background: rgba(255,255,255,0.15);
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.gdrive-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #888;
+}
+
+.gdrive-indicator.connected {
+  background: #4caf50;
+  box-shadow: 0 0 4px #4caf50;
+}
+
+.gdrive-indicator.syncing {
+  background: #ff9800;
+  animation: pulse 1s infinite;
+}
+
+.gdrive-indicator.error {
+  background: #f44336;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.gdrive-btn {
+  background: #4285f4;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.gdrive-btn:hover {
+  background: #3367d6;
+}
+
+.gdrive-btn.connected {
+  background: #0f9d58;
+}
+
+/* Login Prompt */
+.login-prompt {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 60vh;
+}
+
+.login-card {
+  background: var(--bg-white);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 2.5rem;
+  text-align: center;
+  max-width: 400px;
+}
+
+.login-card h2 {
+  font-size: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: var(--text-dark);
+}
+
+.login-card > p {
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+
+.login-gdrive-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: #4285f4;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 6px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.login-gdrive-btn:hover {
+  background: #3367d6;
+}
+
+.login-gdrive-btn svg {
+  background: white;
+  border-radius: 2px;
+  padding: 2px;
+}
+
+.login-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 1.5rem;
+}
+
+/* Projects Container */
+.projects-container.hidden {
+  display: none;
+}
+
+/* Modal styles (for gdrive setup) */
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-content {
+  background: var(--bg-white);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.gdrive-setup-modal {
+  width: 500px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0;
+  line-height: 1;
+}
+
+.modal-close:hover {
+  color: var(--text-dark);
+}
+
+.gdrive-setup-content {
+  padding: 1rem;
+}
+
+.gdrive-setup-content p {
+  margin: 0 0 1rem 0;
+  color: var(--text-dark);
+}
+
+.setup-steps {
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.8;
+}
+
+.setup-steps a {
+  color: var(--accent);
+}
+
+.client-id-input-row {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.client-id-input-row input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-family: monospace;
+}
+
+.client-id-input-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+
+.save-client-id-btn {
+  padding: 0.5rem 1rem;
+  background: #4285f4;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.save-client-id-btn:hover {
+  background: #3367d6;
+}
+
+.setup-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Main Content */
+.content {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+/* Projects Grid */
+.projects-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.project-card {
+  background: var(--bg-white);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  position: relative;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.project-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(74, 111, 165, 0.15);
+}
+
+.project-link {
+  display: block;
+  padding: 1.25rem;
+  padding-right: 3rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.manage-link {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 1.2rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.manage-link:hover {
+  background: var(--bg-light);
+  color: var(--accent);
+}
+
+.project-card h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--accent);
+}
+
+.project-folder {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.project-meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Empty/Error states */
+.empty-message,
+.error-message {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted);
+}
+
+.empty-message p,
+.error-message p {
+  margin-bottom: 0.5rem;
+}
+
+/* New Project Button */
+.new-project {
+  text-align: center;
+}
+
+.new-project-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 6px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.new-project-btn:hover {
+  background: #3d5d8a;
+}
+
+/* Dialog */
+.dialog {
+  border: none;
+  border-radius: 8px;
+  padding: 1.5rem;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.dialog h2 {
+  margin-bottom: 1rem;
+  font-size: 1.2rem;
+}
+
+.dialog label {
+  display: block;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.dialog input {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.6rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 1rem;
+}
+
+.dialog input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dialog small {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.dialog-actions button {
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.dialog-actions button[type="button"] {
+  background: var(--bg-light);
+  border: 1px solid var(--border-color);
+  color: var(--text-dark);
+}
+
+.dialog-actions button[type="submit"] {
+  background: var(--accent);
+  border: none;
+  color: white;
+}
+
+.dialog-actions button[type="submit"]:hover {
+  background: #3d5d8a;
+}
+
+/* Responsive */
+@media (max-width: 500px) {
+  .content {
+    padding: 1rem;
+  }
+
+  .projects-grid {
+    grid-template-columns: 1fr;
+  }
+}

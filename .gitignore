@@ -1,0 +1,18 @@
+# Node.js (not needed for GitHub Pages deployment)
+node_modules/
+package.json
+package-lock.json
+server.js
+
+# Local project data
+projects/
+manuscripts/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+.vscode/
