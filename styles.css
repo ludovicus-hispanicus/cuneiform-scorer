@@ -945,3 +945,198 @@ body {
     width: 95vw;
   }
 }
+
+/* Dialog styles */
+.dialog {
+  border: none;
+  border-radius: 8px;
+  padding: 1.5rem;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+}
+
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.dialog h2 {
+  margin-bottom: 1rem;
+  font-size: 1.2rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.dialog-actions button {
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  background: var(--bg-light);
+  border: 1px solid var(--border-color);
+}
+
+.dialog-actions button:hover {
+  background: #e0e0e0;
+}
+
+/* Add Manuscript Dialog */
+.add-manuscript-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.add-option-btn {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--bg-light);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s;
+}
+
+.add-option-btn:hover {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.option-icon {
+  font-size: 1.5rem;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: white;
+  border-radius: 8px;
+  color: var(--accent);
+  font-weight: bold;
+}
+
+.option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.option-text strong {
+  font-size: 1rem;
+  color: var(--text-dark);
+}
+
+.option-text small {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Project Settings Dialog */
+.project-settings-dialog {
+  max-width: 500px;
+}
+
+.settings-section {
+  margin-bottom: 1.5rem;
+}
+
+.settings-section h3 {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.settings-manuscript-list {
+  list-style: none;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.settings-manuscript-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.settings-manuscript-item:last-child {
+  border-bottom: none;
+}
+
+.settings-manuscript-item .ms-name {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.9rem;
+}
+
+.delete-ms-btn {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.delete-ms-btn:hover {
+  background: #fee;
+  color: #c00;
+}
+
+.empty-list {
+  padding: 1rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-style: italic;
+}
+
+/* Danger Zone */
+.danger-zone {
+  border: 1px solid #f5c6cb;
+  background: #fff5f5;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.danger-zone h3 {
+  color: #721c24;
+}
+
+.danger-warning {
+  font-size: 0.85rem;
+  color: #856404;
+  margin-bottom: 0.75rem;
+}
+
+.delete-project-btn {
+  background: #dc3545;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.delete-project-btn:hover {
+  background: #c82333;
+}

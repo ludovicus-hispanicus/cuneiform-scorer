@@ -125,6 +125,30 @@
     </div>
   </div>
 
+  <!-- Add Manuscript Dialog -->
+  <dialog id="add-manuscript-dialog" class="dialog add-manuscript-dialog">
+    <h2>Add Manuscript</h2>
+    <div class="add-manuscript-options">
+      <button id="add-new-manuscript-btn" class="add-option-btn">
+        <span class="option-icon">+</span>
+        <span class="option-text">
+          <strong>Create New</strong>
+          <small>Start with an empty manuscript</small>
+        </span>
+      </button>
+      <button id="import-manuscripts-btn" class="add-option-btn">
+        <span class="option-icon">&#8593;</span>
+        <span class="option-text">
+          <strong>Import Files</strong>
+          <small>Import .txt files from your computer</small>
+        </span>
+      </button>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="cancel-add-manuscript-btn">Cancel</button>
+    </div>
+  </dialog>
+
   <script src="gdrive.js"></script>
   <script src="app.js"></script>
 </body>

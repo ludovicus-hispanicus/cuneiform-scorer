@@ -3,15 +3,18 @@
 // ===========================================
 
 // Configuration
-const GDRIVE_SCOPES = 'https://www.googleapis.com/auth/drive.file';
+const GDRIVE_SCOPES = 'https://www.googleapis.com/auth/drive';  // Full Drive access for folder browsing
 const GDRIVE_DISCOVERY_DOC = 'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest';
 const APP_FOLDER_NAME = 'Manuscript Scorer';
 
 // State
-let gdriveClientId = localStorage.getItem('gdrive_client_id') || '';
+// Hardcoded Client ID - replace with your actual Client ID from Google Cloud Console
+const DEFAULT_CLIENT_ID = '827505523626-319kbfpsfjmk8g7bdfb0v00rnffifprl.apps.googleusercontent.com';  // Paste your Client ID here, e.g., '123456789-abc.apps.googleusercontent.com'
+let gdriveClientId = localStorage.getItem('gdrive_client_id') || DEFAULT_CLIENT_ID;
 let gdriveAccessToken = localStorage.getItem('gdrive_access_token') || '';
 let gdriveReady = false;
 let gdriveTokenClient = null;
+let pickerApiLoaded = false;
 let appFolderId = null;
 let currentProjectFolderId = null;
 
@@ -52,19 +55,23 @@ async function initGoogleDrive() {
 
   // If we have a stored token, try to use it
   if (gdriveAccessToken && gdriveClientId) {
+    console.log('Found stored token, validating...');
     try {
       gapi.client.setToken({ access_token: gdriveAccessToken });
       // Test the token with a simple request
       await gapi.client.drive.files.list({ pageSize: 1 });
       gdriveReady = true;
+      console.log('Token valid, connected to Google Drive');
       updateGdriveStatus('connected', 'Connected');
       updateGdriveButton(true);
     } catch (err) {
-      console.log('Stored token expired, will need to re-authenticate');
+      console.log('Stored token expired, will need to re-authenticate:', err.message);
       localStorage.removeItem('gdrive_access_token');
       gdriveAccessToken = '';
       updateGdriveStatus('', 'Not connected');
     }
+  } else {
+    console.log('No stored token or client ID found', { hasToken: !!gdriveAccessToken, hasClientId: !!gdriveClientId });
   }
 }
 
@@ -85,12 +92,13 @@ function waitForGapi() {
 // Load the Google API client library
 async function loadGapiClient() {
   return new Promise((resolve, reject) => {
-    gapi.load('client', async () => {
+    gapi.load('client:picker', async () => {
       try {
         await gapi.client.init({
           discoveryDocs: [GDRIVE_DISCOVERY_DOC]
         });
-        console.log('Google API client initialized');
+        pickerApiLoaded = true;
+        console.log('Google API client and Picker initialized');
         resolve();
       } catch (err) {
         console.error('Error initializing Google API client:', err);
@@ -214,8 +222,14 @@ function handleAuthResponse(response) {
     localStorage.setItem('gdrive_access_token', gdriveAccessToken);
     gapi.client.setToken({ access_token: gdriveAccessToken });
     gdriveReady = true;
-    updateGdriveStatus('connected', 'Connected');
     updateGdriveButton(true);
+
+    // Use exported setStatus so it can be intercepted by page scripts
+    if (window.GDrive && window.GDrive.setStatus) {
+      window.GDrive.setStatus('connected', 'Connected');
+    } else {
+      updateGdriveStatus('connected', 'Connected');
+    }
 
     // Trigger reload of manuscripts from Drive
     if (typeof loadManuscriptsFromDrive === 'function') {
@@ -361,6 +375,44 @@ async function listDriveProjects() {
     return response.result.files || [];
   } catch (err) {
     console.error('Error listing projects:', err);
+    return [];
+  }
+}
+
+// List shared "Manuscript Scorer" folders (from other users)
+async function listSharedAppFolders() {
+  if (!gdriveReady) return [];
+
+  try {
+    // Search for shared folders named "Manuscript Scorer" that we don't own
+    const response = await gapi.client.drive.files.list({
+      q: `name='${APP_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false and sharedWithMe=true`,
+      fields: 'files(id, name, owners, createdTime, modifiedTime)',
+      spaces: 'drive'
+    });
+
+    return response.result.files || [];
+  } catch (err) {
+    console.error('Error listing shared folders:', err);
+    return [];
+  }
+}
+
+// List projects inside a shared app folder
+async function listSharedProjects(sharedFolderId) {
+  if (!gdriveReady) return [];
+
+  try {
+    const response = await gapi.client.drive.files.list({
+      q: `'${sharedFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name, createdTime, modifiedTime)',
+      orderBy: 'modifiedTime desc',
+      spaces: 'drive'
+    });
+
+    return response.result.files || [];
+  } catch (err) {
+    console.error('Error listing shared projects:', err);
     return [];
   }
 }
@@ -523,6 +575,102 @@ async function getDriveProjectConfig(projectFolderId) {
 }
 
 // ===========================================
+// FOLDER PICKER
+// ===========================================
+
+// Show Google Drive folder picker
+function showFolderPicker() {
+  return new Promise((resolve, reject) => {
+    if (!pickerApiLoaded) {
+      reject(new Error('Picker API not loaded'));
+      return;
+    }
+
+    if (!gdriveAccessToken) {
+      reject(new Error('Not authenticated'));
+      return;
+    }
+
+    // Single view showing all folders (owned and shared)
+    const view = new google.picker.DocsView()
+      .setSelectFolderEnabled(true)
+      .setIncludeFolders(true)
+      .setMimeTypes('application/vnd.google-apps.folder');
+
+    const picker = new google.picker.PickerBuilder()
+      .setAppId(gdriveClientId.split('-')[0])  // Extract app ID from client ID
+      .setOAuthToken(gdriveAccessToken)
+      .addView(view)
+      .setTitle('Select folder for project')
+      .setCallback((data) => {
+        if (data.action === google.picker.Action.PICKED) {
+          const folder = data.docs[0];
+          resolve({
+            id: folder.id,
+            name: folder.name
+          });
+        } else if (data.action === google.picker.Action.CANCEL) {
+          resolve(null);
+        }
+      })
+      .build();
+
+    picker.setVisible(true);
+  });
+}
+
+// Create a project in a specific folder (chosen by user)
+async function createProjectInFolder(folderId, projectName) {
+  if (!gdriveReady) return null;
+
+  try {
+    // Create project subfolder inside chosen folder
+    const createResponse = await gapi.client.drive.files.create({
+      resource: {
+        name: projectName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [folderId]
+      },
+      fields: 'id'
+    });
+
+    const projectFolderId = createResponse.result.id;
+
+    // Create project.json with metadata
+    const metadata = {
+      name: projectName,
+      created: new Date().toISOString()
+    };
+
+    await saveDriveFile(projectFolderId, 'project.json', JSON.stringify(metadata, null, 2));
+
+    return projectFolderId;
+  } catch (err) {
+    console.error('Error creating project in folder:', err);
+    throw err;
+  }
+}
+
+// List all folders (for browsing)
+async function listFolders(parentId = 'root') {
+  if (!gdriveReady) return [];
+
+  try {
+    const response = await gapi.client.drive.files.list({
+      q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name, modifiedTime)',
+      orderBy: 'name',
+      spaces: 'drive'
+    });
+
+    return response.result.files || [];
+  } catch (err) {
+    console.error('Error listing folders:', err);
+    return [];
+  }
+}
+
+// ===========================================
 // EXPORTS (for use in app.js)
 // ===========================================
 
@@ -537,6 +685,15 @@ window.GDrive = {
   createProject: createDriveProject,
   getProjectConfig: getDriveProjectConfig,
   getOrCreateProjectFolder: getOrCreateProjectFolder,
+
+  // Shared projects
+  listSharedAppFolders: listSharedAppFolders,
+  listSharedProjects: listSharedProjects,
+
+  // Folder picker
+  showFolderPicker: showFolderPicker,
+  createProjectInFolder: createProjectInFolder,
+  listFolders: listFolders,
 
   // Files
   listManuscripts: listDriveManuscripts,

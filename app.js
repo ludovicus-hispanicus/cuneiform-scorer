@@ -182,6 +182,7 @@ function syncReconstructedToYjs(lineNum, text) {
 // GitHub button handler
 function setupGitHubButton() {
   const btn = document.getElementById('github-btn');
+  if (!btn) return;  // Element might not exist on all pages
 
   btn.addEventListener('click', () => {
     if (githubConfig.connected) {
@@ -1226,6 +1227,53 @@ async function addManuscript() {
     return;
   }
 
+  // Show choice dialog
+  const choice = await showAddManuscriptDialog();
+  if (!choice) return;
+
+  if (choice === 'new') {
+    await createNewManuscript();
+  } else if (choice === 'import') {
+    await importManuscripts();
+  }
+}
+
+// Show dialog to choose between new or import
+function showAddManuscriptDialog() {
+  return new Promise((resolve) => {
+    const dialog = document.getElementById('add-manuscript-dialog');
+    if (!dialog) {
+      // Fallback to prompt if dialog doesn't exist
+      const choice = confirm('Click OK to create a new manuscript, or Cancel to import files');
+      resolve(choice ? 'new' : 'import');
+      return;
+    }
+
+    dialog.showModal();
+
+    const newBtn = document.getElementById('add-new-manuscript-btn');
+    const importBtn = document.getElementById('import-manuscripts-btn');
+    const cancelBtn = document.getElementById('cancel-add-manuscript-btn');
+
+    const cleanup = () => {
+      dialog.close();
+      newBtn.removeEventListener('click', onNew);
+      importBtn.removeEventListener('click', onImport);
+      cancelBtn.removeEventListener('click', onCancel);
+    };
+
+    const onNew = () => { cleanup(); resolve('new'); };
+    const onImport = () => { cleanup(); resolve('import'); };
+    const onCancel = () => { cleanup(); resolve(null); };
+
+    newBtn.addEventListener('click', onNew);
+    importBtn.addEventListener('click', onImport);
+    cancelBtn.addEventListener('click', onCancel);
+  });
+}
+
+// Create a new empty manuscript
+async function createNewManuscript() {
   const siglum = prompt('Enter filename (e.g., K.3547, BM.12345):');
   if (!siglum) return;
 
@@ -1255,6 +1303,70 @@ async function addManuscript() {
 
   // Switch to it
   loadManuscript(id);
+}
+
+// Import manuscripts from local files
+async function importManuscripts() {
+  // Create a file input element
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.accept = '.txt';
+
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    let importedCount = 0;
+    let skippedCount = 0;
+    let lastImportedId = null;
+
+    for (const file of files) {
+      const siglum = file.name.replace('.txt', '');
+      const id = `ms-${siglum.toLowerCase()}`;
+
+      // Skip if already exists
+      if (manuscripts[id]) {
+        skippedCount++;
+        continue;
+      }
+
+      // Read file content
+      const content = await file.text();
+
+      manuscripts[id] = {
+        siglum: siglum,
+        content: content
+      };
+
+      // Add to list
+      addManuscriptToList(id, siglum);
+
+      // Save to Drive
+      try {
+        const fileId = await GDrive.saveFile(projectFolder, `${siglum}.txt`, content);
+        driveFileIds[id] = fileId;
+        importedCount++;
+        lastImportedId = id;
+      } catch (err) {
+        console.error(`Failed to save ${siglum} to Drive:`, err);
+      }
+    }
+
+    // Show summary
+    let message = `Imported ${importedCount} manuscript(s).`;
+    if (skippedCount > 0) {
+      message += ` Skipped ${skippedCount} (already exist).`;
+    }
+    alert(message);
+
+    // Load the last imported manuscript
+    if (lastImportedId) {
+      loadManuscript(lastImportedId);
+    }
+  };
+
+  input.click();
 }
 
 // Event listeners (Ace handles its own input events via initAceEditor)
@@ -1790,8 +1902,7 @@ async function init() {
   if (window.GDrive && localStorage.getItem('gdrive_client_id')) {
     try {
       await GDrive.init();
-      // Wait a moment for auth to complete if token is cached
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // GDrive.init() is fully async and waits for token validation
     } catch (err) {
       console.warn('Google Drive init failed:', err);
     }

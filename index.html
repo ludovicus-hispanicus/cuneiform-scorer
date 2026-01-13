@@ -48,19 +48,21 @@
 
       <div class="new-project">
         <button id="new-project-btn" class="new-project-btn">+ New Project</button>
+        <button id="open-project-btn" class="open-shared-btn">Open Project</button>
       </div>
     </div>
   </main>
 
-  <dialog id="new-project-dialog" class="dialog">
-    <h2>Create New Project</h2>
-    <form id="new-project-form">
+  <dialog id="project-name-dialog" class="dialog">
+    <h2>Name Your Project</h2>
+    <form id="project-name-form">
       <label>
         Project Name
         <input type="text" id="project-name" required placeholder="e.g., Gilgamesh Flood Narrative">
       </label>
+      <input type="hidden" id="selected-folder-id" value="">
       <div class="dialog-actions">
-        <button type="button" id="cancel-btn">Cancel</button>
+        <button type="button" id="cancel-name-btn">Cancel</button>
         <button type="submit">Create</button>
       </div>
     </form>
@@ -97,9 +99,11 @@
     const projectsContainer = document.getElementById('projects-container');
     const loginPrompt = document.getElementById('login-prompt');
     const newProjectBtn = document.getElementById('new-project-btn');
-    const dialog = document.getElementById('new-project-dialog');
-    const form = document.getElementById('new-project-form');
-    const cancelBtn = document.getElementById('cancel-btn');
+    const openProjectBtn = document.getElementById('open-project-btn');
+    const nameDialog = document.getElementById('project-name-dialog');
+    const nameForm = document.getElementById('project-name-form');
+    const cancelNameBtn = document.getElementById('cancel-name-btn');
+    const selectedFolderId = document.getElementById('selected-folder-id');
     const loginGdriveBtn = document.getElementById('login-gdrive-btn');
 
     // Load projects from Google Drive
@@ -148,6 +152,9 @@
     function hideLoginPrompt() {
       loginPrompt.classList.add('hidden');
       projectsContainer.classList.remove('hidden');
+      // Also hide the header connect button since we're already connected
+      const gdriveBtn = document.getElementById('gdrive-btn');
+      if (gdriveBtn) gdriveBtn.style.display = 'none';
     }
 
     // Render project cards
@@ -168,6 +175,7 @@
             <h3>${escapeHtml(project.name)}</h3>
             <p class="project-meta">${project.manuscriptCount} manuscript(s)</p>
           </a>
+          <a href="manage.html?project=${encodeURIComponent(project.folder)}" class="project-settings-btn" title="Project settings">&#9881;</a>
         </div>
       `).join('');
     }
@@ -179,18 +187,29 @@
       return div.innerHTML;
     }
 
-    // New project dialog
-    newProjectBtn.addEventListener('click', () => {
-      dialog.showModal();
+    // New project - open folder picker first, then ask for name
+    newProjectBtn.addEventListener('click', async () => {
+      try {
+        const folder = await GDrive.showFolderPicker();
+        if (folder) {
+          selectedFolderId.value = folder.id;
+          nameDialog.showModal();
+        }
+      } catch (err) {
+        console.error('Folder picker error:', err);
+        alert('Could not open folder picker: ' + err.message);
+      }
     });
 
-    cancelBtn.addEventListener('click', () => {
-      dialog.close();
-      form.reset();
+    // Cancel name dialog
+    cancelNameBtn.addEventListener('click', () => {
+      nameDialog.close();
+      nameForm.reset();
+      selectedFolderId.value = '';
     });
 
-    // Create project
-    form.addEventListener('submit', async (e) => {
+    // Create project after naming
+    nameForm.addEventListener('submit', async (e) => {
       e.preventDefault();
 
       if (!GDrive.isReady()) {
@@ -199,21 +218,22 @@
       }
 
       const name = document.getElementById('project-name').value.trim();
+      const folderId = selectedFolderId.value;
 
       try {
-        const folderId = await GDrive.createProject(name);
-        // Navigate to the new project
-        window.location.href = `scorer.html?project=${encodeURIComponent(folderId)}`;
+        const projectFolderId = await GDrive.createProjectInFolder(folderId, name);
+        window.location.href = `scorer.html?project=${encodeURIComponent(projectFolderId)}`;
       } catch (err) {
         alert('Failed to create project: ' + err.message);
       }
     });
 
-    // Close dialog on backdrop click
-    dialog.addEventListener('click', (e) => {
-      if (e.target === dialog) {
-        dialog.close();
-        form.reset();
+    // Close name dialog on backdrop click
+    nameDialog.addEventListener('click', (e) => {
+      if (e.target === nameDialog) {
+        nameDialog.close();
+        nameForm.reset();
+        selectedFolderId.value = '';
       }
     });
 
@@ -221,6 +241,19 @@
     loginGdriveBtn.addEventListener('click', () => {
       const gdriveBtn = document.getElementById('gdrive-btn');
       if (gdriveBtn) gdriveBtn.click();
+    });
+
+    // Open existing project from Google Drive picker
+    openProjectBtn.addEventListener('click', async () => {
+      try {
+        const folder = await GDrive.showFolderPicker();
+        if (folder) {
+          window.location.href = `scorer.html?project=${encodeURIComponent(folder.id)}`;
+        }
+      } catch (err) {
+        console.error('Folder picker error:', err);
+        alert('Could not open folder picker: ' + err.message);
+      }
     });
 
     // Initialize
