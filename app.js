@@ -197,7 +197,55 @@ let activeManuscript = null;
 const reconstructedLines = {}; // Store editable reconstructed text for each line
 const translationLines = {}; // Store editable translation for each line
 let siglaMappings = {}; // Museum number -> Siglum (from project config)
+
 let showSigla = localStorage.getItem('show_sigla') === 'true'; // Toggle state
+let isDarkMode = localStorage.getItem('dark_mode') === 'true'; // Dark mode state
+
+// Initialize Dark Mode
+function initDarkMode() {
+  if (isDarkMode) {
+    document.body.classList.add('dark-mode');
+  }
+  updateThemeToggleIcon();
+}
+
+// Toggle Dark Mode
+function toggleDarkMode() {
+  isDarkMode = !isDarkMode;
+  localStorage.setItem('dark_mode', isDarkMode);
+
+  document.body.classList.toggle('dark-mode', isDarkMode);
+  updateThemeToggleIcon();
+
+  // Update Ace Editor theme if initialized
+  if (aceEditor) {
+    aceEditor.setTheme(isDarkMode ? 'ace/theme/tomorrow_night' : 'ace/theme/chrome');
+  }
+}
+
+// Update toggle button icon
+function updateThemeToggleIcon() {
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) {
+    if (isDarkMode) {
+      // Sun Icon
+      btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`;
+      btn.title = 'Switch to Light Mode';
+    } else {
+      // Moon Icon
+      btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`;
+      btn.title = 'Switch to Dark Mode';
+    }
+  }
+}
+
+// Setup theme toggle listener
+function setupThemeToggle() {
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) {
+    btn.addEventListener('click', toggleDarkMode);
+  }
+}
 
 // Load manuscripts from local folder via FileSystem API
 async function loadManuscripts() {
@@ -418,8 +466,8 @@ const searchAllBtn = document.getElementById('search-all-btn');
 let aceEditor = null;
 function initAceEditor() {
   aceEditor = ace.edit('editor');
-  aceEditor.setTheme('ace/theme/chrome');
-  aceEditor.session.setMode('ace/mode/text');
+  aceEditor.setTheme(isDarkMode ? 'ace/theme/tomorrow_night' : 'ace/theme/chrome');
+  aceEditor.session.setMode('ace/mode/cuneiform_score');
   aceEditor.setOptions({
     fontSize: '14px',
     fontFamily: '"Consolas", "Monaco", monospace',
@@ -1556,6 +1604,10 @@ async function init() {
 
   // Initialize Ace Editor
   initAceEditor();
+
+  // Initialize Dark Mode
+  initDarkMode();
+  setupThemeToggle();
 
   // Setup resizable panes
   setupPaneResizer();

@@ -21,13 +21,24 @@
   <main class="content">
     <div id="projects-container" class="projects-container">
       <p class="subtitle">Select a project to open</p>
+      
+      <!-- New Drop Zone -->
+      <div id="drop-zone" class="drop-zone">
+        <div class="drop-zone-icon">&#128193;</div>
+        <p><strong>Drag and drop your project folder here</strong></p>
+        <p style="font-size: 0.9rem; margin-top: 0.5rem;">(The best way to see your files!)</p>
+      </div>
+
       <div class="projects-grid" id="projects-grid">
         <!-- Projects loaded dynamically -->
       </div>
 
       <div class="new-project">
         <button id="new-project-btn" class="new-project-btn">+ New Project</button>
-        <button id="open-project-btn" class="open-shared-btn">Open Project</button>
+        <div style="display: inline-block;">
+          <button id="open-project-btn" class="open-shared-btn">Open Project</button>
+        </div>
+        <span class="picker-helper-text">Note: The file picker dialog may hide files inside folders. This is normal security behavior.</span>
       </div>
     </div>
   </main>
@@ -63,6 +74,7 @@
     const projectsContainer = document.getElementById('projects-container');
     const newProjectBtn = document.getElementById('new-project-btn');
     const openProjectBtn = document.getElementById('open-project-btn');
+    const dropZone = document.getElementById('drop-zone');
 
     // Check if File System Access API is supported
     const hasFileSystemAccess = FileSystem.isSupported();
@@ -99,7 +111,7 @@
         projectsGrid.innerHTML = `
           <div class="empty-message">
             <p>No projects yet.</p>
-            <p>Create your first project to get started.</p>
+            <p>Create your first project or drag a folder above to get started.</p>
           </div>
         `;
         return;
@@ -361,6 +373,60 @@
       }
     });
 
+    // Drag and Drop Handling
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+
+    dropZone.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+    });
+
+    dropZone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+
+      const items = [...e.dataTransfer.items];
+      const item = items[0];
+
+      if (!item || item.kind !== 'file') {
+        alert('Please drop a folder.');
+        return;
+      }
+
+      // Get FileSystemHandle
+      const entry = await item.getAsFileSystemHandle();
+
+      if (entry.kind !== 'directory') {
+        alert('Please drop a folder, not a file.');
+        return;
+      }
+
+      try {
+        // We need readwrite access
+        // Drag and drop usually gives read-only by default in some contexts, but let's try to upgrade or just use it.
+        // Actually, with drag and drop, we might not get persistence permissions automatically without a prompt.
+        // But for previewing, we can read. To save, we might need to `requestPermission`.
+        
+        const dirHandle = entry;
+        
+        // Scan folder contents
+        const contents = await scanFolderContents(dirHandle);
+
+        // Store handle for later use
+        pendingDirHandle = dirHandle;
+
+        // Show preview dialog
+        showFolderPreview(dirHandle.name, contents);
+
+      } catch (err) {
+        console.error('Error reading dropped folder:', err);
+        alert('Failed to read folder: ' + err.message);
+      }
+    });
+
     // Cancel preview
     previewCancelBtn.addEventListener('click', () => {
       previewDialog.close();
@@ -378,6 +444,15 @@
       }
 
       try {
+        // Ensure we have readwrite permission before saving
+        // If we got here via Drop, we might need to explicitly request it now
+        if ((await pendingDirHandle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+           if ((await pendingDirHandle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+              alert('Read/Write permission is required to save project changes.');
+              return;
+           }
+        }
+
         previewConfirmBtn.disabled = true;
         previewConfirmBtn.textContent = 'Opening...';
 

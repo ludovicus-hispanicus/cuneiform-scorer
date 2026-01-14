@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,6 +11,8 @@
   <!-- Ace Editor -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-searchbox.js"></script>
+  <!-- Custom Cuneiform Mode -->
+  <script src="cuneiform-score-mode.js"></script>
   <!-- Y.js for real-time collaboration (optional) -->
   <script>
     // Mark collaboration as disabled - Y.js CDN loading is problematic
@@ -17,6 +20,7 @@
     window.COLLAB_ENABLED = false;
   </script>
 </head>
+
 <body>
   <header class="header">
     <div class="header-left">
@@ -30,6 +34,13 @@
       </div>
       <button id="search-all-btn" title="Search all manuscripts (Ctrl+Shift+F)">Search All</button>
       <button id="add-manuscript-btn">+ Add</button>
+      <button id="theme-toggle-btn" title="Toggle Dark/Light Mode"
+        style="display: flex; align-items: center; justify-content: center;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
       <button id="export-btn">Export</button>
     </div>
   </header>
@@ -38,7 +49,8 @@
     <aside class="manuscript-list" id="manuscript-sidebar">
       <div class="sidebar-header">
         <h2>Manuscripts</h2>
-        <button id="toggle-siglum-btn" class="toggle-siglum-btn" title="Toggle between museum number and siglum">M#</button>
+        <button id="toggle-siglum-btn" class="toggle-siglum-btn"
+          title="Toggle between museum number and siglum">M#</button>
       </div>
       <ul id="manuscript-list">
         <!-- Loaded from manuscripts/*.txt -->
@@ -123,4 +135,5 @@
 
   <script src="app.js"></script>
 </body>
+
 </html>
