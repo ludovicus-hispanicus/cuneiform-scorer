@@ -32,7 +32,31 @@
     </div>
   </main>
 
-
+  <!-- Folder Preview Dialog -->
+  <dialog id="folder-preview-dialog" class="dialog folder-preview-dialog">
+    <h2>Folder Contents</h2>
+    <div class="folder-info">
+      <p><strong>Folder:</strong> <span id="preview-folder-name"></span></p>
+    </div>
+    <div class="folder-contents">
+      <div class="contents-section">
+        <h3>Manuscript Files (<span id="preview-file-count">0</span>)</h3>
+        <ul id="preview-file-list" class="preview-file-list"></ul>
+      </div>
+      <div id="preview-existing-project" class="contents-section hidden">
+        <h3>Existing Project Data</h3>
+        <ul id="preview-existing-list" class="preview-file-list"></ul>
+      </div>
+    </div>
+    <label class="project-name-input">
+      Project Name
+      <input type="text" id="preview-project-name" placeholder="Enter project name">
+    </label>
+    <div class="dialog-actions">
+      <button type="button" id="preview-cancel-btn">Cancel</button>
+      <button type="button" id="preview-confirm-btn" class="btn-primary">Open Project</button>
+    </div>
+  </dialog>
 
   <script>
     const projectsGrid = document.getElementById('projects-grid');
@@ -211,7 +235,105 @@
       }
     });
 
-    // Open project button - uses File System Access API
+    // Open project button - uses File System Access API with preview dialog
+    const previewDialog = document.getElementById('folder-preview-dialog');
+    const previewFolderName = document.getElementById('preview-folder-name');
+    const previewFileCount = document.getElementById('preview-file-count');
+    const previewFileList = document.getElementById('preview-file-list');
+    const previewExistingProject = document.getElementById('preview-existing-project');
+    const previewExistingList = document.getElementById('preview-existing-list');
+    const previewProjectName = document.getElementById('preview-project-name');
+    const previewCancelBtn = document.getElementById('preview-cancel-btn');
+    const previewConfirmBtn = document.getElementById('preview-confirm-btn');
+
+    let pendingDirHandle = null;
+
+    // Scan folder for all contents
+    async function scanFolderContents(dirHandle) {
+      const result = {
+        txtFiles: [],
+        hasProjectJson: false,
+        hasScoreData: false,
+        hasScoreTxt: false,
+        hasManuscriptsFolder: false,
+        projectName: null
+      };
+
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind === 'file') {
+          if (entry.name === 'project.json') {
+            result.hasProjectJson = true;
+            try {
+              const file = await entry.getFile();
+              const config = JSON.parse(await file.text());
+              result.projectName = config.name;
+            } catch (e) {}
+          } else if (entry.name === 'score-data.json') {
+            result.hasScoreData = true;
+          } else if (entry.name === 'score.txt') {
+            result.hasScoreTxt = true;
+          } else if (entry.name.endsWith('.txt')) {
+            result.txtFiles.push(entry.name.replace('.txt', ''));
+          }
+        } else if (entry.kind === 'directory' && entry.name === 'manuscripts') {
+          result.hasManuscriptsFolder = true;
+        }
+      }
+
+      // If manuscripts folder exists, get files from there instead
+      if (result.hasManuscriptsFolder) {
+        result.txtFiles = [];
+        const msHandle = await dirHandle.getDirectoryHandle('manuscripts');
+        for await (const entry of msHandle.values()) {
+          if (entry.kind === 'file' && entry.name.endsWith('.txt')) {
+            result.txtFiles.push(entry.name.replace('.txt', ''));
+          }
+        }
+      }
+
+      return result;
+    }
+
+    // Show preview dialog
+    function showFolderPreview(folderName, contents) {
+      previewFolderName.textContent = folderName;
+      previewFileCount.textContent = contents.txtFiles.length;
+
+      // Show manuscript files
+      if (contents.txtFiles.length > 0) {
+        previewFileList.innerHTML = contents.txtFiles
+          .sort()
+          .map(f => `<li>${escapeHtml(f)}.txt</li>`)
+          .join('');
+      } else {
+        previewFileList.innerHTML = '<li style="background:#ffebee;color:#c62828;">No .txt files found</li>';
+      }
+
+      // Show existing project data if any
+      const existingItems = [];
+      if (contents.hasProjectJson) existingItems.push('project.json');
+      if (contents.hasScoreData) existingItems.push('score-data.json');
+      if (contents.hasScoreTxt) existingItems.push('score.txt');
+      if (contents.hasManuscriptsFolder) existingItems.push('manuscripts/');
+
+      if (existingItems.length > 0) {
+        previewExistingProject.classList.remove('hidden');
+        previewExistingList.innerHTML = existingItems
+          .map(f => `<li class="existing-file">${escapeHtml(f)}</li>`)
+          .join('');
+      } else {
+        previewExistingProject.classList.add('hidden');
+      }
+
+      // Set default project name
+      previewProjectName.value = contents.projectName || folderName;
+
+      // Enable/disable confirm button
+      previewConfirmBtn.disabled = contents.txtFiles.length === 0;
+
+      previewDialog.showModal();
+    }
+
     openProjectBtn.addEventListener('click', async () => {
       if (!hasFileSystemAccess) {
         alert('Your browser does not support the File System Access API. Please use Chrome or Edge.');
@@ -223,36 +345,66 @@
           mode: 'readwrite'
         });
 
-        const folderName = dirHandle.name;
+        // Scan folder contents
+        const contents = await scanFolderContents(dirHandle);
 
-        // Check what exists in the folder
-        const { txtFiles, hasManuscriptsFolder } = await FileSystem.listTxtFiles(dirHandle);
+        // Store handle for later use
+        pendingDirHandle = dirHandle;
 
-        // Validate: need at least one .txt file
-        if (txtFiles.length === 0) {
-          alert('No .txt manuscript files found in this folder.\n\nPlease select a folder containing at least one .txt file.');
-          return;
-        }
+        // Show preview dialog
+        showFolderPreview(dirHandle.name, contents);
 
-        // Ask for project name
-        const projectName = prompt(`Opening folder: ${folderName}\n\nFound ${txtFiles.length} manuscript file(s).\n\nEnter a name for this project:`, folderName);
-        if (!projectName) return;
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.error('Error selecting folder:', err);
+        alert('Failed to read folder: ' + err.message);
+      }
+    });
 
-        // Initialize project structure (creates manuscripts/, project.json, index.json if needed)
-        await FileSystem.initializeProject(dirHandle, projectName);
+    // Cancel preview
+    previewCancelBtn.addEventListener('click', () => {
+      previewDialog.close();
+      pendingDirHandle = null;
+    });
+
+    // Confirm and open project
+    previewConfirmBtn.addEventListener('click', async () => {
+      if (!pendingDirHandle) return;
+
+      const projectName = previewProjectName.value.trim();
+      if (!projectName) {
+        alert('Please enter a project name');
+        return;
+      }
+
+      try {
+        previewConfirmBtn.disabled = true;
+        previewConfirmBtn.textContent = 'Opening...';
+
+        // Initialize project structure
+        await FileSystem.initializeProject(pendingDirHandle, projectName);
 
         // Save to IndexedDB
         const projectId = FileSystem.generateProjectId();
-        await FileSystem.saveProject(projectId, dirHandle, projectName);
+        await FileSystem.saveProject(projectId, pendingDirHandle, projectName);
 
         // Store project ID and navigate to scorer
         sessionStorage.setItem('currentProjectId', projectId);
         window.location.href = 'scorer.html';
 
       } catch (err) {
-        if (err.name === 'AbortError') return;
         console.error('Error opening project:', err);
         alert('Failed to open project: ' + err.message);
+        previewConfirmBtn.disabled = false;
+        previewConfirmBtn.textContent = 'Open Project';
+      }
+    });
+
+    // Close dialog on backdrop click
+    previewDialog.addEventListener('click', (e) => {
+      if (e.target === previewDialog) {
+        previewDialog.close();
+        pendingDirHandle = null;
       }
     });
 
