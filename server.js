@@ -143,7 +143,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Create a new project
+  // Create a new project (or initialize existing folder)
   if (req.method === 'POST' && req.url === '/api/projects') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -159,31 +159,138 @@ const server = http.createServer((req, res) => {
         }
 
         const projectDir = path.join(PROJECTS_DIR, folder);
-        if (fs.existsSync(projectDir)) {
+        const configPath = path.join(projectDir, 'project.json');
+        const msDir = path.join(projectDir, 'manuscripts');
+
+        // Check if folder exists but has no project.json (initialize existing folder)
+        if (fs.existsSync(projectDir) && !fs.existsSync(configPath)) {
+          // Initialize existing folder as project
+          // Look for .txt files in root or manuscripts subfolder
+          let txtFiles = [];
+
+          // Check root folder for .txt files
+          const rootFiles = fs.readdirSync(projectDir);
+          txtFiles = rootFiles.filter(f => f.endsWith('.txt') && f !== 'score.txt');
+
+          // If manuscripts folder exists, use that instead
+          if (fs.existsSync(msDir)) {
+            txtFiles = fs.readdirSync(msDir).filter(f => f.endsWith('.txt'));
+          } else {
+            // Create manuscripts folder and move .txt files there
+            fs.mkdirSync(msDir);
+            for (const file of txtFiles) {
+              const src = path.join(projectDir, file);
+              const dest = path.join(msDir, file);
+              fs.renameSync(src, dest);
+            }
+          }
+
+          // Create project.json
+          fs.writeFileSync(
+            configPath,
+            JSON.stringify({ name, created: new Date().toISOString() }, null, 2)
+          );
+
+          // Create index.json from found .txt files
+          const sigla = txtFiles.map(f => f.replace('.txt', ''));
+          fs.writeFileSync(
+            path.join(msDir, 'index.json'),
+            JSON.stringify(sigla, null, 2)
+          );
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, folder, initialized: true, manuscripts: sigla.length }));
+          console.log(`Initialized existing folder as project: ${folder} (${sigla.length} manuscripts found)`);
+          return;
+        }
+
+        // Check if project already fully exists
+        if (fs.existsSync(configPath)) {
           res.writeHead(400);
           res.end('Project already exists');
           return;
         }
 
-        // Create project structure
-        fs.mkdirSync(projectDir);
-        fs.mkdirSync(path.join(projectDir, 'manuscripts'));
+        // Create new project structure
+        if (!fs.existsSync(projectDir)) {
+          fs.mkdirSync(projectDir);
+        }
+        if (!fs.existsSync(msDir)) {
+          fs.mkdirSync(msDir);
+        }
 
         // Create project config
         fs.writeFileSync(
-          path.join(projectDir, 'project.json'),
+          configPath,
           JSON.stringify({ name, created: new Date().toISOString() }, null, 2)
         );
 
         // Create default manuscript index
         fs.writeFileSync(
-          path.join(projectDir, 'manuscripts', 'index.json'),
+          path.join(msDir, 'index.json'),
           '[]'
         );
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, folder }));
         console.log(`Created project: ${folder}`);
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Import folder (from File System Access API)
+  if (req.method === 'POST' && req.url === '/api/projects/import-folder') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { name, folder, files } = JSON.parse(body);
+
+        // Validate folder name
+        if (!/^[a-zA-Z0-9_-]+$/.test(folder)) {
+          res.writeHead(400);
+          res.end('Invalid folder name');
+          return;
+        }
+
+        const projectDir = path.join(PROJECTS_DIR, folder);
+        const configPath = path.join(projectDir, 'project.json');
+        const msDir = path.join(projectDir, 'manuscripts');
+
+        // Create project directory structure
+        if (!fs.existsSync(projectDir)) {
+          fs.mkdirSync(projectDir, { recursive: true });
+        }
+        if (!fs.existsSync(msDir)) {
+          fs.mkdirSync(msDir, { recursive: true });
+        }
+
+        // Write manuscript files
+        const sigla = [];
+        for (const file of files) {
+          const filename = file.name.endsWith('.txt') ? file.name : file.name + '.txt';
+          const filepath = path.join(msDir, filename);
+          fs.writeFileSync(filepath, file.content, 'utf8');
+          sigla.push(filename.replace('.txt', ''));
+        }
+
+        // Create or update project.json
+        const config = fs.existsSync(configPath)
+          ? JSON.parse(fs.readFileSync(configPath, 'utf8'))
+          : { created: new Date().toISOString() };
+        config.name = name;
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+        // Create index.json
+        fs.writeFileSync(path.join(msDir, 'index.json'), JSON.stringify(sigla, null, 2));
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, folder, manuscripts: sigla.length }));
+        console.log(`Imported folder as project: ${folder} (${sigla.length} manuscripts)`);
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));

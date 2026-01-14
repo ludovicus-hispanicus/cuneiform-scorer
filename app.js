@@ -2,23 +2,19 @@
 // PROJECT CONFIGURATION
 // ===========================================
 
-// Get project from URL params (this is now a Google Drive folder ID)
-const urlParams = new URLSearchParams(window.location.search);
-const projectFolder = urlParams.get('project');
+// Get project from sessionStorage (set by index.html)
+const projectId = sessionStorage.getItem('currentProjectId');
 
 // Redirect to index if no project specified
-if (!projectFolder) {
+if (!projectId) {
   window.location.href = 'index.html';
 }
 
-// Base path for this project's files (legacy - for local server mode)
-const projectPath = `projects/${projectFolder}`;
-
-// Track Drive file IDs for each manuscript
-const driveFileIds = {};
+// Directory handle for file operations (loaded in init)
+let dirHandle = null;
 
 // ===========================================
-// COLLABORATION SETUP (Y.js + GitHub)
+// COLLABORATION SETUP (Y.js)
 // ===========================================
 
 // Y.js document and provider
@@ -27,14 +23,6 @@ let provider = null;
 let yManuscripts = null;  // Y.Map for manuscript content
 let yReconstructed = null; // Y.Map for reconstructed lines
 let awareness = null;
-
-// GitHub config
-let githubConfig = {
-  token: localStorage.getItem('github_token') || null,
-  owner: localStorage.getItem('github_owner') || null,
-  repo: localStorage.getItem('github_repo') || null,
-  connected: false
-};
 
 // User info
 const userColors = ['#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#00bcd4', '#009688', '#4caf50', '#ff9800', '#ff5722'];
@@ -60,8 +48,8 @@ function initCollaboration() {
   yManuscripts = ydoc.getMap('manuscripts');
   yReconstructed = ydoc.getMap('reconstructed');
 
-  // Get room name from project folder
-  const roomName = `manuscript-scorer-${projectFolder}`;
+  // Get room name from project ID
+  const roomName = `manuscript-scorer-${projectId}`;
 
   // Connect to WebSocket server
   const wsUrl = `ws://${window.location.host}?room=${roomName}`;
@@ -176,212 +164,27 @@ function syncReconstructedToYjs(lineNum, text) {
 }
 
 // ===========================================
-// GITHUB INTEGRATION
+// STATUS INDICATOR
 // ===========================================
 
-// GitHub button handler
-function setupGitHubButton() {
-  const btn = document.getElementById('github-btn');
-  if (!btn) return;  // Element might not exist on all pages
+function setStatus(status, text) {
+  const indicator = document.getElementById('status-indicator');
+  const statusText = document.getElementById('status-text');
 
-  btn.addEventListener('click', () => {
-    if (githubConfig.connected) {
-      showGitHubMenu();
-    } else {
-      showGitHubConnectDialog();
+  if (indicator) {
+    indicator.className = 'gdrive-indicator';
+    if (status === 'connected' || status === 'saved') {
+      indicator.classList.add('connected');
+    } else if (status === 'syncing' || status === 'saving') {
+      indicator.classList.add('syncing');
+    } else if (status === 'error') {
+      indicator.classList.add('error');
     }
-  });
-
-  // Check if already configured
-  if (githubConfig.token && githubConfig.owner && githubConfig.repo) {
-    validateGitHubConnection();
-  }
-}
-
-function showGitHubConnectDialog() {
-  const token = prompt('Enter your GitHub Personal Access Token:\n(Create one at github.com/settings/tokens with "repo" scope)');
-  if (!token) return;
-
-  const repoUrl = prompt('Enter GitHub repo (format: owner/repo):');
-  if (!repoUrl || !repoUrl.includes('/')) {
-    alert('Invalid format. Use: owner/repo');
-    return;
   }
 
-  const [owner, repo] = repoUrl.split('/');
-
-  githubConfig.token = token;
-  githubConfig.owner = owner;
-  githubConfig.repo = repo;
-
-  localStorage.setItem('github_token', token);
-  localStorage.setItem('github_owner', owner);
-  localStorage.setItem('github_repo', repo);
-
-  validateGitHubConnection();
-}
-
-async function validateGitHubConnection() {
-  try {
-    const res = await fetch('/api/github/list', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: githubConfig.token,
-        owner: githubConfig.owner,
-        repo: githubConfig.repo,
-        path: ''
-      })
-    });
-
-    if (res.ok) {
-      githubConfig.connected = true;
-      const btn = document.getElementById('github-btn');
-      btn.textContent = `${githubConfig.owner}/${githubConfig.repo}`;
-      btn.classList.add('connected');
-      console.log('GitHub connected successfully');
-    } else {
-      throw new Error('Failed to connect');
-    }
-  } catch (err) {
-    console.error('GitHub connection failed:', err);
-    githubConfig.connected = false;
-    alert('Failed to connect to GitHub. Check your token and repo.');
+  if (statusText && text) {
+    statusText.textContent = text;
   }
-}
-
-function showGitHubMenu() {
-  const action = prompt('GitHub Actions:\n1. Pull from GitHub\n2. Push to GitHub\n3. Disconnect\n\nEnter number:');
-
-  if (action === '1') {
-    pullFromGitHub();
-  } else if (action === '2') {
-    pushToGitHub();
-  } else if (action === '3') {
-    disconnectGitHub();
-  }
-}
-
-async function pullFromGitHub() {
-  if (!githubConfig.connected) return;
-
-  try {
-    // Get manuscripts folder
-    const res = await fetch('/api/github/list', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: githubConfig.token,
-        owner: githubConfig.owner,
-        repo: githubConfig.repo,
-        path: 'manuscripts'
-      })
-    });
-
-    const files = await res.json();
-    if (!Array.isArray(files)) {
-      alert('No manuscripts folder found in repo');
-      return;
-    }
-
-    // Load each .txt file
-    for (const file of files.filter(f => f.name.endsWith('.txt'))) {
-      const fileRes = await fetch('/api/github/get', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: githubConfig.token,
-          owner: githubConfig.owner,
-          repo: githubConfig.repo,
-          path: file.path
-        })
-      });
-
-      const fileData = await fileRes.json();
-      const content = atob(fileData.content);
-      const siglum = file.name.replace('.txt', '');
-      const id = `ms-${siglum.toLowerCase()}`;
-
-      manuscripts[id] = { siglum, content };
-      syncManuscriptToYjs(id);
-
-      // Add to sidebar if new
-      if (!document.querySelector(`[data-id="${id}"]`)) {
-        addManuscriptToList(id, siglum);
-      }
-    }
-
-    // Load first manuscript
-    const firstId = Object.keys(manuscripts)[0];
-    if (firstId) {
-      loadManuscript(firstId);
-    }
-
-    alert('Pulled from GitHub successfully!');
-  } catch (err) {
-    console.error('Pull failed:', err);
-    alert('Failed to pull from GitHub: ' + err.message);
-  }
-}
-
-async function pushToGitHub() {
-  if (!githubConfig.connected) return;
-
-  try {
-    for (const [id, ms] of Object.entries(manuscripts)) {
-      // Get current SHA if file exists
-      let sha = null;
-      try {
-        const existingRes = await fetch('/api/github/get', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token: githubConfig.token,
-            owner: githubConfig.owner,
-            repo: githubConfig.repo,
-            path: `manuscripts/${ms.siglum}.txt`
-          })
-        });
-        if (existingRes.ok) {
-          const existing = await existingRes.json();
-          sha = existing.sha;
-        }
-      } catch (e) {
-        // File doesn't exist yet
-      }
-
-      // Push file
-      await fetch('/api/github/contents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: githubConfig.token,
-          owner: githubConfig.owner,
-          repo: githubConfig.repo,
-          path: `manuscripts/${ms.siglum}.txt`,
-          content: ms.content,
-          message: `Update ${ms.siglum}.txt from Manuscript Scorer`,
-          sha
-        })
-      });
-    }
-
-    alert('Pushed to GitHub successfully!');
-  } catch (err) {
-    console.error('Push failed:', err);
-    alert('Failed to push to GitHub: ' + err.message);
-  }
-}
-
-function disconnectGitHub() {
-  githubConfig = { token: null, owner: null, repo: null, connected: false };
-  localStorage.removeItem('github_token');
-  localStorage.removeItem('github_owner');
-  localStorage.removeItem('github_repo');
-
-  const btn = document.getElementById('github-btn');
-  btn.textContent = 'Connect GitHub';
-  btn.classList.remove('connected');
 }
 
 // ===========================================
@@ -396,50 +199,41 @@ const translationLines = {}; // Store editable translation for each line
 let siglaMappings = {}; // Museum number -> Siglum (from project config)
 let showSigla = localStorage.getItem('show_sigla') === 'true'; // Toggle state
 
-// Load manuscripts from Google Drive
+// Load manuscripts from local folder via FileSystem API
 async function loadManuscripts() {
-  // Check if GDrive is ready
-  if (!window.GDrive || !GDrive.isReady()) {
-    console.log('Google Drive not connected, showing login prompt');
-    setEditorContent('Please connect to Google Drive to load manuscripts.');
-    return;
-  }
-
   try {
-    GDrive.setStatus('syncing', 'Loading...');
+    setStatus('syncing', 'Loading...');
 
-    // Load project config from Drive
-    const config = await GDrive.getProjectConfig(projectFolder);
+    // Load project config from folder
+    const config = await FileSystem.readProjectConfig(dirHandle);
     if (config) {
       document.getElementById('project-title').textContent = config.name;
       document.title = `${config.name} - Manuscript Scorer`;
       siglaMappings = config.sigla || {};
     }
 
-    // List manuscripts from Drive
-    const files = await GDrive.listManuscripts(projectFolder);
+    // Load manuscript index
+    const fileNames = await FileSystem.readManuscriptIndex(dirHandle);
+    if (!fileNames || fileNames.length === 0) {
+      setEditorContent('No manuscripts yet. Click "+ Add" to create one.');
+      setStatus('connected', 'Ready');
+      return;
+    }
 
-    for (const file of files) {
-      // Skip non-manuscript files
-      if (file.name === 'project.json' || file.name === 'score.txt') continue;
-      if (!file.name.endsWith('.txt')) continue;
+    // Load each manuscript
+    for (const fileName of fileNames) {
+      const content = await FileSystem.readManuscript(dirHandle, fileName);
+      if (content !== null) {
+        const id = `ms-${fileName.toLowerCase()}`;
 
-      // Load file content
-      const content = await GDrive.readFile(file.id);
-      const fileName = file.name.replace('.txt', '');
-      const id = `ms-${fileName.toLowerCase()}`;
+        manuscripts[id] = {
+          siglum: fileName,
+          displaySiglum: siglaMappings[fileName] || null,
+          content
+        };
 
-      manuscripts[id] = {
-        siglum: fileName,
-        displaySiglum: siglaMappings[fileName] || null,
-        content: content || ''
-      };
-
-      // Track Drive file ID
-      driveFileIds[id] = file.id;
-
-      // Add to sidebar
-      addManuscriptToList(id, fileName);
+        addManuscriptToList(id, fileName);
+      }
     }
 
     // Update toggle button state
@@ -453,85 +247,11 @@ async function loadManuscripts() {
       setEditorContent('No manuscripts yet. Click "+ Add" to create one.');
     }
 
-    GDrive.setStatus('connected', 'Connected');
+    setStatus('connected', 'Ready');
   } catch (err) {
     console.error('Failed to load manuscripts:', err);
-    GDrive.setStatus('error', 'Load failed');
-    setEditorContent('Failed to load manuscripts. Please try reconnecting to Google Drive.');
-  }
-}
-
-// Function called by gdrive.js after authentication completes
-async function loadManuscriptsFromDrive() {
-  // Clear existing manuscripts from sidebar
-  const msList = document.getElementById('manuscripts-list');
-  if (msList) {
-    // Keep only the add button
-    const items = msList.querySelectorAll('.manuscript-item');
-    items.forEach(item => item.remove());
-  }
-
-  // Clear manuscripts object
-  for (const key of Object.keys(manuscripts)) {
-    delete manuscripts[key];
-  }
-  for (const key of Object.keys(driveFileIds)) {
-    delete driveFileIds[key];
-  }
-
-  // Reload from Drive
-  await loadManuscripts();
-
-  // Sync to Y.js if collaboration is enabled
-  for (const id of Object.keys(manuscripts)) {
-    syncManuscriptToYjs(id);
-  }
-}
-
-// Legacy function to load from server (if GDrive not available)
-async function loadManuscriptsFromServer() {
-  try {
-    // Load project config to get title and sigla mappings
-    const configRes = await fetch(`/api/projects/${projectFolder}`);
-    if (configRes.ok) {
-      const config = await configRes.json();
-      document.getElementById('project-title').textContent = config.name;
-      document.title = `${config.name} - Manuscript Scorer`;
-      siglaMappings = config.sigla || {};
-    }
-
-    // Load manifest
-    const manifestRes = await fetch(`${projectPath}/manuscripts/index.json`);
-    const fileNames = await manifestRes.json();
-
-    // Load each manuscript
-    for (const fileName of fileNames) {
-      const res = await fetch(`${projectPath}/manuscripts/${fileName}.txt`);
-      if (res.ok) {
-        const content = await res.text();
-        const id = `ms-${fileName.toLowerCase()}`;
-
-        manuscripts[id] = {
-          siglum: fileName,
-          displaySiglum: siglaMappings[fileName] || null,
-          content
-        };
-
-        addManuscriptToList(id, fileName);
-      }
-    }
-
-    updateSiglaToggle();
-
-    const firstId = Object.keys(manuscripts)[0];
-    if (firstId) {
-      loadManuscript(firstId);
-    } else {
-      setEditorContent('No manuscripts yet. Click "+ Add" to create one.');
-    }
-  } catch (err) {
-    console.error('Failed to load manuscripts:', err);
-    setEditorContent('No manuscripts yet. Click "+ Add" to create one.');
+    setStatus('error', 'Load failed');
+    setEditorContent('Failed to load manuscripts. Check folder permissions.');
   }
 }
 
@@ -1122,66 +842,30 @@ function saveCurrentManuscript() {
   }
 }
 
-// Save manuscript to Google Drive
+// Save manuscript to local folder via FileSystem API
 async function saveToFile(id) {
   const ms = manuscripts[id];
-  if (!ms) return;
-
-  // Check if GDrive is available
-  if (!window.GDrive || !GDrive.isReady()) {
-    console.log('Google Drive not connected, skipping save');
-    return;
-  }
+  if (!ms || !dirHandle) return;
 
   try {
-    GDrive.setStatus('syncing', 'Saving...');
+    setStatus('syncing', 'Saving...');
 
-    // Save to Google Drive
-    const fileId = await GDrive.saveFile(projectFolder, `${ms.siglum}.txt`, ms.content);
-
-    // Track the file ID
-    driveFileIds[id] = fileId;
-
-    console.log(`Saved ${ms.siglum}.txt to Drive`);
-    GDrive.setStatus('connected', 'Saved');
+    await FileSystem.writeManuscript(dirHandle, ms.siglum, ms.content);
+    console.log(`Saved ${ms.siglum}.txt`);
+    setStatus('connected', 'Saved');
+    await updateManuscriptIndex();
   } catch (err) {
     console.error('Save error:', err);
-    GDrive.setStatus('error', 'Save failed');
+    setStatus('error', 'Save failed');
   }
 }
 
-// Legacy save to server (not used with GDrive)
-async function saveToFileServer(id) {
-  const ms = manuscripts[id];
-  if (!ms) return;
-
-  try {
-    const res = await fetch(`${projectPath}/manuscripts/${ms.siglum}.txt`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/plain' },
-      body: ms.content
-    });
-
-    if (res.ok) {
-      console.log(`Saved ${ms.siglum}.txt`);
-      await updateManuscriptIndex();
-    } else {
-      console.error('Failed to save:', await res.text());
-    }
-  } catch (err) {
-    console.error('Save error:', err);
-  }
-}
-
-// Update the manuscripts index.json (legacy - for server mode)
+// Update the manuscripts index.json
 async function updateManuscriptIndex() {
+  if (!dirHandle) return;
   const sigla = Object.values(manuscripts).map(ms => ms.siglum);
   try {
-    await fetch(`${projectPath}/manuscripts/index.json`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(sigla)
-    });
+    await FileSystem.writeManuscriptIndex(dirHandle, sigla);
   } catch (err) {
     console.error('Failed to update index:', err);
   }
@@ -1196,7 +880,7 @@ function debouncedSave() {
       await saveToFile(activeManuscript);
     }
     await saveScoreToFile();
-  }, 1500); // Save 1.5 seconds after last edit (slightly longer for network)
+  }, 1000); // Save 1 second after last edit
 }
 
 // Load a manuscript into the editor
@@ -1221,12 +905,6 @@ function loadManuscript(id) {
 
 // Add a new manuscript
 async function addManuscript() {
-  // Check if GDrive is connected
-  if (!window.GDrive || !GDrive.isReady()) {
-    alert('Please connect to Google Drive first');
-    return;
-  }
-
   // Show choice dialog
   const choice = await showAddManuscriptDialog();
   if (!choice) return;
@@ -1293,12 +971,12 @@ async function createNewManuscript() {
   // Add to list
   addManuscriptToList(id, siglum);
 
-  // Save to Drive immediately
+  // Save to local folder immediately
   try {
-    const fileId = await GDrive.saveFile(projectFolder, `${siglum}.txt`, initialContent);
-    driveFileIds[id] = fileId;
+    await FileSystem.writeManuscript(dirHandle, siglum, initialContent);
+    await updateManuscriptIndex();
   } catch (err) {
-    console.error('Failed to save new manuscript to Drive:', err);
+    console.error('Failed to save new manuscript:', err);
   }
 
   // Switch to it
@@ -1342,16 +1020,18 @@ async function importManuscripts() {
       // Add to list
       addManuscriptToList(id, siglum);
 
-      // Save to Drive
+      // Save to local folder
       try {
-        const fileId = await GDrive.saveFile(projectFolder, `${siglum}.txt`, content);
-        driveFileIds[id] = fileId;
+        await FileSystem.writeManuscript(dirHandle, siglum, content);
         importedCount++;
         lastImportedId = id;
       } catch (err) {
-        console.error(`Failed to save ${siglum} to Drive:`, err);
+        console.error(`Failed to save ${siglum}:`, err);
       }
     }
+
+    // Update index
+    await updateManuscriptIndex();
 
     // Show summary
     let message = `Imported ${importedCount} manuscript(s).`;
@@ -1768,19 +1448,14 @@ function generateScoreText() {
   return text;
 }
 
-// Save score to Google Drive
+// Save score to local folder via FileSystem API
 async function saveScoreToFile() {
   const text = generateScoreText();
-  if (!text) return;
-
-  // Check if GDrive is available
-  if (!window.GDrive || !GDrive.isReady()) {
-    return;
-  }
+  if (!text || !dirHandle) return;
 
   try {
-    await GDrive.saveFile(projectFolder, 'score.txt', text);
-    console.log('Saved score.txt to Drive');
+    await FileSystem.writeScore(dirHandle, text);
+    console.log('Saved score.txt');
   } catch (err) {
     console.error('Score save error:', err);
   }
@@ -1805,75 +1480,35 @@ function exportScore() {
 
 exportBtn.addEventListener('click', exportScore);
 
-// Setup Google Drive UI handlers
-function setupGoogleDriveUI() {
-  const gdriveBtn = document.getElementById('gdrive-btn');
-  const setupModal = document.getElementById('gdrive-setup-modal');
-  const closeSetupBtn = document.getElementById('close-gdrive-setup');
-  const saveClientIdBtn = document.getElementById('save-client-id-btn');
-  const clientIdInput = document.getElementById('client-id-input');
-
-  if (!gdriveBtn) return;
-
-  // Main Google Drive button click
-  gdriveBtn.addEventListener('click', () => {
-    if (window.GDrive && GDrive.isReady()) {
-      // Already connected - could add disconnect option here
-      return;
-    }
-
-    // Check if we have a client ID stored
-    const storedClientId = localStorage.getItem('gdrive_client_id');
-    if (storedClientId) {
-      // Have client ID, start auth
-      window.GDrive && GDrive.init();
-    } else {
-      // Show setup modal to enter client ID
-      setupModal && setupModal.classList.remove('hidden');
-    }
-  });
-
-  // Close setup modal
-  closeSetupBtn && closeSetupBtn.addEventListener('click', () => {
-    setupModal && setupModal.classList.add('hidden');
-  });
-
-  // Click outside modal to close
-  setupModal && setupModal.addEventListener('click', (e) => {
-    if (e.target === setupModal) {
-      setupModal.classList.add('hidden');
-    }
-  });
-
-  // Save client ID and connect
-  saveClientIdBtn && saveClientIdBtn.addEventListener('click', async () => {
-    const clientId = clientIdInput.value.trim();
-    if (!clientId) {
-      alert('Please enter a Google Client ID');
-      return;
-    }
-
-    // Store the client ID
-    localStorage.setItem('gdrive_client_id', clientId);
-
-    // Close modal
-    setupModal && setupModal.classList.add('hidden');
-
-    // Initialize Google Drive
-    if (window.GDrive) {
-      await GDrive.init();
-    }
-  });
-
-  // Pre-fill client ID input if we have one stored
-  const existingClientId = localStorage.getItem('gdrive_client_id');
-  if (existingClientId && clientIdInput) {
-    clientIdInput.value = existingClientId;
-  }
-}
-
 // Initial load
 async function init() {
+  // Get directory handle from IndexedDB
+  try {
+    const projects = await FileSystem.getSavedProjects();
+    const project = projects.find(p => p.id === projectId);
+
+    if (!project) {
+      alert('Project not found. Returning to project list.');
+      window.location.href = 'index.html';
+      return;
+    }
+
+    // Check/request permission for the folder
+    const granted = await FileSystem.requestPermission(project.handle);
+    if (!granted) {
+      alert('Permission denied. Please grant access to the folder.');
+      window.location.href = 'index.html';
+      return;
+    }
+
+    dirHandle = project.handle;
+  } catch (err) {
+    console.error('Failed to load project handle:', err);
+    alert('Failed to load project. Returning to project list.');
+    window.location.href = 'index.html';
+    return;
+  }
+
   // Initialize Ace Editor
   initAceEditor();
 
@@ -1892,23 +1527,7 @@ async function init() {
   // Initialize collaboration
   initCollaboration();
 
-  // Setup GitHub button
-  setupGitHubButton();
-
-  // Setup Google Drive UI handlers
-  setupGoogleDriveUI();
-
-  // Initialize Google Drive if client ID exists
-  if (window.GDrive && localStorage.getItem('gdrive_client_id')) {
-    try {
-      await GDrive.init();
-      // GDrive.init() is fully async and waits for token validation
-    } catch (err) {
-      console.warn('Google Drive init failed:', err);
-    }
-  }
-
-  // Load manuscripts (will use Google Drive if connected, otherwise show message)
+  // Load manuscripts from local folder
   await loadManuscripts();
 
   // Sync loaded manuscripts to Y.js
@@ -1916,7 +1535,7 @@ async function init() {
     syncManuscriptToYjs(id);
   }
 
-  console.log('Manuscript Scorer initialized with Ace Editor');
+  console.log('Manuscript Scorer initialized');
 }
 
 init();

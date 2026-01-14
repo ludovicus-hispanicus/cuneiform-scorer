@@ -327,6 +327,15 @@ body {
   padding-right: 3rem;
   text-decoration: none;
   color: inherit;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-link:hover {
+  background: var(--accent-light);
 }
 
 .manage-link {
@@ -374,6 +383,34 @@ body {
 .project-settings-btn:hover {
   background: var(--bg-light);
   color: var(--accent);
+}
+
+.project-remove-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 2.5rem;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  font-size: 1.4rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  opacity: 0;
+}
+
+.project-card:hover .project-remove-btn {
+  opacity: 1;
+}
+
+.project-remove-btn:hover {
+  background: #ffebee;
+  color: #dc3545;
 }
 
 .project-card h3 {

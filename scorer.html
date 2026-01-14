@@ -5,13 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Manuscript Scorer</title>
   <link rel="stylesheet" href="styles.css">
+  <!-- File System API -->
+  <script src="file-system.js"></script>
   <!-- Ace Editor -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-searchbox.js"></script>
-  <!-- Google Identity Services for OAuth -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Google API Client -->
-  <script src="https://apis.google.com/js/api.js" async defer></script>
   <!-- Y.js for real-time collaboration (optional) -->
   <script>
     // Mark collaboration as disabled - Y.js CDN loading is problematic
@@ -26,11 +24,10 @@
       <h1 id="project-title">Manuscript Scorer</h1>
     </div>
     <div class="header-actions">
-      <div id="gdrive-status" class="gdrive-status">
-        <span id="gdrive-indicator" class="gdrive-indicator"></span>
-        <span id="gdrive-text">Not connected</span>
+      <div id="status" class="gdrive-status">
+        <span id="status-indicator" class="gdrive-indicator connected"></span>
+        <span id="status-text">Ready</span>
       </div>
-      <button id="gdrive-btn" class="gdrive-btn">Connect Google Drive</button>
       <button id="search-all-btn" title="Search all manuscripts (Ctrl+Shift+F)">Search All</button>
       <button id="add-manuscript-btn">+ Add</button>
       <button id="export-btn">Export</button>
@@ -100,31 +97,6 @@
     </div>
   </div>
 
-  <!-- Google Drive Setup Modal -->
-  <div id="gdrive-setup-modal" class="modal hidden">
-    <div class="modal-content gdrive-setup-modal">
-      <div class="modal-header">
-        <h3>Connect Google Drive</h3>
-        <button class="modal-close" id="close-gdrive-setup">&times;</button>
-      </div>
-      <div class="gdrive-setup-content">
-        <p>To use Google Drive sync, you need a Google Cloud Client ID.</p>
-        <ol class="setup-steps">
-          <li>Go to <a href="https://console.cloud.google.com" target="_blank">Google Cloud Console</a></li>
-          <li>Create a project and enable Google Drive API</li>
-          <li>Create OAuth credentials (Web application)</li>
-          <li>Add your domain to authorized origins</li>
-          <li>Copy the Client ID below</li>
-        </ol>
-        <div class="client-id-input-row">
-          <input type="text" id="client-id-input" placeholder="Paste your Client ID here...">
-          <button id="save-client-id-btn" class="save-client-id-btn">Save & Connect</button>
-        </div>
-        <p class="setup-note">Your Client ID is stored locally and never sent to any server.</p>
-      </div>
-    </div>
-  </div>
-
   <!-- Add Manuscript Dialog -->
   <dialog id="add-manuscript-dialog" class="dialog add-manuscript-dialog">
     <h2>Add Manuscript</h2>
@@ -149,7 +121,6 @@
     </div>
   </dialog>
 
-  <script src="gdrive.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

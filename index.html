@@ -5,42 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Manuscript Scorer - Projects</title>
   <link rel="stylesheet" href="index.css">
-  <!-- Google Identity Services for OAuth -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Google API Client -->
-  <script src="https://apis.google.com/js/api.js" async defer></script>
+  <script src="file-system.js"></script>
 </head>
 <body>
   <header class="header">
     <h1>Manuscript Scorer</h1>
     <div class="header-right">
-      <div id="gdrive-status" class="gdrive-status">
-        <span id="gdrive-indicator" class="gdrive-indicator"></span>
-        <span id="gdrive-text">Not connected</span>
+      <div id="status" class="gdrive-status">
+        <span id="status-indicator" class="gdrive-indicator connected"></span>
+        <span id="status-text">Local Storage</span>
       </div>
-      <button id="gdrive-btn" class="gdrive-btn">Connect Google Drive</button>
     </div>
   </header>
 
   <main class="content">
-    <div id="login-prompt" class="login-prompt">
-      <div class="login-card">
-        <h2>Welcome to Manuscript Scorer</h2>
-        <p>Connect your Google Drive to store and sync your manuscripts.</p>
-        <button id="login-gdrive-btn" class="login-gdrive-btn">
-          <svg viewBox="0 0 24 24" width="20" height="20">
-            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-          </svg>
-          Connect with Google Drive
-        </button>
-        <p class="login-note">Your manuscripts will be stored in your personal Google Drive.</p>
-      </div>
-    </div>
-
-    <div id="projects-container" class="projects-container hidden">
+    <div id="projects-container" class="projects-container">
       <p class="subtitle">Select a project to open</p>
       <div class="projects-grid" id="projects-grid">
         <!-- Projects loaded dynamically -->
@@ -53,108 +32,41 @@
     </div>
   </main>
 
-  <dialog id="project-name-dialog" class="dialog">
-    <h2>Name Your Project</h2>
-    <form id="project-name-form">
-      <label>
-        Project Name
-        <input type="text" id="project-name" required placeholder="e.g., Gilgamesh Flood Narrative">
-      </label>
-      <input type="hidden" id="selected-folder-id" value="">
-      <div class="dialog-actions">
-        <button type="button" id="cancel-name-btn">Cancel</button>
-        <button type="submit">Create</button>
-      </div>
-    </form>
-  </dialog>
 
-  <!-- Google Drive Setup Modal -->
-  <div id="gdrive-setup-modal" class="modal hidden">
-    <div class="modal-content gdrive-setup-modal">
-      <div class="modal-header">
-        <h3>Connect Google Drive</h3>
-        <button class="modal-close" id="close-gdrive-setup">&times;</button>
-      </div>
-      <div class="gdrive-setup-content">
-        <p>To use Google Drive sync, you need a Google Cloud Client ID.</p>
-        <ol class="setup-steps">
-          <li>Go to <a href="https://console.cloud.google.com" target="_blank">Google Cloud Console</a></li>
-          <li>Create a project and enable Google Drive API</li>
-          <li>Create OAuth credentials (Web application)</li>
-          <li>Add your domain to authorized origins</li>
-          <li>Copy the Client ID below</li>
-        </ol>
-        <div class="client-id-input-row">
-          <input type="text" id="client-id-input" placeholder="Paste your Client ID here...">
-          <button id="save-client-id-btn" class="save-client-id-btn">Save & Connect</button>
-        </div>
-        <p class="setup-note">Your Client ID is stored locally and never sent to any server.</p>
-      </div>
-    </div>
-  </div>
 
-  <script src="gdrive.js"></script>
   <script>
     const projectsGrid = document.getElementById('projects-grid');
     const projectsContainer = document.getElementById('projects-container');
-    const loginPrompt = document.getElementById('login-prompt');
     const newProjectBtn = document.getElementById('new-project-btn');
     const openProjectBtn = document.getElementById('open-project-btn');
-    const nameDialog = document.getElementById('project-name-dialog');
-    const nameForm = document.getElementById('project-name-form');
-    const cancelNameBtn = document.getElementById('cancel-name-btn');
-    const selectedFolderId = document.getElementById('selected-folder-id');
-    const loginGdriveBtn = document.getElementById('login-gdrive-btn');
 
-    // Load projects from Google Drive
+    // Check if File System Access API is supported
+    const hasFileSystemAccess = FileSystem.isSupported();
+
+    // Load projects from IndexedDB
     async function loadProjects() {
-      if (!GDrive.isReady()) {
-        showLoginPrompt();
+      if (!hasFileSystemAccess) {
+        projectsGrid.innerHTML = `
+          <div class="error-message">
+            <p>Your browser does not support the File System Access API.</p>
+            <p>Please use Chrome, Edge, or another Chromium-based browser.</p>
+          </div>
+        `;
         return;
       }
 
-      hideLoginPrompt();
-
       try {
-        const projects = await GDrive.listProjects();
-
-        // Get manuscript counts for each project
-        const projectsWithCounts = await Promise.all(projects.map(async (p) => {
-          const manuscripts = await GDrive.listManuscripts(p.id);
-          const msCount = manuscripts.filter(f => f.name !== 'project.json' && f.name !== 'score.txt').length;
-          return {
-            name: p.name,
-            folder: p.id,
-            manuscriptCount: msCount,
-            modifiedTime: p.modifiedTime
-          };
-        }));
-
-        renderProjects(projectsWithCounts);
+        const projects = await FileSystem.getSavedProjects();
+        renderProjects(projects);
       } catch (err) {
         console.error('Error loading projects:', err);
         projectsGrid.innerHTML = `
           <div class="error-message">
-            <p>Could not load projects from Google Drive.</p>
+            <p>Could not load projects.</p>
             <p>${escapeHtml(err.message)}</p>
           </div>
         `;
       }
-    }
-
-    // Show login prompt
-    function showLoginPrompt() {
-      loginPrompt.classList.remove('hidden');
-      projectsContainer.classList.add('hidden');
-    }
-
-    // Hide login prompt
-    function hideLoginPrompt() {
-      loginPrompt.classList.add('hidden');
-      projectsContainer.classList.remove('hidden');
-      // Also hide the header connect button since we're already connected
-      const gdriveBtn = document.getElementById('gdrive-btn');
-      if (gdriveBtn) gdriveBtn.style.display = 'none';
     }
 
     // Render project cards
@@ -170,14 +82,92 @@
       }
 
       projectsGrid.innerHTML = projects.map(project => `
-        <div class="project-card">
-          <a href="scorer.html?project=${encodeURIComponent(project.folder)}" class="project-link">
+        <div class="project-card" data-project-id="${escapeHtml(project.id)}">
+          <button class="project-link" data-action="open">
             <h3>${escapeHtml(project.name)}</h3>
-            <p class="project-meta">${project.manuscriptCount} manuscript(s)</p>
-          </a>
-          <a href="manage.html?project=${encodeURIComponent(project.folder)}" class="project-settings-btn" title="Project settings">&#9881;</a>
+            <p class="project-meta">Click to open (requires permission)</p>
+          </button>
+          <button class="project-settings-btn" data-action="manage" title="Project settings">&#9881;</button>
+          <button class="project-remove-btn" data-action="remove" title="Remove from list">&times;</button>
         </div>
       `).join('');
+
+      // Add click handlers for project cards
+      projectsGrid.querySelectorAll('.project-card').forEach(card => {
+        const projectId = card.dataset.projectId;
+
+        card.querySelector('[data-action="open"]').addEventListener('click', () => openProject(projectId));
+        card.querySelector('[data-action="manage"]').addEventListener('click', () => manageProject(projectId));
+        card.querySelector('[data-action="remove"]').addEventListener('click', (e) => {
+          e.stopPropagation();
+          removeProject(projectId);
+        });
+      });
+    }
+
+    // Open a saved project (request permission and navigate)
+    async function openProject(projectId) {
+      try {
+        const projects = await FileSystem.getSavedProjects();
+        const project = projects.find(p => p.id === projectId);
+        if (!project) {
+          alert('Project not found');
+          return;
+        }
+
+        // Request permission for the folder
+        const granted = await FileSystem.requestPermission(project.handle);
+        if (!granted) {
+          alert('Permission denied. Please grant access to the folder.');
+          return;
+        }
+
+        // Store the project ID in sessionStorage so scorer.html can retrieve it
+        sessionStorage.setItem('currentProjectId', projectId);
+        window.location.href = 'scorer.html';
+      } catch (err) {
+        console.error('Error opening project:', err);
+        alert('Failed to open project: ' + err.message);
+      }
+    }
+
+    // Navigate to manage page
+    async function manageProject(projectId) {
+      try {
+        const projects = await FileSystem.getSavedProjects();
+        const project = projects.find(p => p.id === projectId);
+        if (!project) {
+          alert('Project not found');
+          return;
+        }
+
+        const granted = await FileSystem.requestPermission(project.handle);
+        if (!granted) {
+          alert('Permission denied. Please grant access to the folder.');
+          return;
+        }
+
+        sessionStorage.setItem('currentProjectId', projectId);
+        window.location.href = 'manage.html';
+      } catch (err) {
+        console.error('Error opening project settings:', err);
+        alert('Failed to open project settings: ' + err.message);
+      }
+    }
+
+    // Remove project from list (doesn't delete files)
+    async function removeProject(projectId) {
+      if (!confirm('Remove this project from the list? (Files will not be deleted)')) {
+        return;
+      }
+
+      try {
+        await FileSystem.removeProject(projectId);
+        loadProjects();
+      } catch (err) {
+        console.error('Error removing project:', err);
+        alert('Failed to remove project: ' + err.message);
+      }
     }
 
     // Escape HTML
@@ -187,103 +177,87 @@
       return div.innerHTML;
     }
 
-    // New project - open folder picker first, then ask for name
+    // New project button - uses File System Access API
     newProjectBtn.addEventListener('click', async () => {
-      try {
-        const folder = await GDrive.showFolderPicker();
-        if (folder) {
-          selectedFolderId.value = folder.id;
-          nameDialog.showModal();
-        }
-      } catch (err) {
-        console.error('Folder picker error:', err);
-        alert('Could not open folder picker: ' + err.message);
-      }
-    });
-
-    // Cancel name dialog
-    cancelNameBtn.addEventListener('click', () => {
-      nameDialog.close();
-      nameForm.reset();
-      selectedFolderId.value = '';
-    });
-
-    // Create project after naming
-    nameForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-
-      if (!GDrive.isReady()) {
-        alert('Please connect to Google Drive first');
+      if (!hasFileSystemAccess) {
+        alert('Your browser does not support the File System Access API. Please use Chrome or Edge.');
         return;
       }
 
-      const name = document.getElementById('project-name').value.trim();
-      const folderId = selectedFolderId.value;
-
       try {
-        const projectFolderId = await GDrive.createProjectInFolder(folderId, name);
-        window.location.href = `scorer.html?project=${encodeURIComponent(projectFolderId)}`;
+        const dirHandle = await window.showDirectoryPicker({
+          mode: 'readwrite'
+        });
+
+        const folderName = dirHandle.name;
+        const projectName = prompt(`Creating new project in folder: ${folderName}\n\nEnter a name for this project:`, folderName);
+        if (!projectName) return;
+
+        // Initialize project structure in selected folder
+        const { config, sigla } = await FileSystem.initializeProject(dirHandle, projectName);
+
+        // Save to IndexedDB
+        const projectId = FileSystem.generateProjectId();
+        await FileSystem.saveProject(projectId, dirHandle, projectName);
+
+        // Store project ID and navigate to scorer
+        sessionStorage.setItem('currentProjectId', projectId);
+        window.location.href = 'scorer.html';
+
       } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.error('Error creating project:', err);
         alert('Failed to create project: ' + err.message);
       }
     });
 
-    // Close name dialog on backdrop click
-    nameDialog.addEventListener('click', (e) => {
-      if (e.target === nameDialog) {
-        nameDialog.close();
-        nameForm.reset();
-        selectedFolderId.value = '';
-      }
-    });
-
-    // Login button click
-    loginGdriveBtn.addEventListener('click', () => {
-      const gdriveBtn = document.getElementById('gdrive-btn');
-      if (gdriveBtn) gdriveBtn.click();
-    });
-
-    // Open existing project from Google Drive picker
+    // Open project button - uses File System Access API
     openProjectBtn.addEventListener('click', async () => {
+      if (!hasFileSystemAccess) {
+        alert('Your browser does not support the File System Access API. Please use Chrome or Edge.');
+        return;
+      }
+
       try {
-        const folder = await GDrive.showFolderPicker();
-        if (folder) {
-          window.location.href = `scorer.html?project=${encodeURIComponent(folder.id)}`;
+        const dirHandle = await window.showDirectoryPicker({
+          mode: 'readwrite'
+        });
+
+        const folderName = dirHandle.name;
+
+        // Check what exists in the folder
+        const { txtFiles, hasManuscriptsFolder } = await FileSystem.listTxtFiles(dirHandle);
+
+        // Validate: need at least one .txt file
+        if (txtFiles.length === 0) {
+          alert('No .txt manuscript files found in this folder.\n\nPlease select a folder containing at least one .txt file.');
+          return;
         }
+
+        // Ask for project name
+        const projectName = prompt(`Opening folder: ${folderName}\n\nFound ${txtFiles.length} manuscript file(s).\n\nEnter a name for this project:`, folderName);
+        if (!projectName) return;
+
+        // Initialize project structure (creates manuscripts/, project.json, index.json if needed)
+        await FileSystem.initializeProject(dirHandle, projectName);
+
+        // Save to IndexedDB
+        const projectId = FileSystem.generateProjectId();
+        await FileSystem.saveProject(projectId, dirHandle, projectName);
+
+        // Store project ID and navigate to scorer
+        sessionStorage.setItem('currentProjectId', projectId);
+        window.location.href = 'scorer.html';
+
       } catch (err) {
-        console.error('Folder picker error:', err);
-        alert('Could not open folder picker: ' + err.message);
+        if (err.name === 'AbortError') return;
+        console.error('Error opening project:', err);
+        alert('Failed to open project: ' + err.message);
       }
     });
 
-    // Initialize
-    async function init() {
-      // Wait for GDrive module to be ready
-      await GDrive.init();
-
-      // Check if already connected
-      if (GDrive.isReady()) {
-        loadProjects();
-      } else {
-        showLoginPrompt();
-      }
-
-      // Listen for connection changes
-      const originalSetStatus = GDrive.setStatus;
-      GDrive.setStatus = function(status, text) {
-        originalSetStatus(status, text);
-        if (status === 'connected') {
-          loadProjects();
-        }
-      };
-    }
-
-    // Start when DOM is ready
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', init);
-    } else {
-      init();
-    }
+    // Load projects on page load
+    loadProjects();
   </script>
 </body>
 </html>

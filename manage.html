@@ -5,10 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Manage Project - Manuscript Scorer</title>
   <link rel="stylesheet" href="index.css">
-  <!-- Google Identity Services for OAuth -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Google API Client -->
-  <script src="https://apis.google.com/js/api.js" async defer></script>
+  <script src="file-system.js"></script>
   <style>
     .manage-content {
       max-width: 800px;
@@ -304,7 +301,7 @@
     <!-- Manuscript Files Section -->
     <div class="section">
       <h2>Manuscript Files</h2>
-      <p>These are the .txt files in your project folder on Google Drive.</p>
+      <p>These are the .txt files in your project folder.</p>
 
       <div id="file-list" class="file-list">
         <div class="file-item">Loading...</div>
@@ -358,57 +355,61 @@
     <!-- Danger Zone -->
     <div class="section">
       <h2>Danger Zone</h2>
-      <p>Delete this project and all its manuscripts. This action cannot be undone.</p>
-      <button id="delete-btn" class="btn btn-danger">Delete Project</button>
+      <p>Remove this project from the list. Files on disk will NOT be deleted - you can re-add the folder later.</p>
+      <button id="delete-btn" class="btn btn-danger">Remove Project</button>
     </div>
   </main>
 
-  <script src="gdrive.js"></script>
   <script>
-    // Get project from URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const projectFolder = urlParams.get('project');
+    // Get project from sessionStorage (set by index.html)
+    const projectId = sessionStorage.getItem('currentProjectId');
 
-    if (!projectFolder) {
+    if (!projectId) {
       window.location.href = 'index.html';
     }
 
-    // Update scorer link
-    document.getElementById('open-scorer-btn').href = `scorer.html?project=${encodeURIComponent(projectFolder)}`;
+    // Update scorer link (will navigate via sessionStorage)
+    document.getElementById('open-scorer-btn').href = 'scorer.html';
 
     // State
+    let dirHandle = null;
     let projectConfig = null;
     let manuscriptFiles = [];
-    let driveFileIds = {}; // manuscript name -> drive file id
     let filesToImport = [];
     let siglaMappings = {}; // Museum number -> Siglum
     let mappingSaveTimeout = null;
 
     // Load project info
     async function loadProject() {
-      // Wait for GDrive to initialize
-      if (window.GDrive && localStorage.getItem('gdrive_client_id')) {
-        try {
-          await GDrive.init();
-        } catch (err) {
-          console.warn('GDrive init failed:', err);
-        }
-      }
-
-      if (!window.GDrive || !GDrive.isReady()) {
-        showStatus('Please connect to Google Drive first', 'error');
-        return;
-      }
-
       try {
-        // Load project config from Drive
-        projectConfig = await GDrive.getProjectConfig(projectFolder);
+        // Get directory handle from IndexedDB
+        const projects = await FileSystem.getSavedProjects();
+        const project = projects.find(p => p.id === projectId);
+
+        if (!project) {
+          alert('Project not found. Returning to project list.');
+          window.location.href = 'index.html';
+          return;
+        }
+
+        // Check/request permission for the folder
+        const granted = await FileSystem.requestPermission(project.handle);
+        if (!granted) {
+          alert('Permission denied. Please grant access to the folder.');
+          window.location.href = 'index.html';
+          return;
+        }
+
+        dirHandle = project.handle;
+
+        // Load project config from folder
+        projectConfig = await FileSystem.readProjectConfig(dirHandle);
         if (projectConfig) {
           document.getElementById('project-name').textContent = projectConfig.name;
           document.title = `Manage ${projectConfig.name} - Manuscript Scorer`;
           siglaMappings = projectConfig.sigla || {};
         } else {
-          document.getElementById('project-name').textContent = 'Unknown Project';
+          document.getElementById('project-name').textContent = project.name || 'Unknown Project';
         }
 
         // Load file list
@@ -418,21 +419,11 @@
       }
     }
 
-    // Load manuscript files from Google Drive
+    // Load manuscript files from local folder
     async function loadFiles() {
       try {
-        const files = await GDrive.listManuscripts(projectFolder);
-        manuscriptFiles = [];
-        driveFileIds = {};
-
-        for (const file of files) {
-          if (file.name === 'project.json' || file.name === 'score.txt') continue;
-          if (!file.name.endsWith('.txt')) continue;
-
-          const name = file.name.replace('.txt', '');
-          manuscriptFiles.push(name);
-          driveFileIds[name] = file.id;
-        }
+        const { txtFiles } = await FileSystem.listTxtFiles(dirHandle);
+        manuscriptFiles = txtFiles;
 
         renderFileList();
         renderMappingTable();
@@ -464,10 +455,13 @@
           if (!confirm(`Delete manuscript "${fileName}"?`)) return;
 
           try {
-            const fileId = driveFileIds[fileName];
-            if (fileId) {
-              await GDrive.deleteFile(fileId);
-            }
+            await FileSystem.deleteManuscript(dirHandle, fileName);
+
+            // Update index
+            const index = await FileSystem.readManuscriptIndex(dirHandle);
+            const newIndex = index.filter(s => s !== fileName);
+            await FileSystem.writeManuscriptIndex(dirHandle, newIndex);
+
             await loadFiles();
             showStatus(`Deleted ${fileName}`, 'success');
           } catch (err) {
@@ -535,13 +529,10 @@
       if (mappingSaveTimeout) clearTimeout(mappingSaveTimeout);
       mappingSaveTimeout = setTimeout(async () => {
         try {
-          // Update project config with new sigla mappings
-          const updatedConfig = {
-            ...projectConfig,
-            sigla: siglaMappings
-          };
-
-          await GDrive.saveFile(projectFolder, 'project.json', JSON.stringify(updatedConfig, null, 2));
+          // Update sigla in project config and save
+          projectConfig = projectConfig || {};
+          projectConfig.sigla = siglaMappings;
+          await FileSystem.writeProjectConfig(dirHandle, projectConfig);
 
           indicator.textContent = 'Saved';
           indicator.className = 'save-indicator saved';
@@ -637,13 +628,23 @@
 
       try {
         let imported = 0;
+        const currentIndex = await FileSystem.readManuscriptIndex(dirHandle) || [];
+
         for (const file of filesToImport) {
           const content = await file.text();
-          const fileName = file.name.endsWith('.txt') ? file.name : file.name + '.txt';
+          const siglum = file.name.replace('.txt', '');
 
-          await GDrive.saveFile(projectFolder, fileName, content);
+          await FileSystem.writeManuscript(dirHandle, siglum, content);
+
+          // Add to index if not already present
+          if (!currentIndex.includes(siglum)) {
+            currentIndex.push(siglum);
+          }
           imported++;
         }
+
+        // Update index
+        await FileSystem.writeManuscriptIndex(dirHandle, currentIndex);
 
         showStatus(`Imported ${imported} file(s)`, 'success');
         filesToImport = [];
@@ -658,29 +659,17 @@
       }
     });
 
-    // Delete project
+    // Delete project (removes from list only - files remain on disk)
     document.getElementById('delete-btn').addEventListener('click', async () => {
-      const confirmed = confirm(`Are you sure you want to delete "${projectConfig?.name || projectFolder}"?\n\nThis will delete all manuscripts and cannot be undone.`);
+      const confirmed = confirm(`Are you sure you want to remove "${projectConfig?.name || 'this project'}" from the list?\n\nNote: The files on disk will NOT be deleted - only the reference will be removed.`);
       if (!confirmed) return;
 
-      const doubleConfirm = confirm('This is your last chance to cancel. Delete this project?');
-      if (!doubleConfirm) return;
-
       try {
-        // Delete all files in the project
-        for (const fileName of manuscriptFiles) {
-          const fileId = driveFileIds[fileName];
-          if (fileId) {
-            await GDrive.deleteFile(fileId);
-          }
-        }
-
-        // Delete the project folder itself
-        await GDrive.deleteFile(projectFolder);
-
+        await FileSystem.removeProject(projectId);
+        sessionStorage.removeItem('currentProjectId');
         window.location.href = 'index.html';
       } catch (err) {
-        showStatus('Failed to delete project: ' + err.message, 'error');
+        showStatus('Failed to remove project: ' + err.message, 'error');
       }
     });
 
