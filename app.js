@@ -880,7 +880,52 @@ function debouncedSave() {
       await saveToFile(activeManuscript);
     }
     await saveScoreToFile();
+    await saveScoreDataToFile();
   }, 1000); // Save 1 second after last edit
+}
+
+// Save score data (reconstructed text and translations) to local folder
+async function saveScoreDataToFile() {
+  if (!dirHandle) return;
+
+  // Only save if there's data
+  const hasReconstructed = Object.keys(reconstructedLines).length > 0;
+  const hasTranslations = Object.keys(translationLines).length > 0;
+  if (!hasReconstructed && !hasTranslations) return;
+
+  try {
+    const data = {
+      reconstructed: reconstructedLines,
+      translations: translationLines,
+      savedAt: new Date().toISOString()
+    };
+    await FileSystem.writeScoreData(dirHandle, data);
+    console.log('Saved score-data.json');
+  } catch (err) {
+    console.error('Score data save error:', err);
+  }
+}
+
+// Load score data from local folder
+async function loadScoreData() {
+  if (!dirHandle) return;
+
+  try {
+    const data = await FileSystem.readScoreData(dirHandle);
+    if (data) {
+      // Restore reconstructed lines
+      if (data.reconstructed) {
+        Object.assign(reconstructedLines, data.reconstructed);
+      }
+      // Restore translation lines
+      if (data.translations) {
+        Object.assign(translationLines, data.translations);
+      }
+      console.log('Loaded score-data.json');
+    }
+  } catch (err) {
+    console.error('Failed to load score data:', err);
+  }
 }
 
 // Load a manuscript into the editor
@@ -1526,6 +1571,9 @@ async function init() {
 
   // Initialize collaboration
   initCollaboration();
+
+  // Load saved score data (reconstructed text and translations)
+  await loadScoreData();
 
   // Load manuscripts from local folder
   await loadManuscripts();

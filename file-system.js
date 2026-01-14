@@ -208,6 +208,26 @@ async function writeScore(dirHandle, content) {
   await writable.close();
 }
 
+// Read score-data.json (reconstructed text and translations)
+async function readScoreData(dirHandle) {
+  try {
+    const fileHandle = await dirHandle.getFileHandle('score-data.json');
+    const file = await fileHandle.getFile();
+    const content = await file.text();
+    return JSON.parse(content);
+  } catch (e) {
+    return null;
+  }
+}
+
+// Write score-data.json (reconstructed text and translations)
+async function writeScoreData(dirHandle, data) {
+  const fileHandle = await dirHandle.getFileHandle('score-data.json', { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(JSON.stringify(data, null, 2));
+  await writable.close();
+}
+
 // List all .txt files in a folder (root or manuscripts subfolder)
 async function listTxtFiles(dirHandle) {
   const txtFiles = [];
@@ -368,6 +388,8 @@ window.FileSystem = {
   deleteManuscript,
   readScore,
   writeScore,
+  readScoreData,
+  writeScoreData,
   listTxtFiles,
   initializeProject,
 
