@@ -489,7 +489,7 @@ body {
 /* Editor */
 .editor {
   flex: 1;
-  padding: 1rem;
+  /* Padding is handled by ACE renderer.setPadding/setScrollMargin in js */
   font-family: "Consolas", "Monaco", monospace;
   font-size: 1rem;
   line-height: 1.6;
@@ -636,10 +636,7 @@ body {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-color: #aaa;
-font-style: italic;
-font-weight: 400;
-}
+
 
 /* Dark Mode Overrides for Score Components */
 body.dark-mode .translation-line {

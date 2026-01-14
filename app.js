@@ -478,6 +478,10 @@ function initAceEditor() {
     useSoftTabs: true
   });
 
+  // Add padding to the editor to separate text from margins
+  aceEditor.renderer.setPadding(15);
+  aceEditor.renderer.setScrollMargin(15, 15);
+
   // Enable search box extension
   ace.require('ace/ext/searchbox');
 
