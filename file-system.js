@@ -228,6 +228,26 @@ async function writeScoreData(dirHandle, data) {
   await writable.close();
 }
 
+// Read annotations.json
+async function readAnnotations(dirHandle) {
+  try {
+    const fileHandle = await dirHandle.getFileHandle('annotations.json');
+    const file = await fileHandle.getFile();
+    const content = await file.text();
+    return JSON.parse(content);
+  } catch (e) {
+    return [];
+  }
+}
+
+// Write annotations.json
+async function writeAnnotations(dirHandle, annotations) {
+  const fileHandle = await dirHandle.getFileHandle('annotations.json', { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(JSON.stringify(annotations, null, 2));
+  await writable.close();
+}
+
 // List all .txt files in a folder (root or manuscripts subfolder)
 async function listTxtFiles(dirHandle) {
   const txtFiles = [];
@@ -390,6 +410,8 @@ window.FileSystem = {
   writeScore,
   readScoreData,
   writeScoreData,
+  readAnnotations,
+  writeAnnotations,
   listTxtFiles,
   initializeProject,
 

@@ -1186,3 +1186,296 @@ body.dark-mode .reconstructed-text:empty::before {
 .delete-project-btn:hover {
   background: #c82333;
 }
+
+/* ===========================================
+   ANNOTATIONS PANEL
+   =========================================== */
+
+.annotations-panel {
+  position: fixed;
+  top: var(--header-height);
+  right: 0;
+  width: 380px;
+  max-width: 90vw;
+  bottom: 0;
+  background: var(--bg-white);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.1);
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.2s;
+}
+
+.annotations-panel.hidden {
+  display: none;
+}
+
+.annotations-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-light);
+}
+
+.annotations-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.annotations-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.annotations-header-actions select {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  background: var(--bg-white);
+  color: var(--text-dark);
+}
+
+.annotations-header-actions .btn-primary {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.25rem 0.6rem;
+  font-size: 1rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.annotations-header-actions .btn-primary:hover {
+  opacity: 0.85;
+}
+
+.annotations-header-actions .modal-close {
+  background: none;
+  border: none;
+  font-size: 1.4rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0;
+  line-height: 1;
+}
+
+/* Annotation Form */
+.annotation-form {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-light);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.annotation-form.hidden {
+  display: none;
+}
+
+.annotation-form .form-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.annotation-form select {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  background: var(--bg-white);
+  color: var(--text-dark);
+}
+
+.annotation-form input[type="text"],
+.annotation-form textarea {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  background: var(--bg-white);
+  color: var(--text-dark);
+  resize: vertical;
+}
+
+.annotation-form input:focus,
+.annotation-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+
+.annotation-form .btn-primary {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.annotation-form button:not(.btn-primary) {
+  background: var(--bg-white);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--text-dark);
+}
+
+/* Annotations List */
+.annotations-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.annotations-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+  padding: 2rem 1rem;
+}
+
+.annotation-item {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--bg-white);
+}
+
+.annotation-item.resolved {
+  opacity: 0.6;
+}
+
+.annotation-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.annotation-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.annotation-badge.bug {
+  background: #fce4ec;
+  color: #c62828;
+}
+
+.annotation-badge.enhancement {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.annotation-title-text {
+  font-weight: 600;
+  font-size: 0.9rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.annotation-status-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.annotation-status-badge.open {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+.annotation-status-badge.resolved {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.annotation-desc-text {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.3rem;
+  white-space: pre-wrap;
+}
+
+.annotation-location-text {
+  font-size: 0.75rem;
+  color: var(--accent);
+  margin-top: 0.2rem;
+  font-family: "Consolas", "Monaco", monospace;
+}
+
+.annotation-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.annotation-date {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  flex: 1;
+}
+
+.annotation-toggle-btn,
+.annotation-delete-btn {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-light);
+  cursor: pointer;
+  color: var(--text-dark);
+}
+
+.annotation-toggle-btn:hover {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.annotation-delete-btn:hover {
+  background: #fee;
+  border-color: #c00;
+  color: #c00;
+}
+
+/* Dark mode overrides for annotations */
+body.dark-mode .annotation-badge.bug {
+  background: #4a1c1c;
+  color: #ef9a9a;
+}
+
+body.dark-mode .annotation-badge.enhancement {
+  background: #1b3a1b;
+  color: #a5d6a7;
+}
+
+body.dark-mode .annotation-status-badge.open {
+  background: #3e2a10;
+  color: #ffb74d;
+}
+
+body.dark-mode .annotation-status-badge.resolved {
+  background: #1b3a1b;
+  color: #a5d6a7;
+}

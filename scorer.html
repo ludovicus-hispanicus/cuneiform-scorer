@@ -41,6 +41,7 @@
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
         </svg>
       </button>
+      <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes</button>
       <button id="export-btn">Export</button>
     </div>
   </header>
@@ -132,6 +133,42 @@
       <button type="button" id="cancel-add-manuscript-btn">Cancel</button>
     </div>
   </dialog>
+
+  <!-- Annotations Panel -->
+  <div id="annotations-panel" class="annotations-panel hidden">
+    <div class="annotations-header">
+      <h3>Annotations</h3>
+      <div class="annotations-header-actions">
+        <select id="annotations-filter">
+          <option value="all">All</option>
+          <option value="open">Open</option>
+          <option value="resolved">Resolved</option>
+          <option value="bug">Bugs</option>
+          <option value="enhancement">Enhancements</option>
+        </select>
+        <button id="add-annotation-btn" class="btn-primary" title="Add annotation">+</button>
+        <button id="close-annotations-btn" class="modal-close">&times;</button>
+      </div>
+    </div>
+    <div id="annotation-form" class="annotation-form hidden">
+      <div class="form-row">
+        <select id="annotation-type">
+          <option value="bug">Bug</option>
+          <option value="enhancement">Enhancement</option>
+        </select>
+        <input type="text" id="annotation-title" placeholder="Short title...">
+      </div>
+      <textarea id="annotation-desc" placeholder="Description (optional)..." rows="2"></textarea>
+      <div class="form-row">
+        <input type="text" id="annotation-location" placeholder="Location, e.g. ms name : line (optional)">
+        <button id="save-annotation-btn" class="btn-primary">Save</button>
+        <button id="cancel-annotation-btn">Cancel</button>
+      </div>
+    </div>
+    <div id="annotations-list" class="annotations-list">
+      <div class="annotations-empty">No annotations yet.</div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

@@ -268,6 +268,9 @@ async function loadManuscripts() {
       return;
     }
 
+    // Sort manuscripts alphanumerically
+    fileNames.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
     // Load each manuscript
     for (const fileName of fileNames) {
       const content = await FileSystem.readManuscript(dirHandle, fileName);
@@ -327,7 +330,39 @@ function addManuscriptToList(id, museumNum) {
   // Update visibility based on toggle state
   updateManuscriptItemDisplay(li);
 
-  manuscriptList.appendChild(li);
+  // Insert in sorted order
+  insertManuscriptSorted(li);
+}
+
+// Get the sort key for a manuscript list item based on current toggle
+function getManuscriptSortKey(el) {
+  const museum = el.dataset.museum;
+  return (showSigla && siglaMappings[museum]) ? siglaMappings[museum] : museum;
+}
+
+// Insert a manuscript <li> into the sidebar in sorted position
+function insertManuscriptSorted(li) {
+  const key = getManuscriptSortKey(li);
+  const existing = Array.from(manuscriptList.children).filter(el => el !== li);
+  const insertBefore = existing.find(el =>
+    getManuscriptSortKey(el).localeCompare(key, undefined, { numeric: true, sensitivity: 'base' }) > 0
+  );
+  if (insertBefore) {
+    manuscriptList.insertBefore(li, insertBefore);
+  } else {
+    manuscriptList.appendChild(li);
+  }
+}
+
+// Re-sort all manuscript items in the sidebar
+function resortManuscriptList() {
+  const items = Array.from(manuscriptList.children);
+  items.sort((a, b) =>
+    getManuscriptSortKey(a).localeCompare(getManuscriptSortKey(b), undefined, { numeric: true, sensitivity: 'base' })
+  );
+  for (const item of items) {
+    manuscriptList.appendChild(item);
+  }
 }
 
 // Update single manuscript item display based on toggle
@@ -383,6 +418,7 @@ function setupSiglaToggle() {
     localStorage.setItem('show_sigla', showSigla);
     updateSiglaToggle();
     updateAllManuscriptDisplays();
+    resortManuscriptList();
   });
 }
 
@@ -420,9 +456,7 @@ function setupPaneResizer() {
   document.addEventListener('mousemove', (e) => {
     if (!isResizing) return;
 
-    const workAreaRect = workArea.getBoundingClientRect();
-    const sidebarWidth = document.querySelector('.manuscript-list').getBoundingClientRect().width;
-    const availableWidth = workAreaRect.width - sidebarWidth - resizer.offsetWidth;
+    const availableWidth = workArea.getBoundingClientRect().width - resizer.offsetWidth;
 
     const deltaX = e.clientX - startX;
     let newEditorWidth = startEditorWidth + deltaX;
@@ -446,9 +480,7 @@ function setupPaneResizer() {
     document.body.style.userSelect = '';
 
     // Save the ratio
-    const workAreaRect = workArea.getBoundingClientRect();
-    const sidebarWidth = document.querySelector('.manuscript-list').getBoundingClientRect().width;
-    const availableWidth = workAreaRect.width - sidebarWidth - resizer.offsetWidth;
+    const availableWidth = workArea.getBoundingClientRect().width - resizer.offsetWidth;
     const ratio = editorPane.getBoundingClientRect().width / availableWidth;
     localStorage.setItem('pane_ratio', ratio.toString());
   });
@@ -487,6 +519,7 @@ function initAceEditor() {
 
   // Handle changes
   aceEditor.session.on('change', () => {
+    if (isPollingUpdate) return; // Skip saves triggered by polling reloads
     saveCurrentManuscript();
     syncManuscriptToYjs(activeManuscript);
     renderScore();
@@ -1577,6 +1610,444 @@ function exportScore() {
 
 exportBtn.addEventListener('click', exportScore);
 
+// ===========================================
+// ANNOTATIONS (Bug / Enhancement Tracker)
+// ===========================================
+
+let annotations = [];
+
+const annotationsBtn = document.getElementById('annotations-btn');
+const annotationsPanel = document.getElementById('annotations-panel');
+const closeAnnotationsBtn = document.getElementById('close-annotations-btn');
+const addAnnotationBtn = document.getElementById('add-annotation-btn');
+const annotationForm = document.getElementById('annotation-form');
+const annotationTitle = document.getElementById('annotation-title');
+const annotationDesc = document.getElementById('annotation-desc');
+const annotationType = document.getElementById('annotation-type');
+const annotationLocation = document.getElementById('annotation-location');
+const saveAnnotationBtn = document.getElementById('save-annotation-btn');
+const cancelAnnotationBtn = document.getElementById('cancel-annotation-btn');
+const annotationsList = document.getElementById('annotations-list');
+const annotationsFilter = document.getElementById('annotations-filter');
+
+// Toggle panel
+annotationsBtn.addEventListener('click', () => {
+  annotationsPanel.classList.toggle('hidden');
+});
+
+closeAnnotationsBtn.addEventListener('click', () => {
+  annotationsPanel.classList.add('hidden');
+});
+
+// Show/hide form
+addAnnotationBtn.addEventListener('click', () => {
+  annotationForm.classList.toggle('hidden');
+  if (!annotationForm.classList.contains('hidden')) {
+    annotationTitle.focus();
+    // Pre-fill location with active manuscript if any
+    if (activeManuscript && manuscripts[activeManuscript]) {
+      annotationLocation.value = manuscripts[activeManuscript].siglum;
+    }
+  }
+});
+
+cancelAnnotationBtn.addEventListener('click', () => {
+  annotationForm.classList.add('hidden');
+  annotationTitle.value = '';
+  annotationDesc.value = '';
+  annotationLocation.value = '';
+});
+
+// Save annotation
+saveAnnotationBtn.addEventListener('click', async () => {
+  const title = annotationTitle.value.trim();
+  if (!title) {
+    annotationTitle.focus();
+    return;
+  }
+
+  const annotation = {
+    id: Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+    type: annotationType.value,
+    title,
+    description: annotationDesc.value.trim(),
+    location: annotationLocation.value.trim(),
+    status: 'open',
+    created: new Date().toISOString()
+  };
+
+  annotations.unshift(annotation);
+  await saveAnnotations();
+  renderAnnotations();
+
+  // Reset form
+  annotationForm.classList.add('hidden');
+  annotationTitle.value = '';
+  annotationDesc.value = '';
+  annotationLocation.value = '';
+});
+
+// Filter change
+annotationsFilter.addEventListener('change', renderAnnotations);
+
+function renderAnnotations() {
+  const filter = annotationsFilter.value;
+  let filtered = annotations;
+
+  if (filter === 'open') filtered = annotations.filter(a => a.status === 'open');
+  else if (filter === 'resolved') filtered = annotations.filter(a => a.status === 'resolved');
+  else if (filter === 'bug') filtered = annotations.filter(a => a.type === 'bug');
+  else if (filter === 'enhancement') filtered = annotations.filter(a => a.type === 'enhancement');
+
+  if (filtered.length === 0) {
+    annotationsList.innerHTML = '<div class="annotations-empty">No annotations match this filter.</div>';
+    return;
+  }
+
+  annotationsList.innerHTML = filtered.map(a => `
+    <div class="annotation-item ${a.status}" data-id="${a.id}">
+      <div class="annotation-item-header">
+        <span class="annotation-badge ${a.type}">${a.type === 'bug' ? 'Bug' : 'Enh'}</span>
+        <span class="annotation-title-text">${escapeHtml(a.title)}</span>
+        <span class="annotation-status-badge ${a.status}">${a.status}</span>
+      </div>
+      ${a.description ? `<div class="annotation-desc-text">${escapeHtml(a.description)}</div>` : ''}
+      ${a.location ? `<div class="annotation-location-text">${escapeHtml(a.location)}</div>` : ''}
+      <div class="annotation-actions">
+        <span class="annotation-date">${new Date(a.created).toLocaleDateString()}</span>
+        <button class="annotation-toggle-btn" data-id="${a.id}">${a.status === 'open' ? 'Resolve' : 'Reopen'}</button>
+        <button class="annotation-delete-btn" data-id="${a.id}">Delete</button>
+      </div>
+    </div>
+  `).join('');
+
+  // Bind action buttons
+  annotationsList.querySelectorAll('.annotation-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const ann = annotations.find(a => a.id === btn.dataset.id);
+      if (ann) {
+        ann.status = ann.status === 'open' ? 'resolved' : 'open';
+        await saveAnnotations();
+        renderAnnotations();
+      }
+    });
+  });
+
+  annotationsList.querySelectorAll('.annotation-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this annotation?')) return;
+      annotations = annotations.filter(a => a.id !== btn.dataset.id);
+      await saveAnnotations();
+      renderAnnotations();
+    });
+  });
+}
+
+async function loadAnnotations() {
+  if (!dirHandle) return;
+  annotations = await FileSystem.readAnnotations(dirHandle) || [];
+}
+
+async function saveAnnotations() {
+  if (!dirHandle) return;
+  try {
+    await FileSystem.writeAnnotations(dirHandle, annotations);
+  } catch (err) {
+    console.error('Failed to save annotations:', err);
+  }
+}
+
+// ===========================================
+// FILE POLLING AUTO-SYNC
+// ===========================================
+// Polls for file changes on disk (useful when sharing folders via OneDrive, Dropbox, etc.)
+
+let filePollingInterval = null;
+const FILE_POLL_INTERVAL = 5000; // Check every 5 seconds
+let lastKnownTimestamps = {}; // { filename: lastModified }
+let isSaving = false; // Flag to skip polling during our own saves
+let isPollingUpdate = false; // Flag to suppress saves triggered by polling updates
+
+// Mark saving state so polling doesn't conflict
+// After each save, update the baseline timestamp so polling doesn't re-detect our own writes
+async function refreshTimestamp(path) {
+  const ts = await getFileTimestamp(dirHandle, path);
+  if (ts) lastKnownTimestamps[path] = ts;
+}
+
+const originalSaveToFile = saveToFile;
+saveToFile = async function(id) {
+  isSaving = true;
+  try {
+    await originalSaveToFile(id);
+    const ms = manuscripts[id];
+    if (ms) await refreshTimestamp(`manuscripts/${ms.siglum}.txt`);
+    await refreshTimestamp('manuscripts/index.json');
+    notifyOtherTabs('manuscript-saved', { manuscriptId: id });
+  } finally {
+    isSaving = false;
+  }
+};
+
+const originalSaveScoreData = saveScoreDataToFile;
+saveScoreDataToFile = async function() {
+  isSaving = true;
+  try {
+    await originalSaveScoreData();
+    await refreshTimestamp('score-data.json');
+    notifyOtherTabs('score-data-saved');
+  } finally {
+    isSaving = false;
+  }
+};
+
+const originalSaveAnnotations = saveAnnotations;
+saveAnnotations = async function() {
+  isSaving = true;
+  try {
+    await originalSaveAnnotations();
+    await refreshTimestamp('annotations.json');
+    notifyOtherTabs('annotations-saved');
+  } finally {
+    isSaving = false;
+  }
+};
+
+// Get the last modified timestamp for a file
+async function getFileTimestamp(dirHandle, path) {
+  try {
+    let handle = dirHandle;
+    const parts = path.split('/');
+    // Navigate to subdirectory if needed
+    for (let i = 0; i < parts.length - 1; i++) {
+      handle = await handle.getDirectoryHandle(parts[i]);
+    }
+    const fileHandle = await handle.getFileHandle(parts[parts.length - 1]);
+    const file = await fileHandle.getFile();
+    return file.lastModified;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Collect timestamps for all tracked files
+async function collectTimestamps() {
+  const timestamps = {};
+
+  // Track score-data.json
+  const sdTs = await getFileTimestamp(dirHandle, 'score-data.json');
+  if (sdTs) timestamps['score-data.json'] = sdTs;
+
+  // Track annotations.json
+  const anTs = await getFileTimestamp(dirHandle, 'annotations.json');
+  if (anTs) timestamps['annotations.json'] = anTs;
+
+  // Track each manuscript file
+  for (const id of Object.keys(manuscripts)) {
+    const ms = manuscripts[id];
+    const key = `manuscripts/${ms.siglum}.txt`;
+    const ts = await getFileTimestamp(dirHandle, key);
+    if (ts) timestamps[key] = ts;
+  }
+
+  // Track index.json for new manuscripts
+  const idxTs = await getFileTimestamp(dirHandle, 'manuscripts/index.json');
+  if (idxTs) timestamps['manuscripts/index.json'] = idxTs;
+
+  return timestamps;
+}
+
+// Initialize baseline timestamps
+async function initFilePolling() {
+  if (!dirHandle) return;
+  lastKnownTimestamps = await collectTimestamps();
+  filePollingInterval = setInterval(pollForChanges, FILE_POLL_INTERVAL);
+  console.log('File polling started');
+}
+
+// Stop polling (e.g., on page unload)
+function stopFilePolling() {
+  if (filePollingInterval) {
+    clearInterval(filePollingInterval);
+    filePollingInterval = null;
+  }
+}
+
+// Check for changes and reload as needed
+async function pollForChanges() {
+  if (!dirHandle || isSaving) return;
+
+  try {
+    const currentTimestamps = await collectTimestamps();
+    let hasChanges = false;
+
+    // Check score-data.json
+    if (currentTimestamps['score-data.json'] !== lastKnownTimestamps['score-data.json']) {
+      console.log('score-data.json changed on disk, reloading...');
+      const data = await FileSystem.readScoreData(dirHandle);
+      if (data) {
+        // Clear and reload
+        Object.keys(reconstructedLines).forEach(k => delete reconstructedLines[k]);
+        Object.keys(translationLines).forEach(k => delete translationLines[k]);
+        if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
+        if (data.translations) Object.assign(translationLines, data.translations);
+        renderScore();
+        hasChanges = true;
+      }
+    }
+
+    // Check annotations.json
+    if (currentTimestamps['annotations.json'] !== lastKnownTimestamps['annotations.json']) {
+      console.log('annotations.json changed on disk, reloading...');
+      const newAnnotations = await FileSystem.readAnnotations(dirHandle);
+      if (newAnnotations) {
+        annotations = newAnnotations;
+        renderAnnotations();
+        hasChanges = true;
+      }
+    }
+
+    // Check manuscript index for new/removed manuscripts
+    if (currentTimestamps['manuscripts/index.json'] !== lastKnownTimestamps['manuscripts/index.json']) {
+      console.log('index.json changed on disk, checking for new manuscripts...');
+      const fileNames = await FileSystem.readManuscriptIndex(dirHandle);
+      if (fileNames) {
+        // Check for new manuscripts
+        for (const fileName of fileNames) {
+          const id = `ms-${fileName.toLowerCase()}`;
+          if (!manuscripts[id]) {
+            const content = await FileSystem.readManuscript(dirHandle, fileName);
+            if (content !== null) {
+              manuscripts[id] = {
+                siglum: fileName,
+                displaySiglum: siglaMappings[fileName] || null,
+                content
+              };
+              addManuscriptToList(id, fileName);
+              hasChanges = true;
+            }
+          }
+        }
+        // Check for removed manuscripts
+        const indexSet = new Set(fileNames.map(f => `ms-${f.toLowerCase()}`));
+        for (const id of Object.keys(manuscripts)) {
+          if (!indexSet.has(id)) {
+            const li = document.querySelector(`[data-id="${id}"]`);
+            if (li) li.remove();
+            if (activeManuscript === id) {
+              activeManuscript = null;
+              const firstId = Object.keys(manuscripts).find(k => k !== id);
+              if (firstId) loadManuscript(firstId);
+            }
+            delete manuscripts[id];
+            hasChanges = true;
+          }
+        }
+      }
+    }
+
+    // Check each manuscript for content changes
+    for (const id of Object.keys(manuscripts)) {
+      const ms = manuscripts[id];
+      const key = `manuscripts/${ms.siglum}.txt`;
+
+      if (currentTimestamps[key] !== lastKnownTimestamps[key]) {
+        // Skip the actively-edited manuscript
+        if (id === activeManuscript && aceEditor && aceEditor.isFocused()) {
+          continue;
+        }
+
+        console.log(`${ms.siglum}.txt changed on disk, reloading...`);
+        const content = await FileSystem.readManuscript(dirHandle, ms.siglum);
+        if (content !== null) {
+          ms.content = content;
+          // Update editor if this is the displayed manuscript
+          if (id === activeManuscript) {
+            isPollingUpdate = true;
+            setEditorContent(content);
+            isPollingUpdate = false;
+          }
+          hasChanges = true;
+        }
+      }
+    }
+
+    // Update baseline timestamps
+    lastKnownTimestamps = currentTimestamps;
+
+    if (hasChanges) {
+      setStatus('connected', 'Synced');
+      renderScore();
+    }
+  } catch (err) {
+    console.error('Polling error:', err);
+  }
+}
+
+// Stop polling when page is hidden, resume when visible
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopFilePolling();
+  } else if (dirHandle && !filePollingInterval) {
+    // Re-poll immediately when tab becomes visible, then resume interval
+    pollForChanges();
+    filePollingInterval = setInterval(pollForChanges, FILE_POLL_INTERVAL);
+  }
+});
+
+// Also use BroadcastChannel for same-browser tab sync
+let broadcastChannel = null;
+try {
+  broadcastChannel = new BroadcastChannel('manuscript-scorer-sync');
+  broadcastChannel.onmessage = async (event) => {
+    const msg = event.data;
+    if (!msg || !dirHandle) return;
+
+    if (msg.type === 'manuscript-saved' && msg.projectId === projectId) {
+      const id = msg.manuscriptId;
+      // Skip if we're the sender or if user is editing this manuscript
+      if (id === activeManuscript && aceEditor && aceEditor.isFocused()) return;
+
+      const ms = manuscripts[id];
+      if (ms) {
+        const content = await FileSystem.readManuscript(dirHandle, ms.siglum);
+        if (content !== null) {
+          ms.content = content;
+          if (id === activeManuscript) {
+            isPollingUpdate = true;
+            setEditorContent(content);
+            isPollingUpdate = false;
+          }
+          renderScore();
+        }
+      }
+    } else if (msg.type === 'score-data-saved' && msg.projectId === projectId) {
+      const data = await FileSystem.readScoreData(dirHandle);
+      if (data) {
+        Object.keys(reconstructedLines).forEach(k => delete reconstructedLines[k]);
+        Object.keys(translationLines).forEach(k => delete translationLines[k]);
+        if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
+        if (data.translations) Object.assign(translationLines, data.translations);
+        renderScore();
+      }
+    } else if (msg.type === 'annotations-saved' && msg.projectId === projectId) {
+      annotations = await FileSystem.readAnnotations(dirHandle) || [];
+      renderAnnotations();
+    }
+  };
+} catch (e) {
+  console.log('BroadcastChannel not available');
+}
+
+// Notify other tabs after saves
+function notifyOtherTabs(type, extra = {}) {
+  if (broadcastChannel) {
+    try {
+      broadcastChannel.postMessage({ type, projectId, ...extra });
+    } catch (e) {}
+  }
+}
+
 // Initial load
 async function init() {
   // Get directory handle from IndexedDB
@@ -1631,6 +2102,10 @@ async function init() {
   // Load saved score data (reconstructed text and translations)
   await loadScoreData();
 
+  // Load annotations
+  await loadAnnotations();
+  renderAnnotations();
+
   // Load manuscripts from local folder
   await loadManuscripts();
 
@@ -1638,6 +2113,9 @@ async function init() {
   for (const id of Object.keys(manuscripts)) {
     syncManuscriptToYjs(id);
   }
+
+  // Start file polling for auto-sync
+  await initFilePolling();
 
   console.log('Manuscript Scorer initialized');
 }
