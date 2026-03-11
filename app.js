@@ -260,7 +260,13 @@ async function loadManuscripts() {
       siglaMappings = config.sigla || {};
     }
 
-    // Load manuscript index
+    // Scan for new .txt files not yet in index.json
+    const newFiles = await FileSystem.scanForNewManuscripts(dirHandle);
+    if (newFiles.length > 0) {
+      console.log('Discovered new manuscripts:', newFiles);
+    }
+
+    // Load manuscript index (now includes any newly discovered files)
     const fileNames = await FileSystem.readManuscriptIndex(dirHandle);
     if (!fileNames || fileNames.length === 0) {
       setEditorContent('No manuscripts yet. Click "+ Add" to create one.');
@@ -1904,6 +1910,34 @@ async function pollForChanges() {
         annotations = newAnnotations;
         renderAnnotations();
         hasChanges = true;
+      }
+    }
+
+    // Scan for new .txt files not yet in index.json (e.g. dropped into folder)
+    const newFiles = await FileSystem.scanForNewManuscripts(dirHandle);
+    if (newFiles.length > 0) {
+      console.log('Discovered new manuscripts:', newFiles);
+      for (const fileName of newFiles) {
+        const id = `ms-${fileName.toLowerCase()}`;
+        if (!manuscripts[id]) {
+          const content = await FileSystem.readManuscript(dirHandle, fileName);
+          if (content !== null) {
+            manuscripts[id] = {
+              siglum: fileName,
+              displaySiglum: siglaMappings[fileName] || null,
+              content
+            };
+            addManuscriptToList(id, fileName);
+            hasChanges = true;
+          }
+        }
+      }
+      // Refresh timestamps for the updated index and new files
+      const newTs = await getFileTimestamp(dirHandle, 'manuscripts/index.json');
+      currentTimestamps['manuscripts/index.json'] = newTs;
+      for (const fileName of newFiles) {
+        const key = `manuscripts/${fileName}.txt`;
+        currentTimestamps[key] = await getFileTimestamp(dirHandle, key);
       }
     }
 

@@ -248,6 +248,35 @@ async function writeAnnotations(dirHandle, annotations) {
   await writable.close();
 }
 
+// Scan manuscripts folder for .txt files not in index.json
+async function scanForNewManuscripts(dirHandle) {
+  try {
+    const msHandle = await dirHandle.getDirectoryHandle('manuscripts');
+    const index = await readManuscriptIndex(dirHandle);
+    const indexSet = new Set(index);
+
+    const newFiles = [];
+    for await (const entry of msHandle.values()) {
+      if (entry.kind === 'file' && entry.name.endsWith('.txt')) {
+        const siglum = entry.name.replace('.txt', '');
+        if (!indexSet.has(siglum)) {
+          newFiles.push(siglum);
+        }
+      }
+    }
+
+    if (newFiles.length > 0) {
+      const updatedIndex = [...index, ...newFiles];
+      await writeManuscriptIndex(dirHandle, updatedIndex);
+    }
+
+    return newFiles;
+  } catch (e) {
+    console.error('Failed to scan for new manuscripts:', e);
+    return [];
+  }
+}
+
 // List all .txt files in a folder (root or manuscripts subfolder)
 async function listTxtFiles(dirHandle) {
   const txtFiles = [];
@@ -413,6 +442,7 @@ window.FileSystem = {
   readAnnotations,
   writeAnnotations,
   listTxtFiles,
+  scanForNewManuscripts,
   initializeProject,
 
   // Low-level handle storage
