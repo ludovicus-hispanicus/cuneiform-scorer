@@ -260,11 +260,10 @@ async function loadManuscripts() {
       siglaMappings = config.sigla || {};
     }
 
-    // Scan for new .txt files not yet in index.json
-    const newFiles = await FileSystem.scanForNewManuscripts(dirHandle);
-    if (newFiles.length > 0) {
-      console.log('Discovered new manuscripts:', newFiles);
-    }
+    // Scan for new/removed .txt files vs index.json
+    const { newFiles, removedFiles } = await FileSystem.scanForNewManuscripts(dirHandle);
+    if (newFiles.length > 0) console.log('Discovered new manuscripts:', newFiles);
+    if (removedFiles.length > 0) console.log('Removed manuscripts:', removedFiles);
 
     // Load manuscript index (now includes any newly discovered files)
     const fileNames = await FileSystem.readManuscriptIndex(dirHandle);
@@ -1914,7 +1913,9 @@ async function pollForChanges() {
     }
 
     // Scan for new .txt files not yet in index.json (e.g. dropped into folder)
-    const newFiles = await FileSystem.scanForNewManuscripts(dirHandle);
+    const { newFiles, removedFiles } = await FileSystem.scanForNewManuscripts(dirHandle);
+
+    // Handle new files discovered on disk
     if (newFiles.length > 0) {
       console.log('Discovered new manuscripts:', newFiles);
       for (const fileName of newFiles) {
@@ -1932,7 +1933,36 @@ async function pollForChanges() {
           }
         }
       }
-      // Refresh timestamps for the updated index and new files
+    }
+
+    // Handle files removed from disk
+    if (removedFiles.length > 0) {
+      console.log('Manuscripts removed from disk:', removedFiles);
+      for (const fileName of removedFiles) {
+        const id = `ms-${fileName.toLowerCase()}`;
+        if (manuscripts[id]) {
+          const li = document.querySelector(`[data-id="${id}"]`);
+          if (li) li.remove();
+          if (activeManuscript === id) {
+            delete manuscripts[id];
+            activeManuscript = null;
+            const firstId = Object.keys(manuscripts)[0];
+            if (firstId) {
+              loadManuscript(firstId);
+            } else {
+              setEditorContent('No manuscripts yet. Click "+ Add" to create one.');
+            }
+          } else {
+            delete manuscripts[id];
+          }
+          delete currentTimestamps[`manuscripts/${fileName}.txt`];
+          hasChanges = true;
+        }
+      }
+    }
+
+    // Refresh timestamps if scan modified the index
+    if (newFiles.length > 0 || removedFiles.length > 0) {
       const newTs = await getFileTimestamp(dirHandle, 'manuscripts/index.json');
       currentTimestamps['manuscripts/index.json'] = newTs;
       for (const fileName of newFiles) {

@@ -248,32 +248,49 @@ async function writeAnnotations(dirHandle, annotations) {
   await writable.close();
 }
 
-// Scan manuscripts folder for .txt files not in index.json
+// Scan manuscripts folder for new/removed .txt files vs index.json
 async function scanForNewManuscripts(dirHandle) {
   try {
     const msHandle = await dirHandle.getDirectoryHandle('manuscripts');
     const index = await readManuscriptIndex(dirHandle);
     const indexSet = new Set(index);
 
-    const newFiles = [];
+    // Collect actual .txt files on disk
+    const filesOnDisk = new Set();
     for await (const entry of msHandle.values()) {
       if (entry.kind === 'file' && entry.name.endsWith('.txt')) {
-        const siglum = entry.name.replace('.txt', '');
-        if (!indexSet.has(siglum)) {
-          newFiles.push(siglum);
-        }
+        filesOnDisk.add(entry.name.replace('.txt', ''));
       }
     }
 
-    if (newFiles.length > 0) {
-      const updatedIndex = [...index, ...newFiles];
+    // Find new files (on disk but not in index)
+    const newFiles = [];
+    for (const siglum of filesOnDisk) {
+      if (!indexSet.has(siglum)) {
+        newFiles.push(siglum);
+      }
+    }
+
+    // Find removed files (in index but not on disk)
+    const removedFiles = [];
+    for (const siglum of index) {
+      if (!filesOnDisk.has(siglum)) {
+        removedFiles.push(siglum);
+      }
+    }
+
+    // Update index if anything changed
+    if (newFiles.length > 0 || removedFiles.length > 0) {
+      const updatedIndex = index
+        .filter(s => filesOnDisk.has(s))
+        .concat(newFiles);
       await writeManuscriptIndex(dirHandle, updatedIndex);
     }
 
-    return newFiles;
+    return { newFiles, removedFiles };
   } catch (e) {
     console.error('Failed to scan for new manuscripts:', e);
-    return [];
+    return { newFiles: [], removedFiles: [] };
   }
 }
 
