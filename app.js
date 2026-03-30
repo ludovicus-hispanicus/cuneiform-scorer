@@ -198,6 +198,9 @@ const reconstructedLines = {}; // Store editable reconstructed text for each lin
 const translationLines = {}; // Store editable translation for each line
 let siglaMappings = {}; // Museum number -> Siglum (from project config)
 
+let imagesIndex = {}; // { siglum: [{ fileName, originalName, addedAt }] }
+const imageObjectURLs = {}; // Cache: siglum -> { fileName -> objectURL }
+
 let showSigla = localStorage.getItem('show_sigla') === 'true'; // Toggle state
 let isDarkMode = localStorage.getItem('dark_mode') === 'true'; // Dark mode state
 
@@ -899,6 +902,10 @@ function setupTabs() {
       if (targetTab === 'colophons') {
         renderColophons();
       }
+      if (targetTab === 'images') {
+        renderImages();
+      }
+      updateUploadButtonVisibility();
     });
   });
 }
@@ -1036,6 +1043,12 @@ function loadManuscript(id) {
 
   // Re-render score
   renderScore();
+
+  // Re-render images if images tab is active
+  const activeTab = document.querySelector('.pane-tab.active');
+  if (activeTab && activeTab.dataset.tab === 'images') {
+    renderImages();
+  }
 }
 
 // Add a new manuscript
@@ -1187,8 +1200,9 @@ async function importManuscripts() {
 // Event listeners (Ace handles its own input events via initAceEditor)
 
 manuscriptList.addEventListener('click', (e) => {
-  if (e.target.classList.contains('manuscript-item')) {
-    loadManuscript(e.target.dataset.id);
+  const item = e.target.closest('.manuscript-item');
+  if (item) {
+    loadManuscript(item.dataset.id);
   }
 });
 
@@ -1763,6 +1777,1000 @@ async function saveAnnotations() {
 }
 
 // ===========================================
+// IMAGE MANAGEMENT
+// ===========================================
+
+// Initialize pdf.js worker
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+let viewerCurrentIndex = -1; // Currently viewed image index
+let viewerEntries = []; // Cached entries for navigation
+
+async function loadImagesIndex() {
+  if (!dirHandle) return;
+  imagesIndex = await FileSystem.readImagesIndex(dirHandle) || {};
+}
+
+async function saveImagesIndex() {
+  if (!dirHandle) return;
+  try {
+    await FileSystem.writeImagesIndex(dirHandle, imagesIndex);
+  } catch (err) {
+    console.error('Failed to save images index:', err);
+  }
+}
+
+function generateImageFileName(siglum, extension, pdfInfo) {
+  const existing = (imagesIndex[siglum] || []).map(e => e.fileName);
+  if (pdfInfo) {
+    const safeName = pdfInfo.pdfName.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_pdf$/i, '');
+    const base = `${siglum}_pdf_${safeName}_p${pdfInfo.page}.png`;
+    if (!existing.includes(base)) return base;
+    let i = 2;
+    while (existing.includes(`${siglum}_pdf_${safeName}_p${pdfInfo.page}_${i}.png`)) i++;
+    return `${siglum}_pdf_${safeName}_p${pdfInfo.page}_${i}.png`;
+  } else {
+    let counter = existing.length + 1;
+    let name;
+    do {
+      name = `${siglum}_${String(counter).padStart(3, '0')}.${extension}`;
+      counter++;
+    } while (existing.includes(name));
+    return name;
+  }
+}
+
+// Unified upload: accepts images (PNG/JPG) and PDFs
+async function uploadFile() {
+  if (!activeManuscript || !manuscripts[activeManuscript]) {
+    alert('Please select a manuscript first.');
+    return;
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,application/pdf';
+  input.multiple = true;
+
+  input.onchange = async () => {
+    const siglum = manuscripts[activeManuscript].siglum;
+    if (!imagesIndex[siglum]) imagesIndex[siglum] = [];
+
+    let hasPdf = false;
+    for (const file of input.files) {
+      const ext = file.name.split('.').pop().toLowerCase();
+
+      if (ext === 'pdf') {
+        // Handle PDF — open picker for first PDF found
+        hasPdf = true;
+        pdfFileName = file.name;
+        const arrayBuffer = await file.arrayBuffer();
+        setStatus('syncing', 'Loading PDF...');
+        try {
+          pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+          pdfCurrentPage = 1;
+          openPdfPicker();
+          setStatus('connected', 'Ready');
+        } catch (err) {
+          console.error('Failed to load PDF:', err);
+          alert('Failed to load PDF file.');
+          setStatus('connected', 'Ready');
+        }
+        break; // Only handle one PDF at a time
+      } else {
+        // Direct image upload
+        const imgExt = (ext === 'jpg' || ext === 'jpeg') ? 'jpg' : 'png';
+        const fileName = generateImageFileName(siglum, imgExt);
+        setStatus('saving', `Saving ${fileName}...`);
+        await FileSystem.saveImageFile(dirHandle, siglum, fileName, file);
+        imagesIndex[siglum].push({
+          fileName,
+          originalName: file.name,
+          addedAt: new Date().toISOString()
+        });
+      }
+    }
+
+    if (!hasPdf) {
+      await saveImagesIndex();
+      await refreshTimestamp('images/images-index.json');
+      renderImages();
+      setStatus('connected', 'Images saved');
+    }
+  };
+
+  input.click();
+}
+
+// PDF page picker
+let pdfDoc = null;
+let pdfCurrentPage = 1;
+let pdfFileName = '';
+
+function openPdfPicker() {
+  document.getElementById('pdf-picker-modal').classList.remove('hidden');
+  renderPdfPage();
+  updatePdfControls();
+}
+
+function closePdfPicker() {
+  document.getElementById('pdf-picker-modal').classList.add('hidden');
+  pdfDoc = null;
+}
+
+async function renderPdfPage() {
+  if (!pdfDoc) return;
+
+  const page = await pdfDoc.getPage(pdfCurrentPage);
+  const scale = 1.5;
+  const viewport = page.getViewport({ scale });
+
+  const canvas = document.getElementById('pdf-picker-canvas');
+  const context = canvas.getContext('2d');
+  canvas.height = viewport.height;
+  canvas.width = viewport.width;
+
+  await page.render({ canvasContext: context, viewport }).promise;
+}
+
+function updatePdfControls() {
+  if (!pdfDoc) return;
+  const pageInput = document.getElementById('pdf-page-input');
+  pageInput.value = pdfCurrentPage;
+  pageInput.max = pdfDoc.numPages;
+  document.getElementById('pdf-page-total').textContent = pdfDoc.numPages;
+  document.getElementById('pdf-prev-page').disabled = pdfCurrentPage <= 1;
+  document.getElementById('pdf-next-page').disabled = pdfCurrentPage >= pdfDoc.numPages;
+}
+
+function goToPdfPage(num) {
+  if (!pdfDoc) return;
+  num = Math.max(1, Math.min(num, pdfDoc.numPages));
+  if (num !== pdfCurrentPage) {
+    pdfCurrentPage = num;
+    renderPdfPage();
+    updatePdfControls();
+  }
+}
+
+async function savePdfPageAsImage() {
+  if (!pdfDoc || !activeManuscript) return;
+
+  const canvas = document.getElementById('pdf-picker-canvas');
+  const siglum = manuscripts[activeManuscript].siglum;
+
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+
+  const fileName = generateImageFileName(siglum, 'png', {
+    pdfName: pdfFileName,
+    page: pdfCurrentPage
+  });
+
+  if (!imagesIndex[siglum]) imagesIndex[siglum] = [];
+
+  setStatus('saving', `Saving ${fileName}...`);
+  await FileSystem.saveImageFile(dirHandle, siglum, fileName, blob);
+
+  imagesIndex[siglum].push({
+    fileName,
+    originalName: `${pdfFileName} p.${pdfCurrentPage}`,
+    addedAt: new Date().toISOString()
+  });
+
+  await saveImagesIndex();
+  await refreshTimestamp('images/images-index.json');
+  renderImages();
+  setStatus('connected', 'Page saved');
+  closePdfPicker();
+}
+
+// Show/hide upload button based on active tab
+function updateUploadButtonVisibility() {
+  const activeTab = document.querySelector('.pane-tab.active');
+  const uploadBtn = document.getElementById('upload-file-btn');
+  if (activeTab && activeTab.dataset.tab === 'images') {
+    uploadBtn.classList.remove('hidden');
+  } else {
+    uploadBtn.classList.add('hidden');
+  }
+}
+
+// Render thumbnail grid
+async function renderImages() {
+  const grid = document.getElementById('images-grid');
+  if (!grid) return;
+
+  // Close viewer when re-rendering (skip re-render to avoid loop)
+  closeViewer(true);
+
+  if (!activeManuscript || !manuscripts[activeManuscript]) {
+    grid.innerHTML = '<div class="images-empty">Select a manuscript to view its images.</div>';
+    return;
+  }
+
+  const siglum = manuscripts[activeManuscript].siglum;
+  const entries = imagesIndex[siglum] || [];
+
+  if (entries.length === 0) {
+    grid.innerHTML = '<div class="images-empty">No images yet. Click "+ Upload" to add images or PDFs.</div>';
+    return;
+  }
+
+  // Revoke old object URLs
+  if (imageObjectURLs[siglum]) {
+    Object.values(imageObjectURLs[siglum]).forEach(url => URL.revokeObjectURL(url));
+  }
+  imageObjectURLs[siglum] = {};
+
+  grid.innerHTML = '';
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const file = await FileSystem.readImageFile(dirHandle, siglum, entry.fileName);
+    if (!file) continue;
+
+    const url = URL.createObjectURL(file);
+    imageObjectURLs[siglum][entry.fileName] = url;
+
+    const card = document.createElement('div');
+    card.className = 'image-card';
+
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = entry.fileName;
+    img.loading = 'lazy';
+    card.appendChild(img);
+
+    // Show check badge if marked as transliterated
+    if (entry.checked) {
+      const badge = document.createElement('span');
+      badge.className = 'image-check-badge';
+      badge.title = 'Transliterated';
+      badge.textContent = '\u2713';
+      card.appendChild(badge);
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'image-card-footer';
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'image-name';
+    nameSpan.textContent = entry.originalName || entry.fileName;
+    nameSpan.title = entry.originalName || entry.fileName;
+    footer.appendChild(nameSpan);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'image-delete-btn';
+    deleteBtn.textContent = '\u00d7';
+    deleteBtn.title = 'Delete image';
+    footer.appendChild(deleteBtn);
+
+    card.appendChild(footer);
+
+    // Click thumbnail to open in viewer
+    const idx = i;
+    img.addEventListener('click', () => openViewer(idx));
+
+    // Delete button
+    deleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete ${entry.fileName}?`)) return;
+      await FileSystem.deleteImageFile(dirHandle, siglum, entry.fileName);
+      imagesIndex[siglum] = imagesIndex[siglum].filter(e2 => e2.fileName !== entry.fileName);
+      await saveImagesIndex();
+      await refreshTimestamp('images/images-index.json');
+      renderImages();
+    });
+
+    grid.appendChild(card);
+  }
+}
+
+// ===========================================
+// FABRIC.JS IMAGE VIEWER WITH ANNOTATIONS
+// ===========================================
+
+let fabricCanvas = null;
+let fabricImage = null;
+let currentZoom = 1;
+let isPanning = false;
+let panStartPoint = null;
+let annotationSaveTimeout = null;
+let isDrawMode = false;
+let isLineMode = false;
+let linePoints = []; // Points for the line tool
+let linePreview = null; // Temporary preview line during line drawing
+let activeTool = 'select'; // 'select', 'draw', 'line'
+
+function initFabricCanvas() {
+  if (fabricCanvas) return;
+  if (typeof fabric === 'undefined') {
+    console.error('Fabric.js not loaded — image annotations unavailable');
+    return;
+  }
+
+  fabricCanvas = new fabric.Canvas('viewer-canvas', {
+    selection: true,
+    preserveObjectStacking: true
+  });
+
+  // Pan with middle-click or when in select mode + drag on empty area
+  fabricCanvas.on('mouse:down', function (opt) {
+    if (isLineMode) {
+      handleLineClick(opt);
+      return;
+    }
+    if (opt.e.button === 1 || (activeTool === 'select' && !opt.target)) {
+      isPanning = true;
+      panStartPoint = { x: opt.e.clientX, y: opt.e.clientY };
+      fabricCanvas.selection = false;
+      fabricCanvas.setCursor('grabbing');
+    }
+  });
+
+  fabricCanvas.on('mouse:move', function (opt) {
+    if (isLineMode && linePoints.length > 0) {
+      updateLinePreview(opt);
+      return;
+    }
+    if (isPanning && panStartPoint) {
+      const vpt = fabricCanvas.viewportTransform;
+      vpt[4] += opt.e.clientX - panStartPoint.x;
+      vpt[5] += opt.e.clientY - panStartPoint.y;
+      panStartPoint = { x: opt.e.clientX, y: opt.e.clientY };
+      fabricCanvas.requestRenderAll();
+    }
+  });
+
+  fabricCanvas.on('mouse:up', function () {
+    if (isPanning) {
+      isPanning = false;
+      panStartPoint = null;
+      fabricCanvas.selection = (activeTool === 'select');
+      fabricCanvas.setCursor(activeTool === 'select' ? 'default' : 'crosshair');
+    }
+  });
+
+  fabricCanvas.on('mouse:dblclick', function () {
+    if (isLineMode && linePoints.length >= 2) {
+      finishLine();
+    }
+  });
+
+  // Sync toolbar when selecting an existing annotation
+  fabricCanvas.on('selection:created', syncToolbarFromSelection);
+  fabricCanvas.on('selection:updated', syncToolbarFromSelection);
+
+  // Zoom with mouse wheel
+  fabricCanvas.on('mouse:wheel', function (opt) {
+    const delta = opt.e.deltaY;
+    let zoom = fabricCanvas.getZoom();
+    zoom *= 0.999 ** delta;
+    zoom = Math.min(Math.max(zoom, 0.1), 10);
+    fabricCanvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
+    currentZoom = zoom;
+    updateZoomDisplay();
+    opt.e.preventDefault();
+    opt.e.stopPropagation();
+  });
+
+  // Auto-save annotations when a path is drawn
+  fabricCanvas.on('path:created', function (opt) {
+    // Ensure freehand paths are selectable and have flat ends
+    if (opt.path) {
+      opt.path.set({
+        selectable: true,
+        evented: true,
+        strokeLineCap: 'butt',
+        strokeLineJoin: 'miter'
+      });
+    }
+    debouncedSaveAnnotations();
+  });
+
+  // Auto-save when objects are modified
+  fabricCanvas.on('object:modified', function () {
+    debouncedSaveAnnotations();
+  });
+
+  // Pinch-to-zoom for touch screens
+  let lastTouchDist = 0;
+  let lastTouchCenter = null;
+  const upperCanvas = fabricCanvas.upperCanvasEl;
+
+  upperCanvas.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      lastTouchDist = Math.sqrt(dx * dx + dy * dy);
+      const rect = upperCanvas.getBoundingClientRect();
+      lastTouchCenter = {
+        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
+        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top
+      };
+    }
+  }, { passive: false });
+
+  upperCanvas.addEventListener('touchmove', function (e) {
+    if (e.touches.length === 2 && lastTouchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const scale = dist / lastTouchDist;
+
+      let zoom = fabricCanvas.getZoom() * scale;
+      zoom = Math.min(Math.max(zoom, 0.1), 10);
+      fabricCanvas.zoomToPoint(lastTouchCenter, zoom);
+      currentZoom = zoom;
+      updateZoomDisplay();
+
+      lastTouchDist = dist;
+      const rect = upperCanvas.getBoundingClientRect();
+      lastTouchCenter = {
+        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
+        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top
+      };
+    }
+  }, { passive: false });
+
+  upperCanvas.addEventListener('touchend', function () {
+    lastTouchDist = 0;
+    lastTouchCenter = null;
+  });
+}
+
+function resizeFabricCanvas() {
+  if (!fabricCanvas) return;
+  const wrapper = document.getElementById('viewer-canvas-wrapper');
+  if (!wrapper) return;
+  fabricCanvas.setWidth(wrapper.clientWidth);
+  fabricCanvas.setHeight(wrapper.clientHeight);
+  fabricCanvas.renderAll();
+}
+
+function updateZoomDisplay() {
+  document.getElementById('viewer-zoom-level').textContent = Math.round(currentZoom * 100) + '%';
+}
+
+function zoomViewer(factor) {
+  if (!fabricCanvas) return;
+  let zoom = fabricCanvas.getZoom() * factor;
+  zoom = Math.min(Math.max(zoom, 0.1), 10);
+  const center = fabricCanvas.getCenter();
+  fabricCanvas.zoomToPoint({ x: center.left, y: center.top }, zoom);
+  currentZoom = zoom;
+  updateZoomDisplay();
+}
+
+function zoomToFit() {
+  if (!fabricCanvas || !fabricImage) return;
+  const wrapper = document.getElementById('viewer-canvas-wrapper');
+  const ww = wrapper.clientWidth;
+  const wh = wrapper.clientHeight;
+  const iw = fabricImage.width;
+  const ih = fabricImage.height;
+
+  const scale = Math.min(ww / iw, wh / ih) * 0.95;
+  fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+  fabricCanvas.zoomToPoint({ x: ww / 2, y: wh / 2 }, scale);
+
+  // Center the image
+  const vpt = fabricCanvas.viewportTransform;
+  vpt[4] = (ww - iw * scale) / 2;
+  vpt[5] = (wh - ih * scale) / 2;
+  fabricCanvas.setViewportTransform(vpt);
+
+  currentZoom = scale;
+  updateZoomDisplay();
+}
+
+function setActiveTool(tool) {
+  // Cancel any in-progress line
+  cancelLine();
+
+  activeTool = tool;
+  isDrawMode = (tool === 'draw');
+  isLineMode = (tool === 'line');
+
+  if (!fabricCanvas) return;
+
+  fabricCanvas.isDrawingMode = isDrawMode;
+  fabricCanvas.selection = (tool === 'select');
+
+  if (isDrawMode) {
+    applyBrushSettings();
+  }
+
+  // Update toolbar buttons
+  document.getElementById('viewer-select-btn').classList.toggle('active', tool === 'select');
+  document.getElementById('viewer-draw-btn').classList.toggle('active', tool === 'draw');
+  document.getElementById('viewer-line-btn').classList.toggle('active', tool === 'line');
+
+  // Set cursor
+  if (tool === 'select') {
+    fabricCanvas.defaultCursor = 'default';
+  } else {
+    fabricCanvas.defaultCursor = 'crosshair';
+    fabricCanvas.discardActiveObject().renderAll();
+  }
+}
+
+// Keep old name as alias for compatibility
+function setDrawMode(enabled) {
+  setActiveTool(enabled ? 'draw' : 'select');
+}
+
+function applyBrushSettings() {
+  if (!fabricCanvas) return;
+  const color = document.getElementById('draw-color').value;
+  const thickness = parseInt(document.getElementById('draw-thickness').value, 10);
+  const opacity = parseInt(document.getElementById('draw-opacity').value, 10) / 100;
+
+  fabricCanvas.freeDrawingBrush = new fabric.PencilBrush(fabricCanvas);
+  fabricCanvas.freeDrawingBrush.color = hexToRgba(color, opacity);
+  fabricCanvas.freeDrawingBrush.width = thickness;
+  // Flat "Feder" style — not round
+  fabricCanvas.freeDrawingBrush.strokeLineCap = 'butt';
+  fabricCanvas.freeDrawingBrush.strokeLineJoin = 'miter';
+}
+
+// ---- Line tool (click-to-place polyline) ----
+
+function handleLineClick(opt) {
+  const pointer = fabricCanvas.getPointer(opt.e);
+  linePoints.push({ x: pointer.x, y: pointer.y });
+
+  // Show dot at the placed point
+  const dot = new fabric.Circle({
+    left: pointer.x - 3,
+    top: pointer.y - 3,
+    radius: 3,
+    fill: document.getElementById('draw-color').value,
+    selectable: false,
+    evented: false,
+    _isLineHelper: true
+  });
+  fabricCanvas.add(dot);
+
+  if (linePoints.length >= 2) {
+    updateLinePreviewPath();
+  }
+}
+
+function updateLinePreview(opt) {
+  if (linePoints.length === 0) return;
+  const pointer = fabricCanvas.getPointer(opt.e);
+
+  // Remove old preview
+  if (linePreview) fabricCanvas.remove(linePreview);
+
+  const allPts = [...linePoints, { x: pointer.x, y: pointer.y }];
+  linePreview = createPolylinePath(allPts, true);
+  fabricCanvas.add(linePreview);
+  fabricCanvas.renderAll();
+}
+
+function updateLinePreviewPath() {
+  if (linePreview) fabricCanvas.remove(linePreview);
+  if (linePoints.length < 2) return;
+  linePreview = createPolylinePath(linePoints, true);
+  fabricCanvas.add(linePreview);
+  fabricCanvas.renderAll();
+}
+
+function createPolylinePath(points, isPreview) {
+  const color = document.getElementById('draw-color').value;
+  const thickness = parseInt(document.getElementById('draw-thickness').value, 10);
+  const opacity = parseInt(document.getElementById('draw-opacity').value, 10) / 100;
+
+  // Build SVG path string: M x0,y0 L x1,y1 L x2,y2 ...
+  let pathStr = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length; i++) {
+    pathStr += ` L ${points[i].x} ${points[i].y}`;
+  }
+
+  return new fabric.Path(pathStr, {
+    fill: '',
+    stroke: hexToRgba(color, isPreview ? opacity * 0.5 : opacity),
+    strokeWidth: thickness,
+    strokeLineCap: 'butt',
+    strokeLineJoin: 'miter',
+    selectable: !isPreview,
+    evented: !isPreview,
+    _isLineHelper: isPreview
+  });
+}
+
+function finishLine() {
+  // Remove preview and helper dots
+  cleanupLineHelpers();
+
+  if (linePoints.length >= 2) {
+    const path = createPolylinePath(linePoints, false);
+    fabricCanvas.add(path);
+    fabricCanvas.renderAll();
+    debouncedSaveAnnotations();
+  }
+
+  linePoints = [];
+  linePreview = null;
+}
+
+function cancelLine() {
+  cleanupLineHelpers();
+  linePoints = [];
+  linePreview = null;
+}
+
+function cleanupLineHelpers() {
+  if (!fabricCanvas) return;
+  const helpers = fabricCanvas.getObjects().filter(obj => obj._isLineHelper);
+  helpers.forEach(obj => fabricCanvas.remove(obj));
+  if (linePreview) {
+    fabricCanvas.remove(linePreview);
+    linePreview = null;
+  }
+}
+
+// ---- Sync toolbar with selected object ----
+
+function syncToolbarFromSelection() {
+  if (activeTool !== 'select') return;
+  const obj = fabricCanvas.getActiveObject();
+  if (!obj || obj === fabricImage) return;
+
+  // Parse stroke color and opacity from the object
+  const stroke = obj.stroke || '';
+  const rgbaMatch = stroke.match(/rgba?\((\d+),(\d+),(\d+),?([\d.]*)\)/);
+  if (rgbaMatch) {
+    const r = parseInt(rgbaMatch[1]).toString(16).padStart(2, '0');
+    const g = parseInt(rgbaMatch[2]).toString(16).padStart(2, '0');
+    const b = parseInt(rgbaMatch[3]).toString(16).padStart(2, '0');
+    document.getElementById('draw-color').value = `#${r}${g}${b}`;
+    const alpha = rgbaMatch[4] !== '' ? parseFloat(rgbaMatch[4]) : 1;
+    const pct = Math.round(alpha * 100);
+    document.getElementById('draw-opacity').value = pct;
+    document.getElementById('draw-opacity-val').textContent = pct;
+  } else if (stroke.startsWith('#')) {
+    document.getElementById('draw-color').value = stroke;
+    document.getElementById('draw-opacity').value = 100;
+    document.getElementById('draw-opacity-val').textContent = '100';
+  }
+
+  if (obj.strokeWidth) {
+    const w = Math.round(obj.strokeWidth);
+    document.getElementById('draw-thickness').value = w;
+    document.getElementById('draw-thickness-val').textContent = w;
+  }
+}
+
+// Apply toolbar changes to selected object
+function applySettingsToSelection() {
+  if (!fabricCanvas) return;
+  const obj = fabricCanvas.getActiveObject();
+  if (!obj || obj === fabricImage) return;
+
+  const color = document.getElementById('draw-color').value;
+  const thickness = parseInt(document.getElementById('draw-thickness').value, 10);
+  const opacity = parseInt(document.getElementById('draw-opacity').value, 10) / 100;
+
+  obj.set({
+    stroke: hexToRgba(color, opacity),
+    strokeWidth: thickness
+  });
+  fabricCanvas.renderAll();
+  debouncedSaveAnnotations();
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function updateBrushSettings() {
+  if (!fabricCanvas) return;
+
+  // Update brush if in draw mode
+  if (fabricCanvas.isDrawingMode && fabricCanvas.freeDrawingBrush) {
+    const color = document.getElementById('draw-color').value;
+    const thickness = parseInt(document.getElementById('draw-thickness').value, 10);
+    const opacity = parseInt(document.getElementById('draw-opacity').value, 10) / 100;
+    fabricCanvas.freeDrawingBrush.color = hexToRgba(color, opacity);
+    fabricCanvas.freeDrawingBrush.width = thickness;
+  }
+
+  // Also apply to selected object if in select mode
+  if (activeTool === 'select') {
+    applySettingsToSelection();
+  }
+}
+
+function deleteSelectedAnnotation() {
+  if (!fabricCanvas) return;
+  const active = fabricCanvas.getActiveObjects();
+  if (active.length === 0) return;
+  active.forEach(obj => {
+    // Don't delete the background image
+    if (obj !== fabricImage) fabricCanvas.remove(obj);
+  });
+  fabricCanvas.discardActiveObject().renderAll();
+  debouncedSaveAnnotations();
+}
+
+function undoLastAnnotation() {
+  if (!fabricCanvas) return;
+  const objects = fabricCanvas.getObjects();
+  // Find last non-image object
+  for (let i = objects.length - 1; i >= 0; i--) {
+    if (objects[i] !== fabricImage) {
+      fabricCanvas.remove(objects[i]);
+      fabricCanvas.renderAll();
+      debouncedSaveAnnotations();
+      return;
+    }
+  }
+}
+
+// Save/load annotations as JSON
+function debouncedSaveAnnotations() {
+  if (annotationSaveTimeout) clearTimeout(annotationSaveTimeout);
+  annotationSaveTimeout = setTimeout(saveCurrentAnnotations, 500);
+}
+
+async function saveCurrentAnnotations() {
+  if (!dirHandle || !activeManuscript || viewerCurrentIndex < 0) return;
+  const siglum = manuscripts[activeManuscript].siglum;
+  const entry = viewerEntries[viewerCurrentIndex];
+  if (!entry) return;
+
+  // Collect only annotation objects (not the background image)
+  const annotations = fabricCanvas.getObjects().filter(obj => obj !== fabricImage);
+  if (annotations.length === 0) {
+    // Delete the annotations file if empty (optional: could also write empty array)
+    try {
+      await FileSystem.writeImageAnnotations(dirHandle, siglum, entry.fileName, []);
+    } catch (e) { /* ignore */ }
+    return;
+  }
+
+  const data = annotations.map(obj => obj.toJSON(['selectable', 'evented']));
+  try {
+    await FileSystem.writeImageAnnotations(dirHandle, siglum, entry.fileName, data);
+  } catch (err) {
+    console.error('Failed to save image annotations:', err);
+  }
+}
+
+async function loadAnnotationsForImage(siglum, fileName) {
+  if (!dirHandle) return;
+  const data = await FileSystem.readImageAnnotations(dirHandle, siglum, fileName);
+  if (!data || !Array.isArray(data) || data.length === 0) return;
+
+  // Load each annotation object
+  fabric.util.enlivenObjects(data, function (objects) {
+    objects.forEach(obj => {
+      fabricCanvas.add(obj);
+    });
+    fabricCanvas.renderAll();
+  });
+}
+
+// Open viewer with Fabric.js
+async function openViewer(index) {
+  if (!activeManuscript || !manuscripts[activeManuscript]) return;
+  const siglum = manuscripts[activeManuscript].siglum;
+  viewerEntries = imagesIndex[siglum] || [];
+  if (index < 0 || index >= viewerEntries.length) return;
+
+  viewerCurrentIndex = index;
+
+  const viewer = document.getElementById('image-viewer');
+  const grid = document.getElementById('images-grid');
+  grid.style.display = 'none';
+  viewer.classList.remove('hidden');
+
+  initFabricCanvas();
+  if (!fabricCanvas) return; // Fabric.js not available
+  resizeFabricCanvas();
+  await showViewerImage();
+}
+
+async function showViewerImage() {
+  if (viewerCurrentIndex < 0 || viewerCurrentIndex >= viewerEntries.length) return;
+  const siglum = manuscripts[activeManuscript].siglum;
+  const entry = viewerEntries[viewerCurrentIndex];
+  const url = imageObjectURLs[siglum]?.[entry.fileName];
+  if (!url) return;
+
+  // Save annotations from previous image before switching
+  if (annotationSaveTimeout) {
+    clearTimeout(annotationSaveTimeout);
+    await saveCurrentAnnotations();
+  }
+
+  // Clear canvas
+  fabricCanvas.clear();
+  fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+
+  // Load image as background object
+  fabric.Image.fromURL(url, function (img) {
+    fabricImage = img;
+    img.selectable = false;
+    img.evented = false;
+    fabricCanvas.add(img);
+    fabricCanvas.sendToBack(img);
+
+    zoomToFit();
+
+    // Load saved annotations
+    loadAnnotationsForImage(siglum, entry.fileName);
+  }, { crossOrigin: 'anonymous' });
+
+  // Update UI
+  document.getElementById('viewer-caption').textContent = entry.originalName || entry.fileName;
+  document.getElementById('viewer-counter').textContent = `${viewerCurrentIndex + 1} / ${viewerEntries.length}`;
+
+  // Update check button state
+  updateCheckButton();
+
+  // Reset to select mode
+  setActiveTool('select');
+}
+
+function updateCheckButton() {
+  const btn = document.getElementById('viewer-check-btn');
+  const entry = viewerEntries[viewerCurrentIndex];
+  if (!entry) return;
+  const isChecked = !!entry.checked;
+  btn.classList.toggle('checked', isChecked);
+  btn.title = isChecked ? 'Transliterated — click to unmark' : 'Mark as transliterated';
+}
+
+async function toggleCheck() {
+  if (viewerCurrentIndex < 0 || !activeManuscript) return;
+  const siglum = manuscripts[activeManuscript].siglum;
+  const entry = viewerEntries[viewerCurrentIndex];
+  if (!entry) return;
+
+  entry.checked = !entry.checked;
+
+  // Also update the main imagesIndex
+  const indexEntry = (imagesIndex[siglum] || []).find(e => e.fileName === entry.fileName);
+  if (indexEntry) indexEntry.checked = entry.checked;
+
+  // Update UI immediately
+  updateCheckButton();
+
+  try {
+    await saveImagesIndex();
+    await refreshTimestamp('images/images-index.json');
+  } catch (err) {
+    console.error('Failed to save check state:', err);
+  }
+}
+
+async function closeViewer(skipRerender) {
+  // Save before closing
+  if (fabricCanvas && viewerCurrentIndex >= 0) {
+    if (annotationSaveTimeout) clearTimeout(annotationSaveTimeout);
+    await saveCurrentAnnotations();
+  }
+
+  const viewer = document.getElementById('image-viewer');
+  const grid = document.getElementById('images-grid');
+  viewer.classList.add('hidden');
+  grid.style.display = '';
+  viewerCurrentIndex = -1;
+
+  // Clean up canvas
+  if (fabricCanvas) {
+    fabricCanvas.clear();
+    fabricImage = null;
+  }
+
+  // Re-render thumbnails to show updated annotations
+  if (!skipRerender) renderImages();
+}
+
+async function viewerPrev() {
+  if (viewerCurrentIndex > 0) {
+    viewerCurrentIndex--;
+    await showViewerImage();
+  }
+}
+
+async function viewerNext() {
+  if (viewerCurrentIndex < viewerEntries.length - 1) {
+    viewerCurrentIndex++;
+    await showViewerImage();
+  }
+}
+
+// Keyboard navigation for viewer
+document.addEventListener('keydown', (e) => {
+  if (viewerCurrentIndex < 0) return; // Viewer not open
+  // Don't intercept if a text input is focused
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  if (e.key === 'Escape') {
+    if (isLineMode && linePoints.length > 0) {
+      cancelLine(); // Cancel in-progress line
+    } else if (activeTool !== 'select') {
+      setActiveTool('select'); // Go back to select mode
+    } else {
+      closeViewer(); // Close viewer
+    }
+    e.preventDefault();
+  } else if (e.key === 'Enter' && isLineMode && linePoints.length >= 2) {
+    finishLine();
+    e.preventDefault();
+  } else if (e.key === 'ArrowLeft' && activeTool === 'select') {
+    viewerPrev();
+    e.preventDefault();
+  } else if (e.key === 'ArrowRight' && activeTool === 'select') {
+    viewerNext();
+    e.preventDefault();
+  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    deleteSelectedAnnotation();
+    e.preventDefault();
+  }
+});
+
+// Resize canvas when window resizes
+window.addEventListener('resize', () => {
+  if (viewerCurrentIndex >= 0) resizeFabricCanvas();
+});
+
+// Event listeners
+document.getElementById('upload-file-btn').addEventListener('click', uploadFile);
+document.getElementById('viewer-prev').addEventListener('click', viewerPrev);
+document.getElementById('viewer-next').addEventListener('click', viewerNext);
+document.getElementById('viewer-check-btn').addEventListener('click', toggleCheck);
+
+// Toolbar buttons
+document.getElementById('viewer-select-btn').addEventListener('click', () => setActiveTool('select'));
+document.getElementById('viewer-draw-btn').addEventListener('click', () => setActiveTool('draw'));
+document.getElementById('viewer-line-btn').addEventListener('click', () => setActiveTool('line'));
+document.getElementById('viewer-erase-btn').addEventListener('click', deleteSelectedAnnotation);
+document.getElementById('viewer-undo-btn').addEventListener('click', undoLastAnnotation);
+document.getElementById('viewer-zoom-in').addEventListener('click', () => zoomViewer(1.25));
+document.getElementById('viewer-zoom-out').addEventListener('click', () => zoomViewer(0.8));
+document.getElementById('viewer-zoom-fit').addEventListener('click', zoomToFit);
+
+// Draw options
+document.getElementById('draw-color').addEventListener('input', updateBrushSettings);
+document.getElementById('draw-thickness').addEventListener('input', (e) => {
+  document.getElementById('draw-thickness-val').textContent = e.target.value;
+  updateBrushSettings();
+});
+document.getElementById('draw-opacity').addEventListener('input', (e) => {
+  document.getElementById('draw-opacity-val').textContent = e.target.value;
+  updateBrushSettings();
+});
+
+// PDF picker listeners
+document.getElementById('close-pdf-picker').addEventListener('click', closePdfPicker);
+document.getElementById('pdf-cancel').addEventListener('click', closePdfPicker);
+document.getElementById('pdf-prev-page').addEventListener('click', () => goToPdfPage(pdfCurrentPage - 1));
+document.getElementById('pdf-next-page').addEventListener('click', () => goToPdfPage(pdfCurrentPage + 1));
+document.getElementById('pdf-page-input').addEventListener('change', (e) => {
+  goToPdfPage(parseInt(e.target.value, 10) || 1);
+});
+document.getElementById('pdf-page-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') goToPdfPage(parseInt(e.target.value, 10) || 1);
+});
+document.getElementById('pdf-save-page').addEventListener('click', savePdfPageAsImage);
+document.getElementById('pdf-picker-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closePdfPicker();
+});
+
+// ===========================================
 // FILE POLLING AUTO-SYNC
 // ===========================================
 // Polls for file changes on disk (useful when sharing folders via OneDrive, Dropbox, etc.)
@@ -1858,6 +2866,10 @@ async function collectTimestamps() {
   // Track index.json for new manuscripts
   const idxTs = await getFileTimestamp(dirHandle, 'manuscripts/index.json');
   if (idxTs) timestamps['manuscripts/index.json'] = idxTs;
+
+  // Track images index
+  const imgTs = await getFileTimestamp(dirHandle, 'images/images-index.json');
+  if (imgTs) timestamps['images/images-index.json'] = imgTs;
 
   return timestamps;
 }
@@ -1969,6 +2981,17 @@ async function pollForChanges() {
         const key = `manuscripts/${fileName}.txt`;
         currentTimestamps[key] = await getFileTimestamp(dirHandle, key);
       }
+    }
+
+    // Check images index for changes from other clients
+    if (currentTimestamps['images/images-index.json'] !== lastKnownTimestamps['images/images-index.json']) {
+      console.log('images-index.json changed on disk, reloading...');
+      await loadImagesIndex();
+      const activeTab = document.querySelector('.pane-tab.active');
+      if (activeTab && activeTab.dataset.tab === 'images') {
+        renderImages();
+      }
+      hasChanges = true;
     }
 
     // Check manuscript index for new/removed manuscripts
@@ -2169,6 +3192,9 @@ async function init() {
   // Load annotations
   await loadAnnotations();
   renderAnnotations();
+
+  // Load images index
+  await loadImagesIndex();
 
   // Load manuscripts from local folder
   await loadManuscripts();

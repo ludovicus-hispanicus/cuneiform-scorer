@@ -427,6 +427,89 @@ function generateProjectId() {
 }
 
 // ===========================================
+// IMAGE FILE OPERATIONS
+// ===========================================
+
+// Read images index from images/images-index.json
+async function readImagesIndex(dirHandle) {
+  try {
+    const imagesDir = await dirHandle.getDirectoryHandle('images');
+    const indexHandle = await imagesDir.getFileHandle('images-index.json');
+    const file = await indexHandle.getFile();
+    return JSON.parse(await file.text());
+  } catch (e) {
+    return {};
+  }
+}
+
+// Write images index to images/images-index.json
+async function writeImagesIndex(dirHandle, index) {
+  const imagesDir = await dirHandle.getDirectoryHandle('images', { create: true });
+  const indexHandle = await imagesDir.getFileHandle('images-index.json', { create: true });
+  const writable = await indexHandle.createWritable();
+  await writable.write(JSON.stringify(index, null, 2));
+  await writable.close();
+}
+
+// Save an image file to images/<siglum>/<fileName>
+async function saveImageFile(dirHandle, siglum, fileName, blob) {
+  const imagesDir = await dirHandle.getDirectoryHandle('images', { create: true });
+  const msDir = await imagesDir.getDirectoryHandle(siglum, { create: true });
+  const fileHandle = await msDir.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+// Read an image file from images/<siglum>/<fileName>
+async function readImageFile(dirHandle, siglum, fileName) {
+  try {
+    const imagesDir = await dirHandle.getDirectoryHandle('images');
+    const msDir = await imagesDir.getDirectoryHandle(siglum);
+    const fileHandle = await msDir.getFileHandle(fileName);
+    return await fileHandle.getFile();
+  } catch (e) {
+    return null;
+  }
+}
+
+// Delete an image file from images/<siglum>/<fileName>
+async function deleteImageFile(dirHandle, siglum, fileName) {
+  try {
+    const imagesDir = await dirHandle.getDirectoryHandle('images');
+    const msDir = await imagesDir.getDirectoryHandle(siglum);
+    await msDir.removeEntry(fileName);
+    return true;
+  } catch (e) {
+    console.error(`Failed to delete image ${siglum}/${fileName}:`, e);
+    return false;
+  }
+}
+
+// Read image annotations JSON from images/<siglum>/<fileName>.annotations.json
+async function readImageAnnotations(dirHandle, siglum, fileName) {
+  try {
+    const imagesDir = await dirHandle.getDirectoryHandle('images');
+    const msDir = await imagesDir.getDirectoryHandle(siglum);
+    const annHandle = await msDir.getFileHandle(fileName + '.annotations.json');
+    const file = await annHandle.getFile();
+    return JSON.parse(await file.text());
+  } catch (e) {
+    return null;
+  }
+}
+
+// Write image annotations JSON to images/<siglum>/<fileName>.annotations.json
+async function writeImageAnnotations(dirHandle, siglum, fileName, data) {
+  const imagesDir = await dirHandle.getDirectoryHandle('images', { create: true });
+  const msDir = await imagesDir.getDirectoryHandle(siglum, { create: true });
+  const annHandle = await msDir.getFileHandle(fileName + '.annotations.json', { create: true });
+  const writable = await annHandle.createWritable();
+  await writable.write(JSON.stringify(data));
+  await writable.close();
+}
+
+// ===========================================
 // EXPORTS (attach to window for use in HTML)
 // ===========================================
 
@@ -461,6 +544,15 @@ window.FileSystem = {
   listTxtFiles,
   scanForNewManuscripts,
   initializeProject,
+
+  // Image operations
+  readImagesIndex,
+  writeImagesIndex,
+  saveImageFile,
+  readImageFile,
+  deleteImageFile,
+  readImageAnnotations,
+  writeImageAnnotations,
 
   // Low-level handle storage
   saveHandle,

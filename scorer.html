@@ -13,6 +13,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-searchbox.js"></script>
   <!-- Custom Cuneiform Mode -->
   <script src="cuneiform-score-mode.js"></script>
+  <!-- PDF.js for PDF page extraction -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Fabric.js for image annotation -->
+  <script src="fabric.min.js"></script>
   <!-- Y.js for real-time collaboration (optional) -->
   <script>
     // Mark collaboration as disabled - Y.js CDN loading is problematic
@@ -74,10 +78,69 @@
           <div class="pane-tabs">
             <button class="pane-tab active" data-tab="score">Score</button>
             <button class="pane-tab" data-tab="colophons">Colophons</button>
+            <button class="pane-tab" data-tab="images">Images</button>
           </div>
+          <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
         </div>
         <div id="score" class="score tab-content active" data-tab="score"></div>
         <div id="colophons" class="score tab-content" data-tab="colophons"></div>
+        <div id="images-tab" class="tab-content" data-tab="images">
+          <div id="images-grid" class="images-grid">
+            <div class="images-empty">No images for this manuscript.</div>
+          </div>
+          <div id="image-viewer" class="image-viewer hidden">
+            <div class="viewer-toolbar">
+              <div class="viewer-toolbar-group">
+                <button id="viewer-select-btn" class="viewer-tool-btn active" title="Select / Pan">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/></svg>
+                </button>
+                <button id="viewer-draw-btn" class="viewer-tool-btn" title="Freehand draw">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+                </button>
+                <button id="viewer-line-btn" class="viewer-tool-btn" title="Line tool (click to place points, double-click to finish)">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="19" x2="19" y2="5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/></svg>
+                </button>
+                <button id="viewer-erase-btn" class="viewer-tool-btn" title="Delete selected annotation">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+                </button>
+                <button id="viewer-undo-btn" class="viewer-tool-btn" title="Undo last annotation">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 105.64-11.36L1 10"/></svg>
+                </button>
+              </div>
+              <div class="viewer-toolbar-group viewer-draw-options" id="draw-options">
+                <input type="color" id="draw-color" value="#ff0000" title="Line color">
+                <label class="draw-thickness-label" title="Line thickness">
+                  <input type="range" id="draw-thickness" min="1" max="20" value="10">
+                  <span id="draw-thickness-val">10</span>px
+                </label>
+                <label class="draw-opacity-label" title="Opacity">
+                  <input type="range" id="draw-opacity" min="10" max="100" value="60" step="5">
+                  <span id="draw-opacity-val">60</span>%
+                </label>
+              </div>
+              <div class="viewer-toolbar-group">
+                <button id="viewer-zoom-in" class="viewer-tool-btn" title="Zoom in">+</button>
+                <span id="viewer-zoom-level" class="viewer-zoom-level">100%</span>
+                <button id="viewer-zoom-out" class="viewer-tool-btn" title="Zoom out">&minus;</button>
+                <button id="viewer-zoom-fit" class="viewer-tool-btn" title="Fit to view">Fit</button>
+              </div>
+              <div class="viewer-toolbar-group viewer-nav-group">
+                <button class="viewer-tool-btn" id="viewer-prev" title="Previous image">&lsaquo;</button>
+                <span id="viewer-counter" class="viewer-counter"></span>
+                <button class="viewer-tool-btn" id="viewer-next" title="Next image">&rsaquo;</button>
+              </div>
+              <div class="viewer-toolbar-group">
+                <button id="viewer-check-btn" class="viewer-tool-btn viewer-check-btn" title="Mark as transliterated">&#x2713;</button>
+              </div>
+            </div>
+            <div class="viewer-canvas-wrapper" id="viewer-canvas-wrapper">
+              <canvas id="viewer-canvas"></canvas>
+            </div>
+            <div class="viewer-footer">
+              <span id="viewer-caption"></span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -167,6 +230,28 @@
     </div>
     <div id="annotations-list" class="annotations-list">
       <div class="annotations-empty">No annotations yet.</div>
+    </div>
+  </div>
+
+  <!-- PDF Page Picker Modal -->
+  <div id="pdf-picker-modal" class="modal hidden">
+    <div class="modal-content pdf-picker-modal">
+      <div class="modal-header">
+        <h3>Select a Page from PDF</h3>
+        <button class="modal-close" id="close-pdf-picker">&times;</button>
+      </div>
+      <div class="pdf-picker-controls">
+        <button id="pdf-prev-page" disabled>&larr; Prev</button>
+        <span class="pdf-page-nav">Page <input type="number" id="pdf-page-input" value="1" min="1"> / <span id="pdf-page-total">1</span></span>
+        <button id="pdf-next-page" disabled>Next &rarr;</button>
+      </div>
+      <div class="pdf-picker-canvas-wrapper">
+        <canvas id="pdf-picker-canvas"></canvas>
+      </div>
+      <div class="pdf-picker-actions">
+        <button id="pdf-save-page" class="btn-primary">Save This Page as Image</button>
+        <button id="pdf-cancel">Cancel</button>
+      </div>
     </div>
   </div>
 
