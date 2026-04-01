@@ -177,6 +177,8 @@ function setStatus(status, text) {
       indicator.classList.add('connected');
     } else if (status === 'syncing' || status === 'saving') {
       indicator.classList.add('syncing');
+    } else if (status === 'unsaved') {
+      indicator.classList.add('unsaved');
     } else if (status === 'error') {
       indicator.classList.add('error');
     }
@@ -500,6 +502,7 @@ const scorePanel = document.getElementById('score');
 const manuscriptList = document.getElementById('manuscript-list');
 const addManuscriptBtn = document.getElementById('add-manuscript-btn');
 const exportBtn = document.getElementById('export-btn');
+const saveBtn = document.getElementById('save-btn');
 const searchAllBtn = document.getElementById('search-all-btn');
 
 // Initialize Ace Editor
@@ -527,11 +530,11 @@ function initAceEditor() {
 
   // Handle changes
   aceEditor.session.on('change', () => {
-    if (isPollingUpdate) return; // Skip saves triggered by polling reloads
+    if (isPollingUpdate || isLoadingContent) return; // Skip programmatic content changes
     saveCurrentManuscript();
     syncManuscriptToYjs(activeManuscript);
     renderScore();
-    debouncedSave();
+    markUnsaved();
   });
 
   return aceEditor;
@@ -543,9 +546,12 @@ function getEditorContent() {
 }
 
 // Setter for editor content
+let isLoadingContent = false;
 function setEditorContent(content) {
   if (aceEditor) {
+    isLoadingContent = true;
     aceEditor.setValue(content, -1); // -1 moves cursor to start
+    isLoadingContent = false;
   }
 }
 
@@ -750,7 +756,7 @@ function renderScore() {
     el.addEventListener('input', (e) => {
       const lineNum = e.target.dataset.line;
       translationLines[lineNum] = e.target.innerText;
-      debouncedSave();
+      markUnsaved();
     });
   });
 
@@ -760,7 +766,7 @@ function renderScore() {
       const lineNum = e.target.dataset.line;
       reconstructedLines[lineNum] = e.target.innerText;
       syncReconstructedToYjs(lineNum, e.target.innerText); // Sync to collaborators
-      debouncedSave();
+      markUnsaved();
     });
   });
 }
@@ -968,18 +974,48 @@ async function updateManuscriptIndex() {
   }
 }
 
-// Debounced auto-save
-let saveTimeout = null;
-function debouncedSave() {
-  if (saveTimeout) clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(async () => {
+// Manual save — no auto-save to avoid duplicate files on cloud-synced folders (Google Drive)
+let hasUnsavedChanges = false;
+
+function markUnsaved() {
+  if (!hasUnsavedChanges) {
+    hasUnsavedChanges = true;
+    setStatus('unsaved', 'Unsaved changes');
+  }
+}
+
+async function saveAll() {
+  if (!dirHandle) return;
+  try {
+    setStatus('syncing', 'Saving...');
     if (activeManuscript) {
       await saveToFile(activeManuscript);
     }
     await saveScoreToFile();
     await saveScoreDataToFile();
-  }, 1000); // Save 1 second after last edit
+    hasUnsavedChanges = false;
+    setStatus('connected', 'Saved');
+  } catch (err) {
+    console.error('Save error:', err);
+    setStatus('error', 'Save failed');
+  }
 }
+
+// Ctrl+S to save
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    saveAll();
+  }
+});
+
+// Warn before leaving with unsaved changes
+window.addEventListener('beforeunload', (e) => {
+  if (hasUnsavedChanges) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 
 // Save score data (reconstructed text and translations) to local folder
 async function saveScoreDataToFile() {
@@ -1628,6 +1664,7 @@ function exportScore() {
 }
 
 exportBtn.addEventListener('click', exportScore);
+saveBtn.addEventListener('click', saveAll);
 
 // ===========================================
 // ANNOTATIONS (Bug / Enhancement Tracker)
@@ -3063,7 +3100,7 @@ async function pollForChanges() {
     lastKnownTimestamps = currentTimestamps;
 
     if (hasChanges) {
-      setStatus('connected', 'Synced');
+      if (!hasUnsavedChanges) setStatus('connected', 'Synced');
       renderScore();
     }
   } catch (err) {

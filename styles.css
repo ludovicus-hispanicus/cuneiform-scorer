@@ -172,6 +172,10 @@ body {
   animation: pulse 1s infinite;
 }
 
+.gdrive-indicator.unsaved {
+  background: #ff9800;
+}
+
 .gdrive-indicator.error {
   background: #f44336;
 }
