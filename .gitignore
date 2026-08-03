@@ -19,3 +19,11 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Desktop build outputs
+release/
+dist/
+dist-validator/
+build/
+__pycache__/
+*.pyc

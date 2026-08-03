@@ -8,6 +8,9 @@
   <link rel="stylesheet" href="styles.css">
   <!-- File System API -->
   <script src="file-system.js"></script>
+  <!-- eBL API client + ATF compiler -->
+  <script src="ebl-client.js"></script>
+  <script src="ebl-atf.js"></script>
   <!-- Ace Editor -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-searchbox.js"></script>
@@ -47,6 +50,7 @@
         </svg>
       </button>
       <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes</button>
+      <button id="recon-view-btn" title="Open Reconstructed View (export artifact)">Recon view</button>
       <button id="export-btn">Export</button>
     </div>
   </header>
@@ -252,6 +256,62 @@
       <div class="pdf-picker-actions">
         <button id="pdf-save-page" class="btn-primary">Save This Page as Image</button>
         <button id="pdf-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reconstructed View overlay (full-screen export artifact editor) -->
+  <div id="recon-view" class="recon-view hidden">
+    <div class="recon-view-header">
+      <h2>Reconstructed View — Export Artifact</h2>
+      <span id="recon-view-subtitle" class="recon-view-subtitle"></span>
+      <span class="header-spacer"></span>
+      <span id="recon-token-pill" class="ebl-status-pill warn">
+        <span class="dot"></span><span id="recon-token-text">No token</span>
+      </span>
+      <button id="recon-refresh-btn" title="Rebuild artifact from current score (discards in-view edits)">Refresh from score</button>
+      <button id="recon-validate-btn" title="Validate against the eBL ATF grammar (shows up to 5 errors per pass)">Validate</button>
+      <button id="recon-export-btn" class="btn-primary" title="Export this artifact to eBL">Export to eBL</button>
+      <button id="recon-close-btn" title="Close and sync edits back">Close</button>
+    </div>
+    <div id="recon-ace" class="recon-ace"></div>
+    <div id="recon-status" class="recon-status hidden"></div>
+  </div>
+
+  <!-- Export modal -->
+  <div id="export-modal" class="modal hidden">
+    <div class="modal-content export-modal">
+      <div class="modal-header">
+        <h3>Export to eBL Corpus</h3>
+        <button class="modal-close" id="export-close-btn">&times;</button>
+      </div>
+      <div class="export-modal-body">
+        <div class="export-row">
+          <span class="export-label">Target chapter</span>
+          <span class="export-value" id="export-target">—</span>
+        </div>
+        <div class="export-row">
+          <span class="export-label">Token</span>
+          <span class="export-value" id="export-token-status">—</span>
+        </div>
+        <div class="export-row">
+          <span class="export-label">Manuscripts</span>
+          <span class="export-value" id="export-ms-summary">—</span>
+        </div>
+        <div id="export-warnings" class="export-warnings hidden"></div>
+        <div id="export-progress" class="export-progress hidden">
+          <div class="export-step" data-step="manuscripts">
+            <span class="step-icon">·</span> Register manuscripts
+          </div>
+          <div class="export-step" data-step="import">
+            <span class="step-icon">·</span> Import lines
+          </div>
+        </div>
+        <div id="export-result" class="export-result hidden"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="export-cancel-btn">Cancel</button>
+        <button id="export-go-btn" class="btn-primary">Export</button>
       </div>
     </div>
   </div>

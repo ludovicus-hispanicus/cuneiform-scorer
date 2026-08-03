@@ -1,9 +1,17 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const Y = require('yjs');
 const { setupWSConnection } = require('y-websocket/bin/utils');
+
+// Validator binary resolution
+// - In bundled Electron desktop builds, VALIDATE_ATF_BIN points at the PyInstaller exe
+// - In dev (`npm start` with a system Python), we spawn `python validate_atf.py`
+const VALIDATE_ATF_BIN = process.env.VALIDATE_ATF_BIN || null;
+const VALIDATE_SCRIPT = path.join(__dirname, 'validate_atf.py');
+const PYTHON_EXE = process.env.PYTHON_EXE || (process.platform === 'win32' ? 'python' : 'python3');
 
 const PORT = process.env.PORT || 3000;
 const PROJECTS_DIR = path.join(__dirname, 'projects');
@@ -43,6 +51,122 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
     res.end();
+    return;
+  }
+
+  // ===========================================
+  // HEALTH PROBE — used by the frontend to detect "desktop mode" (validator
+  // available) vs "browser/dev mode" (no validator).
+  // ===========================================
+  if (req.method === 'GET' && req.url === '/api/health') {
+    let validatorAvailable = false;
+    let mode = 'dev';
+    if (VALIDATE_ATF_BIN && fs.existsSync(VALIDATE_ATF_BIN)) {
+      validatorAvailable = true;
+      mode = 'desktop';
+    } else {
+      // Best-effort check for system python on PATH. Not authoritative —
+      // the actual spawn in /api/validate-atf will report definitively.
+      try {
+        const probe = require('child_process').spawnSync(PYTHON_EXE, ['-c', 'import lark'], { timeout: 3000 });
+        if (probe.status === 0) validatorAvailable = true;
+      } catch (_) { /* python not on PATH */ }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      validator: validatorAvailable,
+      mode,
+      app: 'cuneiform-scorer',
+    }));
+    return;
+  }
+
+  // ===========================================
+  // eBL ATF VALIDATOR — spawns Python or the bundled PyInstaller binary
+  // ===========================================
+  if (req.method === 'POST' && req.url === '/api/validate-atf') {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let payload;
+      try {
+        payload = JSON.parse(body);
+      } catch (_) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        return;
+      }
+      const atf = (payload && typeof payload.atf === 'string') ? payload.atf : '';
+
+      // Pick the bundled binary if present, otherwise fall back to system Python.
+      let cmd, args;
+      if (VALIDATE_ATF_BIN && fs.existsSync(VALIDATE_ATF_BIN)) {
+        cmd = VALIDATE_ATF_BIN;
+        args = [];
+      } else {
+        cmd = PYTHON_EXE;
+        args = [VALIDATE_SCRIPT];
+      }
+
+      let child;
+      try {
+        child = spawn(cmd, args, {
+          // PyInstaller binaries set PYTHONIOENCODING themselves, but be explicit
+          // for the dev python path.
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+        });
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Failed to spawn validator',
+          detail: err.message,
+          hint: 'Install Python + `pip install lark`, or set VALIDATE_ATF_BIN to the bundled binary.',
+        }));
+        return;
+      }
+
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (d) => { stdout += d; });
+      child.stderr.on('data', (d) => { stderr += d; });
+
+      const timeout = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch (_) {}
+      }, 30000);
+
+      child.on('error', (err) => {
+        clearTimeout(timeout);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Validator process error',
+          detail: err.message,
+        }));
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeout);
+        if (code !== 0 && !stdout) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Validator exited with code ' + code,
+            stderr: stderr.slice(0, 2000),
+          }));
+          return;
+        }
+        // Pass through the JSON the validator wrote.
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(stdout);
+      });
+
+      // Pipe ATF into validator stdin
+      child.stdin.setDefaultEncoding('utf8');
+      child.stdin.write(atf);
+      child.stdin.end();
+    });
     return;
   }
 

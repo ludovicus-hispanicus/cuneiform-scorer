@@ -6,9 +6,10 @@
   <title>Manage Project - Manuscript Scorer</title>
   <link rel="stylesheet" href="index.css">
   <script src="file-system.js"></script>
+  <script src="ebl-client.js"></script>
   <style>
     .manage-content {
-      max-width: 800px;
+      max-width: 1400px;
       margin: 0 auto;
       padding: 2rem;
     }
@@ -115,6 +116,18 @@
 
     .delete-file-btn:hover {
       color: #dc3545;
+    }
+
+    .file-item a[data-ebl-link] {
+      color: inherit;
+      text-decoration: none;
+      flex: 1;
+      transition: color 0.15s;
+    }
+
+    .file-item a[data-ebl-link]:hover {
+      color: var(--accent);
+      text-decoration: underline;
     }
 
     .file-item.indexed {
@@ -283,6 +296,174 @@
     .save-indicator.saved {
       color: #4caf50;
     }
+
+    /* eBL manuscript metadata table */
+    .meta-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    .meta-table th,
+    .meta-table td {
+      padding: 0.4rem 0.5rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+      vertical-align: middle;
+    }
+    .meta-table th {
+      background: var(--bg-light);
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    .meta-table .meta-file {
+      font-family: "Consolas", "Monaco", monospace;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .meta-table .meta-file a[data-ebl-link] {
+      color: inherit;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    .meta-table .meta-file a[data-ebl-link]:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+    .meta-table input,
+    .meta-table select {
+      width: 100%;
+      padding: 0.3rem 0.4rem;
+      border: 1px solid var(--border-color);
+      border-radius: 3px;
+      font-size: 0.85rem;
+      background: var(--bg-white);
+      color: var(--text-dark);
+      box-sizing: border-box;
+    }
+    .meta-table input:focus,
+    .meta-table select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .meta-table input.disambig {
+      max-width: 60px;
+    }
+    .meta-table .col-siglum-preview {
+      font-family: "Consolas", "Monaco", monospace;
+      color: var(--accent);
+      white-space: nowrap;
+    }
+    .meta-row.has-errors {
+      background: #fff5f5;
+    }
+    .meta-row-errors {
+      color: #c62828;
+      font-size: 0.75rem;
+      padding-left: 0.5rem;
+    }
+    .meta-table-wrap {
+      max-height: 500px;
+      overflow: auto;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+    }
+
+    /* eBL settings panel */
+    .ebl-status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .ebl-status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    .ebl-status-pill .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #999;
+    }
+    .ebl-status-pill.ok { background: #e8f5e9; color: #2e7d32; }
+    .ebl-status-pill.ok .dot { background: #4caf50; }
+    .ebl-status-pill.warn { background: #fff3e0; color: #ef6c00; }
+    .ebl-status-pill.warn .dot { background: #ff9800; }
+    .ebl-status-pill.bad { background: #ffebee; color: #c62828; }
+    .ebl-status-pill.bad .dot { background: #e53935; }
+    .ebl-form-row {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.6rem;
+    }
+    .ebl-form-row label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .ebl-form-row input {
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 0.85rem;
+    }
+    .ebl-token-row textarea {
+      grid-column: 2;
+      min-height: 80px;
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 0.75rem;
+      resize: vertical;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .ebl-target-row {
+      display: grid;
+      grid-template-columns: 160px repeat(5, 1fr);
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.6rem;
+    }
+    .ebl-target-row input {
+      padding: 0.4rem 0.5rem;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 0.85rem;
+      text-align: center;
+    }
+    .ebl-target-row .target-header {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      text-align: center;
+    }
+    .ebl-hint {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.4rem;
+    }
+    .ebl-hint code {
+      background: var(--bg-light);
+      padding: 0.1rem 0.3rem;
+      border-radius: 3px;
+      font-size: 0.78rem;
+    }
   </style>
 </head>
 <body>
@@ -312,23 +493,100 @@
       </div>
     </div>
 
-    <!-- Siglum Mapping Section -->
+    <!-- eBL Manuscript Metadata Section -->
     <div class="section">
-      <h2>Siglum Mapping <span id="mapping-save-indicator" class="save-indicator"></span></h2>
-      <p>Map museum numbers (filenames) to scholarly sigla. These sigla will be used in the manuscript sidebar and score display.</p>
+      <h2>eBL Manuscript Metadata <span id="mapping-save-indicator" class="save-indicator"></span></h2>
+      <p>Per-manuscript metadata used when exporting to the eBL corpus. The siglum eBL assigns is built from
+        <code>provenance.abbr + period.abbr + type.abbr + disambiguator</code> and previewed in the rightmost column.</p>
 
-      <div id="mapping-container">
-        <table class="mapping-table">
+      <div class="actions" style="margin-bottom: 0.75rem;">
+        <button id="ebl-sync-meta-btn" class="btn btn-secondary" type="button">
+          &#x2193; Auto-fill from eBL
+        </button>
+        <span class="ebl-hint" style="margin: 0;">Pulls from the target chapter if it exists, then per-tablet Fragmentarium for anything unmatched.</span>
+      </div>
+      <div id="ebl-sync-status" class="ebl-hint" style="margin-bottom: 0.5rem;"></div>
+
+      <div class="meta-table-wrap">
+        <table class="meta-table">
           <thead>
             <tr>
-              <th>Museum Number (Filename)</th>
-              <th>Siglum</th>
+              <th>File</th>
+              <th>Museum #</th>
+              <th>Provenance</th>
+              <th>Period</th>
+              <th>Mod.</th>
+              <th>Type</th>
+              <th>Disamb.</th>
+              <th>Siglum preview</th>
             </tr>
           </thead>
           <tbody id="mapping-tbody">
-            <tr><td colspan="2" class="mapping-empty">Loading...</td></tr>
+            <tr><td colspan="8" class="mapping-empty">Loading...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- eBL Export Settings -->
+    <div class="section">
+      <h2>eBL Export <span id="ebl-save-indicator" class="save-indicator"></span></h2>
+      <p>Configure the connection to the Electronic Babylonian Library and the target chapter for export.
+        Writes require the <code>write:texts</code> scope.</p>
+
+      <div class="ebl-status-row">
+        <span id="ebl-status-pill" class="ebl-status-pill">
+          <span class="dot"></span>
+          <span id="ebl-status-text">No token</span>
+        </span>
+        <button id="ebl-test-btn" class="btn btn-secondary" type="button">Test connection</button>
+        <button id="ebl-clear-token-btn" class="btn btn-secondary" type="button">Clear token</button>
+      </div>
+
+      <div class="ebl-form-row">
+        <label for="ebl-api-url">API URL</label>
+        <input type="text" id="ebl-api-url" placeholder="https://www.ebl.lmu.de/api">
+      </div>
+
+      <div class="ebl-form-row ebl-token-row">
+        <label for="ebl-token">Bearer token (paste)</label>
+        <textarea id="ebl-token"
+                  placeholder="Paste the Authorization Bearer token from a logged-in https://www.ebl.lmu.de browser session (DevTools → Network → Authorization header)."></textarea>
+      </div>
+
+      <div class="ebl-hint">
+        Token is stored locally in your browser only.
+        On <code>www.ebl.lmu.de</code>, open DevTools, watch the Network tab while clicking around, and copy the
+        <code>Authorization: Bearer eyJ…</code> value from any request to <code>www.ebl.lmu.de/api</code>.
+      </div>
+
+      <hr style="margin: 1.2rem 0; border: 0; border-top: 1px solid var(--border-color);">
+
+      <p style="margin-bottom: 0.5rem;">Target chapter — corresponds to URL <code>/corpus/{genre}/{category}/{index}/{stage}/{name}</code>.</p>
+      <div class="ebl-target-row">
+        <label>Coordinates</label>
+        <div class="target-header">Genre</div>
+        <div class="target-header">Category</div>
+        <div class="target-header">Index</div>
+        <div class="target-header">Stage</div>
+        <div class="target-header">Name</div>
+      </div>
+      <div class="ebl-target-row">
+        <span></span>
+        <input type="text" id="ebl-target-genre" placeholder="D">
+        <input type="text" id="ebl-target-category" placeholder="1">
+        <input type="text" id="ebl-target-index" placeholder="4">
+        <input type="text" id="ebl-target-stage" placeholder="SB">
+        <input type="text" id="ebl-target-name" placeholder="56">
+      </div>
+      <div class="ebl-hint">
+        For EAE 56, the eBL URL is <code>/corpus/D/1/4/SB/56</code>, i.e. genre <code>D</code>,
+        category <code>1</code>, index <code>4</code>, stage <code>SB</code>, name <code>56</code>.
+      </div>
+
+      <div class="actions" style="margin-top: 1rem;">
+        <button id="ebl-fetch-chapter-btn" class="btn btn-secondary" type="button">Fetch chapter info</button>
+        <span id="ebl-chapter-status" class="ebl-hint" style="margin: 0;"></span>
       </div>
     </div>
 
@@ -376,8 +634,10 @@
     let projectConfig = null;
     let manuscriptFiles = [];
     let filesToImport = [];
-    let siglaMappings = {}; // Museum number -> Siglum
+    let manuscriptsMeta = { version: 1, manuscripts: [] };
+    let provenances = []; // [[longName, abbreviation], ...]
     let mappingSaveTimeout = null;
+    let eblSaveTimeout = null;
 
     // Load project info
     async function loadProject() {
@@ -407,13 +667,25 @@
         if (projectConfig) {
           document.getElementById('project-name').textContent = projectConfig.name;
           document.title = `Manage ${projectConfig.name} - Manuscript Scorer`;
-          siglaMappings = projectConfig.sigla || {};
         } else {
+          projectConfig = {};
           document.getElementById('project-name').textContent = project.name || 'Unknown Project';
         }
 
-        // Load file list
+        // Load manuscripts.json (eBL metadata)
+        manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
+
+        // Load file list (reconciles manuscripts.json against on-disk files)
         await loadFiles();
+
+        // Hydrate eBL settings UI from localStorage + project.json
+        initEblPanel();
+
+        // Fetch provenance list (used by the metadata dropdowns)
+        EblClient.getProvenances().then((list) => {
+          provenances = list;
+          renderMappingTable();
+        }).catch(() => { /* fall back already returned by getProvenances */ });
       } catch (err) {
         showStatus('Failed to load project: ' + err.message, 'error');
       }
@@ -424,6 +696,17 @@
       try {
         const { txtFiles } = await FileSystem.listTxtFiles(dirHandle);
         manuscriptFiles = txtFiles;
+
+        // Reconcile manuscripts.json against the actual *.txt files on disk
+        const filesWithExt = manuscriptFiles.map((s) => s.endsWith('.txt') ? s : s + '.txt');
+        const reconciled = EblClient.reconcileManuscripts(manuscriptsMeta, filesWithExt);
+        // Only persist if the reconciliation actually changed something
+        if (JSON.stringify(reconciled) !== JSON.stringify(manuscriptsMeta)) {
+          manuscriptsMeta = reconciled;
+          await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+        } else {
+          manuscriptsMeta = reconciled;
+        }
 
         renderFileList();
         renderMappingTable();
@@ -441,12 +724,19 @@
         return;
       }
 
-      container.innerHTML = manuscriptFiles.map(file => `
+      container.innerHTML = manuscriptFiles.map(file => {
+        const primary = window.EblClient
+          ? window.EblClient.extractMuseumNumber(file).primary
+          : file.split(/\s*\(\s*\+\s*\)\s*/)[0];
+        const href = `https://www.ebl.lmu.de/library/${encodeURIComponent(primary)}`;
+        return `
         <div class="file-item">
-          <span>${escapeHtml(file)}</span>
+          <a href="${href}" target="_blank" rel="noopener noreferrer" data-ebl-link="1"
+             title="Open ${escapeHtml(primary)} in eBL Fragmentarium">${escapeHtml(file)}</a>
           <button class="delete-file-btn" data-file="${escapeHtml(file)}" title="Delete">&times;</button>
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       // Add delete handlers
       container.querySelectorAll('.delete-file-btn').forEach(btn => {
@@ -471,46 +761,104 @@
       });
     }
 
-    // Render siglum mapping table
+    // Render eBL manuscript metadata table
     function renderMappingTable() {
       const tbody = document.getElementById('mapping-tbody');
 
-      if (manuscriptFiles.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="2" class="mapping-empty">No manuscripts yet</td></tr>';
+      if (!manuscriptsMeta.manuscripts || manuscriptsMeta.manuscripts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="mapping-empty">No manuscripts yet</td></tr>';
         return;
       }
 
-      tbody.innerHTML = manuscriptFiles.map(museumNum => {
-        const siglum = siglaMappings[museumNum] || '';
+      const provOpts = optGroup(provenances);
+      const periodOpts = optGroup(EblClient.PERIODS);
+      const modOpts = EblClient.PERIOD_MODIFIERS.map((m) => `<option value="${m}">${m}</option>`).join('');
+      const typeOpts = optGroup(EblClient.MANUSCRIPT_TYPES);
+
+      const problems = new Map(
+        EblClient.validateManuscripts(manuscriptsMeta).map((p) => [p.file, p.errors])
+      );
+
+      tbody.innerHTML = manuscriptsMeta.manuscripts.map((m, idx) => {
+        const errs = problems.get(m.file);
+        const rowClass = errs ? 'meta-row has-errors' : 'meta-row';
+        const errRow = errs
+          ? `<tr class="meta-row has-errors"><td colspan="8" class="meta-row-errors">${errs.map(escapeHtml).join(' · ')}</td></tr>`
+          : '';
+        const primary = window.EblClient
+          ? window.EblClient.extractMuseumNumber(m.file).primary
+          : m.file.split(/\s*\(\s*\+\s*\)\s*/)[0].replace(/\.txt$/, '');
+        const href = `https://www.ebl.lmu.de/library/${encodeURIComponent(primary)}`;
         return `
-          <tr>
-            <td class="museum-num">${escapeHtml(museumNum)}</td>
-            <td>
-              <input type="text"
-                     class="siglum-input"
-                     data-museum="${escapeHtml(museumNum)}"
-                     value="${escapeHtml(siglum)}"
-                     placeholder="e.g., NinNB₂">
-            </td>
+          <tr class="${rowClass}" data-idx="${idx}">
+            <td class="meta-file"><a href="${href}" target="_blank" rel="noopener noreferrer" data-ebl-link="1" title="Open ${escapeAttr(primary)} in eBL Fragmentarium">${escapeHtml(m.file)}</a></td>
+            <td><input type="text" data-field="museumNumber" value="${escapeHtml(m.museumNumber || '')}" placeholder="K.2173"></td>
+            <td><select data-field="provenance">${selectOptions(provOpts, m.provenance)}</select></td>
+            <td><select data-field="period">${selectOptions(periodOpts, m.period)}</select></td>
+            <td><select data-field="periodModifier">${selectOptions(modOpts, m.periodModifier || 'None')}</select></td>
+            <td><select data-field="type">${selectOptions(typeOpts, m.type)}</select></td>
+            <td><input class="disambig" type="text" data-field="siglumDisambiguator" value="${escapeHtml(m.siglumDisambiguator || '')}"></td>
+            <td class="col-siglum-preview" data-preview-idx="${idx}">…</td>
           </tr>
+          ${errRow}
         `;
       }).join('');
 
-      // Add input listeners for auto-save
-      tbody.querySelectorAll('.siglum-input').forEach(input => {
-        input.addEventListener('input', (e) => {
-          const museumNum = e.target.dataset.museum;
-          const value = e.target.value.trim();
-
-          if (value) {
-            siglaMappings[museumNum] = value;
-          } else {
-            delete siglaMappings[museumNum];
-          }
-
-          debouncedSaveMappings();
+      // Wire inputs
+      tbody.querySelectorAll('.meta-row[data-idx]').forEach((row) => {
+        const idx = Number(row.dataset.idx);
+        row.querySelectorAll('input, select').forEach((el) => {
+          el.addEventListener('input', () => updateManuscriptField(idx, el.dataset.field, el.value));
+          el.addEventListener('change', () => updateManuscriptField(idx, el.dataset.field, el.value));
         });
       });
+
+      refreshSiglumPreviews();
+    }
+
+    function optGroup(table) {
+      // Vocabulary tables are [[longName, abbreviation], ...]. Show only longName.
+      return table.map(([name]) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+    }
+
+    function selectOptions(optionsHtml, currentValue) {
+      // Inject a blank option at the top and pre-select currentValue.
+      const blank = '<option value=""></option>';
+      const html = blank + optionsHtml;
+      if (!currentValue) return html;
+      // Mark the matching option as selected
+      return html.replace(`value="${escapeAttr(currentValue)}"`, `value="${escapeAttr(currentValue)}" selected`);
+    }
+
+    function escapeAttr(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    }
+
+    async function refreshSiglumPreviews() {
+      for (let i = 0; i < manuscriptsMeta.manuscripts.length; i++) {
+        const m = manuscriptsMeta.manuscripts[i];
+        const cell = document.querySelector(`[data-preview-idx="${i}"]`);
+        if (!cell) continue;
+        const preview = await EblClient.buildSiglumPreview(m);
+        cell.textContent = preview || '—';
+      }
+    }
+
+    function updateManuscriptField(idx, field, value) {
+      if (!manuscriptsMeta.manuscripts[idx]) return;
+      manuscriptsMeta.manuscripts[idx][field] = value;
+      debouncedSaveMappings();
+      // Re-render only if a field that affects validation or preview changed
+      if (['provenance', 'period', 'type', 'siglumDisambiguator', 'museumNumber'].includes(field)) {
+        // Cheaper than re-rendering the whole table: just refresh previews + errors
+        refreshSiglumPreviews();
+        // Re-render to refresh inline errors when constraints flip
+        const problems = EblClient.validateManuscripts(manuscriptsMeta);
+        const hasAny = problems.length > 0;
+        if (hasAny || document.querySelector('.meta-row-errors')) {
+          renderMappingTable();
+        }
+      }
     }
 
     // Escape HTML
@@ -520,7 +868,7 @@
       return div.innerHTML;
     }
 
-    // Debounced save for mappings
+    // Debounced save for manuscripts.json (eBL metadata)
     function debouncedSaveMappings() {
       const indicator = document.getElementById('mapping-save-indicator');
       indicator.textContent = 'Saving...';
@@ -529,10 +877,9 @@
       if (mappingSaveTimeout) clearTimeout(mappingSaveTimeout);
       mappingSaveTimeout = setTimeout(async () => {
         try {
-          // Update sigla in project config and save
-          projectConfig = projectConfig || {};
-          projectConfig.sigla = siglaMappings;
-          await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+          await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+          // Mirror eBL sigla into project.json so the scorer's "show sigla" toggle keeps working.
+          await syncSiglaToProjectConfig();
 
           indicator.textContent = 'Saved';
           indicator.className = 'save-indicator saved';
@@ -543,9 +890,297 @@
         } catch (err) {
           indicator.textContent = 'Error saving';
           indicator.className = 'save-indicator';
-          showStatus('Failed to save sigla mappings', 'error');
+          showStatus('Failed to save manuscripts.json: ' + err.message, 'error');
         }
       }, 500);
+    }
+
+    // ===== eBL panel =====
+
+    function initEblPanel() {
+      // Hydrate from localStorage / project.json
+      document.getElementById('ebl-api-url').value = EblClient.getApiUrl();
+      document.getElementById('ebl-token').value = EblClient.getToken();
+
+      const tgt = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || {};
+      document.getElementById('ebl-target-genre').value = tgt.genre || '';
+      document.getElementById('ebl-target-category').value = tgt.category != null ? String(tgt.category) : '';
+      document.getElementById('ebl-target-index').value = tgt.index != null ? String(tgt.index) : '';
+      document.getElementById('ebl-target-stage').value = tgt.stage || '';
+      document.getElementById('ebl-target-name').value = tgt.name || '';
+
+      // Wire inputs
+      document.getElementById('ebl-api-url').addEventListener('change', (e) => {
+        EblClient.setApiUrl(e.target.value);
+        renderEblStatus();
+      });
+      document.getElementById('ebl-token').addEventListener('change', (e) => {
+        EblClient.setToken(e.target.value);
+        renderEblStatus();
+      });
+      ['genre', 'category', 'index', 'stage', 'name'].forEach((k) => {
+        document.getElementById('ebl-target-' + k).addEventListener('input', () => debouncedSaveTarget());
+      });
+
+      document.getElementById('ebl-clear-token-btn').addEventListener('click', () => {
+        EblClient.setToken('');
+        document.getElementById('ebl-token').value = '';
+        renderEblStatus();
+      });
+
+      document.getElementById('ebl-test-btn').addEventListener('click', testEblConnection);
+      document.getElementById('ebl-fetch-chapter-btn').addEventListener('click', fetchChapterInfo);
+      document.getElementById('ebl-sync-meta-btn').addEventListener('click', syncMetadataFromEbl);
+
+      renderEblStatus();
+    }
+
+    function debouncedSaveTarget() {
+      const indicator = document.getElementById('ebl-save-indicator');
+      indicator.textContent = 'Saving...';
+      indicator.className = 'save-indicator saving';
+
+      if (eblSaveTimeout) clearTimeout(eblSaveTimeout);
+      eblSaveTimeout = setTimeout(async () => {
+        try {
+          const target = {
+            genre: document.getElementById('ebl-target-genre').value.trim(),
+            category: parseIntOrString(document.getElementById('ebl-target-category').value.trim()),
+            index: parseIntOrString(document.getElementById('ebl-target-index').value.trim()),
+            stage: document.getElementById('ebl-target-stage').value.trim(),
+            name: document.getElementById('ebl-target-name').value.trim(),
+          };
+          projectConfig = projectConfig || {};
+          projectConfig.ebl = projectConfig.ebl || {};
+          projectConfig.ebl.target = target;
+          await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+
+          indicator.textContent = 'Saved';
+          indicator.className = 'save-indicator saved';
+          setTimeout(() => {
+            indicator.textContent = '';
+            indicator.className = 'save-indicator';
+          }, 2000);
+        } catch (err) {
+          indicator.textContent = '';
+          showStatus('Failed to save eBL settings: ' + err.message, 'error');
+        }
+      }, 500);
+    }
+
+    function parseIntOrString(v) {
+      if (v === '' || v == null) return '';
+      const n = Number(v);
+      return Number.isInteger(n) && String(n) === String(v) ? n : v;
+    }
+
+    function renderEblStatus() {
+      const pill = document.getElementById('ebl-status-pill');
+      const txt = document.getElementById('ebl-status-text');
+      const s = EblClient.tokenStatus();
+      pill.classList.remove('ok', 'warn', 'bad');
+
+      if (!s.hasToken) {
+        pill.classList.add('warn');
+        txt.textContent = 'No token';
+        return;
+      }
+      if (s.invalid) {
+        pill.classList.add('bad');
+        txt.textContent = 'Invalid JWT';
+        return;
+      }
+      if (s.expired) {
+        pill.classList.add('bad');
+        txt.textContent = 'Token expired';
+        return;
+      }
+      if (!s.hasWriteTexts) {
+        pill.classList.add('warn');
+        const mins = s.expiresInSec != null ? Math.round(s.expiresInSec / 60) : null;
+        txt.textContent = `Token ok, no write:texts${mins != null ? ' · ' + formatExpiry(mins) : ''}`;
+        return;
+      }
+      pill.classList.add('ok');
+      const mins = s.expiresInSec != null ? Math.round(s.expiresInSec / 60) : null;
+      txt.textContent = `Connected · write:texts${mins != null ? ' · ' + formatExpiry(mins) : ''}`;
+    }
+
+    function formatExpiry(mins) {
+      if (mins < 60) return `expires in ${mins}m`;
+      const hours = Math.round(mins / 60);
+      return `expires in ${hours}h`;
+    }
+
+    async function testEblConnection() {
+      const btn = document.getElementById('ebl-test-btn');
+      btn.disabled = true;
+      const origText = btn.textContent;
+      btn.textContent = 'Testing…';
+      try {
+        // Public GET (no auth needed) — confirms API reachability.
+        const provs = await EblClient.getProvenances({ forceRefresh: true });
+        provenances = provs;
+        renderMappingTable();
+        showStatus(`API reachable. ${provs.length} provenances loaded.`, 'success');
+      } catch (err) {
+        showStatus('API unreachable: ' + err.message, 'error');
+      } finally {
+        btn.textContent = origText;
+        btn.disabled = false;
+      }
+    }
+
+    async function fetchChapterInfo() {
+      const status = document.getElementById('ebl-chapter-status');
+      status.textContent = 'Fetching…';
+      const coords = readTargetCoords();
+      if (!coords) {
+        status.textContent = 'Fill in all 5 coordinates first.';
+        return;
+      }
+      try {
+        const chapter = await EblClient.getChapter(coords);
+        const msCount = (chapter.manuscripts || []).length;
+        const lineCount = (chapter.lines || []).length;
+        status.textContent = `Found: "${chapter.name || coords.name}" · ${msCount} manuscript(s) · ${lineCount} line(s) currently in chapter.`;
+      } catch (err) {
+        if (err.status === 404) {
+          status.textContent = `Chapter ${coords.genre}/${coords.category}/${coords.index}/${coords.stage}/${coords.name} not found on eBL. The shell must exist before you can export.`;
+        } else {
+          status.textContent = 'Error: ' + err.message;
+        }
+      }
+    }
+
+    // Auto-fill manuscript metadata from eBL. Two-pass:
+    //   1. If the target chapter exists, copy each registered manuscript's full
+    //      metadata into the local entry matched by museumNumber.
+    //   2. For any manuscript still missing fields (period/provenance), fall
+    //      back to the Fragmentarium per-tablet record.
+    async function syncMetadataFromEbl() {
+      const status = document.getElementById('ebl-sync-status');
+      const btn = document.getElementById('ebl-sync-meta-btn');
+      btn.disabled = true;
+
+      try {
+        const coords = readTargetCoords();
+        const summary = { chapterMatched: 0, fragmentMatched: 0, notFound: [], errors: [] };
+        let chapterMss = [];
+
+        // ---- Pass 1: chapter manuscripts (if target reachable) ----
+        if (coords) {
+          status.textContent = 'Fetching target chapter…';
+          try {
+            const chapter = await EblClient.getChapter(coords);
+            chapterMss = chapter.manuscripts || [];
+          } catch (err) {
+            if (err.status !== 404) summary.errors.push('Chapter fetch failed: ' + err.message);
+            // 404 just means the shell doesn't exist yet — fall through to fragments
+          }
+        }
+        const chapterByMuseum = new Map();
+        for (const em of chapterMss) {
+          if (em.museumNumber) chapterByMuseum.set(em.museumNumber, em);
+        }
+
+        for (const m of manuscriptsMeta.manuscripts) {
+          // Always trust the filename: it's the source of truth on disk, and
+          // an existing m.museumNumber could be stale (e.g. carrying join notation
+          // from before the (+) handling was added).
+          const { primary } = EblClient.extractMuseumNumber(m.file || '');
+          const em = chapterByMuseum.get(primary) || chapterByMuseum.get(m.museumNumber);
+          if (!em) continue;
+          m.museumNumber = em.museumNumber || m.museumNumber;
+          m.accession = em.accession || '';
+          m.siglumDisambiguator = em.siglumDisambiguator || m.siglumDisambiguator;
+          m.provenance = em.provenance || m.provenance;
+          m.period = em.period || m.period;
+          m.periodModifier = em.periodModifier || m.periodModifier || 'None';
+          m.type = em.type || m.type;
+          m.notes = em.notes || '';
+          m.colophon = em.colophon || '';
+          m.unplacedLines = em.unplacedLines || '';
+          m.references = em.references || [];
+          m.oldSigla = em.oldSigla || [];
+          summary.chapterMatched++;
+        }
+
+        // ---- Pass 2: Fragmentarium for entries still lacking core fields ----
+        const needsFragment = manuscriptsMeta.manuscripts.filter(
+          (m) => !m.provenance || !m.period
+        );
+
+        for (let i = 0; i < needsFragment.length; i++) {
+          const m = needsFragment[i];
+          // Always look up by the filename-extracted primary, ignoring any stale
+          // museumNumber stored on the entry (e.g. "K.14874 (+) BM.41031").
+          const { primary } = EblClient.extractMuseumNumber(m.file || '');
+          status.textContent = `Fetching fragment ${i + 1}/${needsFragment.length} (${primary})…`;
+          try {
+            const frag = await EblClient.getFragment(primary);
+            const fields = EblClient.fragmentToManuscriptFields(frag);
+            // After a successful Fragmentarium fetch, overwrite museumNumber with
+            // eBL's canonical value — this also heals stale entries.
+            if (fields.museumNumber) m.museumNumber = fields.museumNumber;
+            if (!m.provenance && fields.provenance) m.provenance = fields.provenance;
+            if (!m.period && fields.period) m.period = fields.period;
+            if ((!m.periodModifier || m.periodModifier === 'None') && fields.periodModifier) {
+              m.periodModifier = fields.periodModifier;
+            }
+            // Type defaults to Library for chapter manuscripts when unset
+            if (!m.type) m.type = 'Library';
+            summary.fragmentMatched++;
+          } catch (err) {
+            if (err.status === 404) summary.notFound.push(primary);
+            else summary.errors.push(`${primary}: ${err.message}`);
+          }
+        }
+
+        // Persist + redraw
+        await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+        await syncSiglaToProjectConfig();
+        renderMappingTable();
+
+        const parts = [];
+        if (summary.chapterMatched) parts.push(`${summary.chapterMatched} from chapter`);
+        if (summary.fragmentMatched) parts.push(`${summary.fragmentMatched} from Fragmentarium`);
+        if (!parts.length) parts.push('Nothing was matched');
+        if (summary.notFound.length) parts.push(`Not on eBL: ${summary.notFound.join(', ')}`);
+        if (summary.errors.length) parts.push(`Errors: ${summary.errors.join(' · ')}`);
+        status.textContent = parts.join(' · ');
+      } catch (err) {
+        status.textContent = 'Auto-fill failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Derive a museumNumber -> siglum-preview mapping from manuscripts.json and
+    // write it into project.json so the scorer's "show sigla" toggle (app.js)
+    // keeps showing the right label.
+    async function syncSiglaToProjectConfig() {
+      const map = {};
+      for (const m of manuscriptsMeta.manuscripts || []) {
+        const key = (m.file || '').replace(/\.txt$/, '');
+        if (!key) continue;
+        const preview = await EblClient.buildSiglumPreview(m);
+        if (preview) map[key] = preview;
+      }
+      projectConfig = projectConfig || {};
+      // Don't clobber an existing custom mapping with empty values; only set when we have something.
+      projectConfig.sigla = { ...(projectConfig.sigla || {}), ...map };
+      await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+    }
+
+    function readTargetCoords() {
+      const genre = document.getElementById('ebl-target-genre').value.trim();
+      const category = document.getElementById('ebl-target-category').value.trim();
+      const index = document.getElementById('ebl-target-index').value.trim();
+      const stage = document.getElementById('ebl-target-stage').value.trim();
+      const name = document.getElementById('ebl-target-name').value.trim();
+      if (!genre || !category || !index || !stage || !name) return null;
+      return { genre, category, index, stage, name };
     }
 
     // Show status message

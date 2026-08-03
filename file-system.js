@@ -228,6 +228,25 @@ async function writeScoreData(dirHandle, data) {
   await writable.close();
 }
 
+// Read manuscripts.json (eBL metadata per manuscript)
+async function readManuscriptsMeta(dirHandle) {
+  try {
+    const fileHandle = await dirHandle.getFileHandle('manuscripts.json');
+    const file = await fileHandle.getFile();
+    return JSON.parse(await file.text());
+  } catch (e) {
+    return null;
+  }
+}
+
+// Write manuscripts.json
+async function writeManuscriptsMeta(dirHandle, data) {
+  const fileHandle = await dirHandle.getFileHandle('manuscripts.json', { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(JSON.stringify(data, null, 2));
+  await writable.close();
+}
+
 // Read annotations.json
 async function readAnnotations(dirHandle) {
   try {
@@ -541,6 +560,8 @@ window.FileSystem = {
   writeScoreData,
   readAnnotations,
   writeAnnotations,
+  readManuscriptsMeta,
+  writeManuscriptsMeta,
   listTxtFiles,
   scanForNewManuscripts,
   initializeProject,

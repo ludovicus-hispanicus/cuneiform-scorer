@@ -12,6 +12,8 @@ if (!projectId) {
 
 // Directory handle for file operations (loaded in init)
 let dirHandle = null;
+let projectConfig = null;
+let manuscriptsMeta = null;
 
 // ===========================================
 // COLLABORATION SETUP (Y.js)
@@ -260,10 +262,14 @@ async function loadManuscripts() {
     // Load project config from folder
     const config = await FileSystem.readProjectConfig(dirHandle);
     if (config) {
+      projectConfig = config;
       document.getElementById('project-title').textContent = config.name;
       document.title = `${config.name} - Manuscript Scorer`;
       siglaMappings = config.sigla || {};
     }
+
+    // Load manuscripts.json (eBL metadata) — used by Recon view + Export
+    manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
 
     // Scan for new/removed .txt files vs index.json
     const { newFiles, removedFiles } = await FileSystem.scanForNewManuscripts(dirHandle);
@@ -334,8 +340,21 @@ function addManuscriptToList(id, museumNum) {
   museumSpan.className = 'museum-number';
   museumSpan.textContent = displaySiglum ? museumNum : '';
 
-  li.appendChild(siglumSpan);
-  li.appendChild(museumSpan);
+  // Wrap text content in a link to the eBL Fragmentarium for this manuscript.
+  // Default left-click is intercepted by the existing manuscriptList handler;
+  // modifier-click and middle-click open the eBL page in a new tab.
+  const link = document.createElement('a');
+  const primaryMuseum = window.EblClient
+    ? window.EblClient.extractMuseumNumber(museumNum).primary
+    : museumNum.split(/\s*\(\s*\+\s*\)\s*/)[0];
+  link.href = `https://www.ebl.lmu.de/library/${encodeURIComponent(primaryMuseum)}`;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.dataset.eblLink = '1';
+  link.title = `Open ${primaryMuseum} in eBL Fragmentarium (Ctrl/Cmd-click)`;
+  link.appendChild(siglumSpan);
+  link.appendChild(museumSpan);
+  li.appendChild(link);
 
   // Update visibility based on toggle state
   updateManuscriptItemDisplay(li);
@@ -1237,9 +1256,14 @@ async function importManuscripts() {
 
 manuscriptList.addEventListener('click', (e) => {
   const item = e.target.closest('.manuscript-item');
-  if (item) {
-    loadManuscript(item.dataset.id);
+  if (!item) return;
+  // Modifier-click on the eBL link → let the browser open it in a new tab
+  if (e.target.closest('a[data-ebl-link]') && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+    return;
   }
+  // Plain click → suppress link navigation, load manuscript locally
+  e.preventDefault();
+  loadManuscript(item.dataset.id);
 });
 
 addManuscriptBtn.addEventListener('click', addManuscript);
@@ -3248,3 +3272,502 @@ async function init() {
 }
 
 init();
+
+// ===========================================
+// RECONSTRUCTED VIEW + EXPORT TO eBL
+// ===========================================
+//
+// Opens a full-screen Ace editor containing the eBL ATF artifact compiled
+// from the current score + manuscripts.json metadata. Witness edits in this
+// view sync back to the underlying manuscript .txt files on close.
+// Export sends the artifact to the eBL corpus chapter configured under
+// projectConfig.ebl.target.
+
+const reconView = document.getElementById('recon-view');
+const reconAceEl = document.getElementById('recon-ace');
+const reconStatusEl = document.getElementById('recon-status');
+const reconViewBtn = document.getElementById('recon-view-btn');
+const reconCloseBtn = document.getElementById('recon-close-btn');
+const reconRefreshBtn = document.getElementById('recon-refresh-btn');
+const reconExportBtn = document.getElementById('recon-export-btn');
+const reconValidateBtn = document.getElementById('recon-validate-btn');
+const reconTokenPill = document.getElementById('recon-token-pill');
+const reconTokenText = document.getElementById('recon-token-text');
+const reconSubtitle = document.getElementById('recon-view-subtitle');
+
+const exportModal = document.getElementById('export-modal');
+const exportCloseBtn = document.getElementById('export-close-btn');
+const exportCancelBtn = document.getElementById('export-cancel-btn');
+const exportGoBtn = document.getElementById('export-go-btn');
+const exportTargetEl = document.getElementById('export-target');
+const exportTokenStatusEl = document.getElementById('export-token-status');
+const exportMsSummaryEl = document.getElementById('export-ms-summary');
+const exportWarningsEl = document.getElementById('export-warnings');
+const exportProgressEl = document.getElementById('export-progress');
+const exportResultEl = document.getElementById('export-result');
+
+let reconAceEditor = null;
+let reconLineMap = null;        // [{ row, kind, lineNum, ... }] from EblAtf.buildChapterAtf
+let reconOriginalAtf = '';      // The ATF as last compiled (used by diffArtifact)
+
+// Runtime capability flags — detected at startup.
+// - desktop mode: bundled validator available via /api/validate-atf
+// - dev mode: server.js running with a system Python+lark available
+// - browser mode: no backend at all (e.g. GitHub Pages), eBL server is the only validator
+let runtimeMode = 'browser';     // 'desktop' | 'dev' | 'browser'
+let localValidatorAvailable = false;
+
+async function probeRuntimeCapabilities() {
+  try {
+    const res = await fetch('/api/health', { method: 'GET' });
+    if (!res.ok) throw new Error('no health endpoint');
+    const data = await res.json();
+    if (data && data.app === 'cuneiform-scorer') {
+      runtimeMode = data.mode || 'dev';
+      localValidatorAvailable = !!data.validator;
+    }
+  } catch (_) {
+    runtimeMode = 'browser';
+    localValidatorAvailable = false;
+  }
+  applyRuntimeCapabilities();
+}
+
+function applyRuntimeCapabilities() {
+  // Hide the Validate button when no local validator is reachable. The button
+  // is rebuilt fresh whenever Recon view opens; we set display directly so
+  // it survives across opens until the next probe.
+  const btn = document.getElementById('recon-validate-btn');
+  if (btn) {
+    btn.style.display = localValidatorAvailable ? '' : 'none';
+  }
+}
+
+// Kick off the probe in the background; it'll resolve before the user opens
+// Recon view in any realistic scenario.
+probeRuntimeCapabilities();
+
+// ---- Open / close ----
+
+async function openReconView() {
+  if (!window.EblAtf || !window.EblClient) {
+    alert('eBL client not loaded. Reload the page.');
+    return;
+  }
+  reconView.classList.remove('hidden');
+  await refreshReconArtifact();
+  initReconAce();
+  updateReconTokenPill();
+  document.body.style.overflow = 'hidden';
+}
+
+async function closeReconView() {
+  // Sync any edits back before hiding
+  await syncReconEditsBack();
+  reconView.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+// ---- Compile artifact from current score ----
+
+async function refreshReconArtifact() {
+  // Build scoreLines via existing buildScore()
+  const { scoreLines } = buildScore();
+  if (!manuscriptsMeta) {
+    manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
+  }
+  // Reconcile manuscripts.json against current manuscript list so newly
+  // added files show up with default rows
+  const filesOnDisk = Object.values(manuscripts).map((m) => m.siglum + '.txt');
+  manuscriptsMeta = EblClient.reconcileManuscripts(manuscriptsMeta, filesOnDisk);
+
+  const eblSiglumByFile = await EblAtf.buildEblSiglumMap(manuscriptsMeta, EblClient);
+  const result = await EblAtf.buildChapterAtf({
+    scoreLines,
+    reconstructedLines,
+    manuscriptsMeta,
+    eblSiglumByFile,
+  });
+
+  reconOriginalAtf = result.atf;
+  reconLineMap = result.lineMap;
+
+  const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+  const modeLabel = localValidatorAvailable
+    ? '(local validation available)'
+    : '(browser mode — eBL server validates on export)';
+  reconSubtitle.textContent = target
+    ? `→ ${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name} · ${Object.keys(scoreLines).length} chapter lines · ${manuscriptsMeta.manuscripts.length} manuscripts · ${modeLabel}`
+    : `No eBL target configured. Set one in Manage. ${modeLabel}`;
+
+  if (reconAceEditor) {
+    reconAceEditor.setValue(reconOriginalAtf, -1);
+    reconAceEditor.session.clearAnnotations();
+    hideReconStatus();
+  }
+}
+
+function initReconAce() {
+  if (reconAceEditor) {
+    reconAceEditor.resize(true);
+    return;
+  }
+  reconAceEditor = ace.edit('recon-ace');
+  const dark = document.body.classList.contains('dark-mode');
+  reconAceEditor.setTheme(dark ? 'ace/theme/tomorrow_night' : 'ace/theme/chrome');
+  reconAceEditor.session.setMode('ace/mode/cuneiform_score');
+  reconAceEditor.setOptions({
+    fontSize: '14px',
+    fontFamily: '"Consolas", "Monaco", monospace',
+    showPrintMargin: false,
+    showGutter: true,
+    wrap: true,
+    tabSize: 2,
+    useSoftTabs: true,
+  });
+  reconAceEditor.setValue(reconOriginalAtf, -1);
+}
+
+// ---- Sync witness edits back to manuscript files ----
+
+async function syncReconEditsBack() {
+  if (!reconAceEditor || !reconLineMap) return;
+  const edited = reconAceEditor.getValue();
+  if (edited === reconOriginalAtf) return;
+
+  const diff = EblAtf.diffArtifact(reconLineMap, reconOriginalAtf, edited);
+  const reconEdits = diff.reconstructionEdits;
+  const witnessEdits = diff.witnessEdits;
+
+  // Apply reconstruction edits to in-memory state + score-data.json
+  for (const e of reconEdits) {
+    reconstructedLines[e.lineNum] = e.newContent;
+  }
+
+  // Group witness edits by manuscript and apply to each .txt
+  const editsByMs = new Map();
+  for (const e of witnessEdits) {
+    if (!editsByMs.has(e.msKey)) editsByMs.set(e.msKey, []);
+    editsByMs.get(e.msKey).push(e);
+  }
+
+  const touchedFiles = [];
+  for (const [msKey, edits] of editsByMs) {
+    // Find the in-memory manuscript by siglum
+    const msEntry = Object.values(manuscripts).find((m) => m.siglum === msKey);
+    if (!msEntry) continue;
+    let content = msEntry.content;
+    for (const e of edits) {
+      const res = EblAtf.applyWitnessEditToManuscript(content, e);
+      if (res.ok) content = res.content;
+    }
+    if (content !== msEntry.content) {
+      msEntry.content = content;
+      await FileSystem.writeManuscript(dirHandle, msKey, content);
+      touchedFiles.push(msKey);
+    }
+  }
+
+  // Persist reconstructed text + redraw the score so the user sees the changes
+  if (reconEdits.length || touchedFiles.length) {
+    await saveScoreDataToFile();
+    renderScore();
+    const parts = [];
+    if (reconEdits.length) parts.push(`${reconEdits.length} reconstruction edit${reconEdits.length === 1 ? '' : 's'}`);
+    if (touchedFiles.length) parts.push(`${touchedFiles.length} manuscript${touchedFiles.length === 1 ? '' : 's'} updated (${touchedFiles.join(', ')})`);
+    setStatus('connected', 'Synced: ' + parts.join(', '));
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
+
+  if (diff.unmatched.length) {
+    // Drift — user inserted/deleted whole lines. Surface a non-blocking note.
+    showReconStatus({
+      title: `${diff.unmatched.length} unmatched row${diff.unmatched.length === 1 ? '' : 's'} (structural changes are not synced back)`,
+      items: diff.unmatched.map((u) => ({ line: u.row + 1, message: `${u.oldText || '(empty)'} → ${u.newText || '(empty)'}` })),
+    });
+  }
+}
+
+// ---- Token pill in the Recon view header ----
+
+function updateReconTokenPill() {
+  const s = EblClient.tokenStatus();
+  reconTokenPill.classList.remove('ok', 'warn', 'bad');
+  if (!s.hasToken) { reconTokenPill.classList.add('warn'); reconTokenText.textContent = 'No token'; return; }
+  if (s.invalid) { reconTokenPill.classList.add('bad'); reconTokenText.textContent = 'Invalid JWT'; return; }
+  if (s.expired) { reconTokenPill.classList.add('bad'); reconTokenText.textContent = 'Token expired'; return; }
+  if (!s.hasWriteTexts) { reconTokenPill.classList.add('warn'); reconTokenText.textContent = 'No write:texts'; return; }
+  reconTokenPill.classList.add('ok'); reconTokenText.textContent = 'write:texts ready';
+}
+
+// ---- Status panel below Ace (used for unmatched + import errors) ----
+
+function showReconStatus({ title, items, onItemClick }) {
+  const titleHtml = `<div class="recon-status-title">${escapeHtml(title)}</div>`;
+  const listHtml = '<ul>' + items.map((it, i) => {
+    const lineLabel = it.line != null ? `<span class="err-line">line ${it.line}</span>` : '';
+    return `<li data-idx="${i}">${lineLabel}${escapeHtml(it.message)}</li>`;
+  }).join('') + '</ul>';
+  reconStatusEl.innerHTML = titleHtml + listHtml;
+  reconStatusEl.classList.remove('hidden');
+  if (onItemClick) {
+    reconStatusEl.querySelectorAll('li').forEach((li) => {
+      li.addEventListener('click', () => onItemClick(items[Number(li.dataset.idx)]));
+    });
+  }
+}
+
+function hideReconStatus() {
+  reconStatusEl.classList.add('hidden');
+  reconStatusEl.innerHTML = '';
+}
+
+// ---- Export modal ----
+
+function openExportModal() {
+  updateReconTokenPill();
+  const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+  exportTargetEl.textContent = target
+    ? `${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`
+    : 'Not configured — set in Manage';
+
+  const ts = EblClient.tokenStatus();
+  if (!ts.hasToken) exportTokenStatusEl.textContent = 'No token (paste one in Manage)';
+  else if (ts.expired) exportTokenStatusEl.textContent = 'Expired (refresh in Manage)';
+  else if (!ts.hasWriteTexts) exportTokenStatusEl.textContent = 'Missing write:texts scope';
+  else exportTokenStatusEl.textContent = `OK · expires in ${Math.round((ts.expiresInSec || 0) / 60)} min`;
+
+  const msCount = (manuscriptsMeta?.manuscripts || []).length;
+  const problems = EblClient.validateManuscripts(manuscriptsMeta || { manuscripts: [] });
+  exportMsSummaryEl.textContent = `${msCount} manuscript${msCount === 1 ? '' : 's'}${problems.length ? ` · ${problems.length} with missing metadata` : ''}`;
+
+  const warningSections = [];
+  if (problems.length) {
+    warningSections.push(
+      '<strong>Manuscript metadata warnings (eBL may reject):</strong><ul style="margin-top: 0.4rem; padding-left: 1.2rem;">' +
+      problems.map((p) => `<li>${escapeHtml(p.file)}: ${escapeHtml(p.errors.join(', '))}</li>`).join('') +
+      '</ul>'
+    );
+  }
+  if (!localValidatorAvailable) {
+    warningSections.push(
+      '<strong>Browser mode:</strong> the ATF has not been validated locally. Any grammar errors will be reported by eBL during import (line numbers will be annotated in the Recon view).'
+    );
+  }
+  if (warningSections.length) {
+    exportWarningsEl.classList.remove('hidden');
+    exportWarningsEl.innerHTML = warningSections.join('<hr style="margin: 0.6rem 0; border: 0; border-top: 1px solid #f4c890;">');
+  } else {
+    exportWarningsEl.classList.add('hidden');
+    exportWarningsEl.innerHTML = '';
+  }
+
+  exportProgressEl.classList.add('hidden');
+  exportResultEl.classList.add('hidden');
+  exportResultEl.innerHTML = '';
+  exportProgressEl.querySelectorAll('.export-step').forEach((s) => {
+    s.classList.remove('running', 'done', 'error');
+    s.querySelector('.step-icon').textContent = '·';
+  });
+
+  const canExport = target && ts.hasToken && !ts.expired && ts.hasWriteTexts;
+  exportGoBtn.disabled = !canExport;
+  exportGoBtn.title = canExport ? '' : 'Cannot export — fix token/target first';
+
+  exportModal.classList.remove('hidden');
+}
+
+function closeExportModal() {
+  exportModal.classList.add('hidden');
+}
+
+async function runExport() {
+  const target = projectConfig.ebl.target;
+  const atfText = reconAceEditor ? reconAceEditor.getValue() : reconOriginalAtf;
+
+  exportGoBtn.disabled = true;
+  exportCancelBtn.textContent = 'Close';
+  exportProgressEl.classList.remove('hidden');
+  exportResultEl.classList.add('hidden');
+
+  const setStep = (step, state) => {
+    const el = exportProgressEl.querySelector(`.export-step[data-step="${step}"]`);
+    if (!el) return;
+    el.classList.remove('running', 'done', 'error');
+    el.classList.add(state);
+    if (state === 'running') el.querySelector('.step-icon').textContent = '…';
+  };
+
+  try {
+    // Step 1: POST /manuscripts
+    setStep('manuscripts', 'running');
+    const eblMss = EblClient.toEblManuscripts(manuscriptsMeta);
+    await EblClient.postManuscripts(target, eblMss, []);
+    setStep('manuscripts', 'done');
+
+    // Step 2: POST /import — strip visual table-formatting before sending
+    setStep('import', 'running');
+    const wireAtf = EblAtf.stripFormatting(atfText);
+    await EblClient.postImport(target, wireAtf);
+    setStep('import', 'done');
+
+    // Success
+    const url = `https://www.ebl.lmu.de/corpus/${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`;
+    exportResultEl.classList.remove('hidden');
+    exportResultEl.classList.add('success');
+    exportResultEl.classList.remove('failure');
+    exportResultEl.innerHTML = `Exported successfully. <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+  } catch (err) {
+    // Figure out which step failed by looking for which step is currently running
+    const running = exportProgressEl.querySelector('.export-step.running');
+    if (running) setStep(running.dataset.step, 'error');
+
+    exportResultEl.classList.remove('hidden');
+    exportResultEl.classList.remove('success');
+    exportResultEl.classList.add('failure');
+
+    if (err instanceof EblClient.EblError) {
+      const validationErrors = err.validationErrors;
+      const details = validationErrors
+        ? validationErrors.map((e) => (e.line != null ? `Line ${e.line}: ${e.message}` : e.message)).join('<br>')
+        : escapeHtml(err.rawBody || err.message);
+      exportResultEl.innerHTML = `<strong>${escapeHtml(err.message)}</strong><br>${details}`;
+      // If the failed step was import and we have validation errors, push them into Ace
+      if (running && running.dataset.step === 'import' && validationErrors) {
+        applyValidationErrorsToAce(validationErrors);
+        // Surface them clickably below Ace too
+        showReconStatus({
+          title: 'eBL import validation errors',
+          items: validationErrors.map((e) => ({
+            line: e.line,
+            message: e.message,
+          })),
+          onItemClick: (it) => {
+            if (it.line != null) {
+              reconAceEditor.gotoLine(it.line, 0, true);
+              reconAceEditor.focus();
+            }
+          },
+        });
+      }
+    } else {
+      exportResultEl.textContent = err.message || String(err);
+    }
+  } finally {
+    exportGoBtn.disabled = false;
+  }
+}
+
+function applyValidationErrorsToAce(validationErrors) {
+  if (!reconAceEditor) return;
+  const anns = validationErrors
+    .filter((e) => e.line != null)
+    .map((e) => ({
+      row: Math.max(0, e.line - 1),
+      column: (e.column || 1) - 1,
+      text: e.message,
+      type: 'error',
+    }));
+  reconAceEditor.session.setAnnotations(anns);
+}
+
+// ---- Wire buttons ----
+
+if (reconViewBtn) reconViewBtn.addEventListener('click', openReconView);
+if (reconCloseBtn) reconCloseBtn.addEventListener('click', closeReconView);
+if (reconRefreshBtn) reconRefreshBtn.addEventListener('click', async () => {
+  if (reconAceEditor && reconAceEditor.getValue() !== reconOriginalAtf) {
+    if (!confirm('You have in-view edits that will be lost. Refresh anyway?')) return;
+  }
+  await refreshReconArtifact();
+});
+if (reconValidateBtn) reconValidateBtn.addEventListener('click', validateRecon);
+if (reconExportBtn) reconExportBtn.addEventListener('click', openExportModal);
+
+// ---- Local ATF validation via the server.js → Python sidecar ----
+
+const VALIDATE_MAX_ERRORS = 5;
+
+async function validateRecon() {
+  if (!reconAceEditor) return;
+  const atfText = reconAceEditor.getValue();
+  const stripped = (window.EblAtf && EblAtf.stripFormatting)
+    ? EblAtf.stripFormatting(atfText)
+    : atfText;
+
+  reconValidateBtn.disabled = true;
+  const origLabel = reconValidateBtn.textContent;
+  reconValidateBtn.textContent = 'Validating…';
+  try {
+    const res = await fetch('/api/validate-atf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ atf: stripped }),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showReconStatus({
+        title: `Validator unavailable (HTTP ${res.status})`,
+        items: [{ message: body.hint || body.error || res.statusText }],
+      });
+      reconAceEditor.session.clearAnnotations();
+      return;
+    }
+
+    const result = await res.json();
+    if (result.valid) {
+      reconAceEditor.session.clearAnnotations();
+      showReconStatus({
+        title: `Valid · ${result.parsed_lines} line${result.parsed_lines === 1 ? '' : 's'} parsed by ${result.validation_source}`,
+        items: [],
+      });
+      return;
+    }
+
+    // Map artifact-row errors back to Ace rows. Because we stripped formatting
+    // before sending to Python, the validator's line numbers correspond to the
+    // *stripped* version, not the on-screen buffer. Each row has a 1:1 line
+    // mapping (stripFormatting is per-line), so the row indices match.
+    const errors = (result.errors || []).slice(0, VALIDATE_MAX_ERRORS);
+    const total = result.errors.length;
+
+    reconAceEditor.session.setAnnotations(errors.map((e) => ({
+      row: Math.max(0, (e.line || 1) - 1),
+      column: Math.max(0, (e.column || 1) - 1),
+      text: e.message,
+      type: 'error',
+    })));
+
+    showReconStatus({
+      title: total > VALIDATE_MAX_ERRORS
+        ? `${VALIDATE_MAX_ERRORS} of ${total} errors (fix these and Validate again to see the rest)`
+        : `${total} error${total === 1 ? '' : 's'}`,
+      items: errors.map((e) => ({
+        line: e.line,
+        message: (e.column != null ? `col ${e.column}: ` : '') + e.message,
+      })),
+      onItemClick: (it) => {
+        if (it.line != null) {
+          reconAceEditor.gotoLine(it.line, (errors.find(x => x.line === it.line)?.column || 1) - 1, true);
+          reconAceEditor.focus();
+        }
+      },
+    });
+  } catch (err) {
+    showReconStatus({
+      title: 'Validator request failed',
+      items: [{ message: err.message }],
+    });
+  } finally {
+    reconValidateBtn.textContent = origLabel;
+    reconValidateBtn.disabled = false;
+  }
+}
+
+if (exportCloseBtn) exportCloseBtn.addEventListener('click', closeExportModal);
+if (exportCancelBtn) exportCancelBtn.addEventListener('click', closeExportModal);
+if (exportGoBtn) exportGoBtn.addEventListener('click', runExport);
+exportModal && exportModal.addEventListener('click', (e) => {
+  if (e.target === exportModal) closeExportModal();
+});

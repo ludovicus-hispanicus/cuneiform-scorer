@@ -2,13 +2,62 @@
   "name": "cuneiform-scorer",
   "version": "1.0.0",
   "description": "Manuscript collation and synoptic score editor",
+  "main": "electron/main.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "electron": "electron .",
+    "pack:win": "electron-builder --win --x64",
+    "build:validator": "pyinstaller --noconfirm --clean --distpath dist-validator validate_atf.spec"
   },
   "dependencies": {
     "ws": "^8.14.2",
     "y-websocket": "^1.5.0",
     "yjs": "^13.6.10"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "de.lmu.ebl.manuscript-scorer",
+    "productName": "Manuscript Scorer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "index.html",
+      "scorer.html",
+      "manage.html",
+      "index.css",
+      "styles.css",
+      "app.js",
+      "ebl-client.js",
+      "ebl-atf.js",
+      "file-system.js",
+      "cuneiform-score-mode.js",
+      "fabric.min.js",
+      "server.js",
+      "electron/**",
+      "ebl-grammar/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-validator/validator",
+        "to": "validator",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   }
 }
