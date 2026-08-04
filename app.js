@@ -1368,9 +1368,61 @@ function parseEblAtf(atf) {
     if (sm) { surface = sm[1].toLowerCase(); continue; }
     if (/^[$#]/.test(line) || line.startsWith('//')) continue;
     const p = splitScoreLine(line);
-    if (p) out.set(refKey(surface, p.num), p.text);
+    // the key drops the prime so it can match ours, but the reference itself
+    // must be preserved: 22' and 22 are not the same line number
+    if (p) out.set(refKey(surface, p.num), { num: p.num, text: p.text });
   }
   return out;
+}
+
+// Order two line references within a surface: 8a' before 8b' before 9'.
+function lineSortKey(num) {
+  const m = String(num).match(/^(\d+)\s*([ab]?)/);
+  return [m ? parseInt(m[1], 10) : 0, m ? m[2] : ''];
+}
+
+function lineOrderCmp(a, b) {
+  const ka = lineSortKey(a), kb = lineSortKey(b);
+  if (ka[0] !== kb[0]) return ka[0] - kb[0];
+  return ka[1] < kb[1] ? -1 : ka[1] > kb[1] ? 1 : 0;
+}
+
+// Insert a line eBL has and this file does not, in its proper place: within its
+// own surface, before the first line numbered higher. If it is higher than
+// everything in that surface it goes at the end of the surface block, after any
+// closing ruling — which is where eBL keeps such lines too. A surface this file
+// has never seen is created at the end.
+function insertEblOnlyLine(lines, add) {
+  const bounds = [];            // [surface, firstIdx, endIdx)
+  let cur = 'obverse', start = 0;
+  for (let i = 0; i <= lines.length; i++) {
+    const sm = i < lines.length ? lines[i].trim().match(SURFACE_RE) : null;
+    if (sm || i === lines.length) {
+      bounds.push([cur, start, i]);
+      if (sm) { cur = sm[1].toLowerCase(); start = i + 1; }
+    }
+  }
+  const block = bounds.find(b => b[0] === add.surface);
+  const text = `${add.num}. ${add.text}`;
+
+  if (!block) {
+    if (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
+    lines.push(`@${add.surface}`, text);
+    return;
+  }
+
+  for (let i = block[1]; i < block[2]; i++) {
+    const p = splitScoreLine(lines[i]);
+    if (p && lineOrderCmp(p.num, add.num) > 0) {
+      lines.splice(i, 0, text);
+      return;
+    }
+  }
+  // past the last numbered line of the surface: keep any trailing ruling and
+  // blank lines below the new line where they belong
+  let end = block[2];
+  while (end > block[1] && lines[end - 1].trim() === '') end--;
+  lines.splice(end, 0, text);
 }
 
 let pullState = null;
@@ -1412,8 +1464,9 @@ async function pullFromEbl() {
     if (sm) { surface = sm[1].toLowerCase(); continue; }
     const p = splitScoreLine(lines[i]);
     if (!p) continue;
-    const t = theirs.get(refKey(surface, p.num));
-    if (t === undefined || t === p.text) continue;
+    const hit = theirs.get(refKey(surface, p.num));
+    if (hit === undefined || hit.text === p.text) continue;
+    const t = hit.text;
     rows.push({
       row: i, parts: p, mine: p.text, theirs: t,
       // a line whose brackets don't balance here but do at eBL is a
@@ -1444,70 +1497,103 @@ async function pullFromEbl() {
     const p = splitScoreLine(line);
     if (p && !theirs.has(refKey(surf2, p.num))) onlyHere.push(p);
   }
-  const onlyEbl = [...theirs.keys()].filter(k => !seen.has(k));
+  const additions = [...theirs.keys()]
+    .filter(k => !seen.has(k))
+    .map(k => {
+      const bar = k.indexOf('|');
+      const hit = theirs.get(k);
+      return { surface: k.slice(0, bar), num: hit.num, text: hit.text };
+    })
+    .sort((a, b) => a.surface.localeCompare(b.surface) || lineOrderCmp(a.num, b.num));
 
-  pullState = { id: activeManuscript, primary, rows, lines, onlyHere, onlyEbl };
+  pullState = { id: activeManuscript, primary, rows, lines, onlyHere, additions };
   renderPullDialog();
 }
 
 function renderPullDialog() {
-  const { primary, rows, onlyHere, onlyEbl } = pullState;
-  document.getElementById('pull-source-name').textContent = `· ${primary}`;
+  const { primary, rows, onlyHere, additions } = pullState;
+  document.getElementById('pull-source-name').textContent = '· ' + primary;
   const box = document.getElementById('pull-diff');
   const summary = document.getElementById('pull-summary');
   const warn = document.getElementById('pull-warning');
   const applyBtn = document.getElementById('pull-apply-btn');
 
+  const nothingToDo = rows.length === 0 && additions.length === 0;
   const notes = [];
   if (onlyHere.length) {
-    notes.push(`${onlyHere.length} line${onlyHere.length === 1 ? '' : 's'} here ` +
-               `${onlyHere.length === 1 ? 'has' : 'have'} no eBL counterpart ` +
-               `(${onlyHere.slice(0, 6).map(p => p.num).join(', ')}` +
-               `${onlyHere.length > 6 ? ', …' : ''}) — left untouched`);
-  }
-  if (onlyEbl.length) {
-    notes.push(`${onlyEbl.length} line${onlyEbl.length === 1 ? '' : 's'} exist only at eBL ` +
-               `(${onlyEbl.slice(0, 6).map(k => k.split('|')[1]).join(', ')}` +
-               `${onlyEbl.length > 6 ? ', …' : ''}) — not added, they have no § assignment`);
+    notes.push(onlyHere.length + ' line' + (onlyHere.length === 1 ? '' : 's') +
+      ' here ' + (onlyHere.length === 1 ? 'has' : 'have') + ' no eBL counterpart (' +
+      onlyHere.slice(0, 8).map(p => p.num).join(', ') +
+      (onlyHere.length > 8 ? ', …' : '') + ') — kept as they are');
   }
 
-  if (rows.length === 0) {
+  if (nothingToDo) {
     warn.hidden = true;
     summary.innerHTML = 'This source already matches its eBL transliteration line for line.' +
-      (notes.length ? `<br><span class="pull-note">${notes.map(escapeHtml).join('<br>')}</span>` : '');
+      (notes.length ? '<br><span class="pull-note">' + escapeHtml(notes[0]) + '</span>' : '');
     box.innerHTML = '';
     applyBtn.disabled = true;
-  } else {
-    warn.hidden = false;
-    warn.innerHTML =
-      `<strong>The two versions differ on ${rows.length} line${rows.length === 1 ? '' : 's'}.</strong> ` +
-      'eBL is the source of truth, so pulling replaces every one of them with the eBL text — ' +
-      'any edit made here and not at eBL is lost. Score assignments are kept.';
-    summary.innerHTML = notes.length
-      ? `<span class="pull-note">${notes.map(escapeHtml).join('<br>')}</span>` : '';
-    applyBtn.disabled = false;
-    box.innerHTML = rows.map((r) => `
-      <div class="pull-row${r.fixesBrackets ? ' pull-row-fix' : ''}">
-        <div class="pull-body">
-          <div class="pull-ref">${r.parts.sec ? `§${escapeHtml(r.parts.sec)} ` : ''}${escapeHtml(r.parts.num)}.${
-            r.fixesBrackets ? ' <span class="pull-badge">fixes bracket</span>' : ''}</div>
-          <div class="pull-line pull-mine"><span class="pull-tag">here</span>${renderAtf(r.mine)}</div>
-          <div class="pull-line pull-theirs"><span class="pull-tag">eBL</span>${renderAtf(r.theirs)}</div>
-        </div>
-      </div>`).join('');
+    applyBtn.textContent = 'Nothing to pull';
+    document.getElementById('ebl-pull-dialog').showModal();
+    return;
   }
-  applyBtn.textContent = rows.length
-    ? `Overwrite ${rows.length} line${rows.length === 1 ? '' : 's'}` : 'Nothing to pull';
+
+  const parts = [];
+  if (rows.length) {
+    parts.push('<strong>' + rows.length + ' line' + (rows.length === 1 ? '' : 's') +
+      ' differ' + (rows.length === 1 ? 's' : '') + '.</strong> eBL is the source of truth, ' +
+      'so pulling replaces ' + (rows.length === 1 ? 'it' : 'them') +
+      ' — any edit made here and not at eBL is lost.');
+  }
+  if (additions.length) {
+    parts.push('<strong>' + additions.length + ' line' + (additions.length === 1 ? '' : 's') +
+      ' will be added</strong> from eBL, in place. They arrive without a § ' +
+      'assignment, so they join the source but not the score until you map them.');
+  }
+  parts.push('Existing score assignments are kept.');
+  warn.hidden = false;
+  warn.innerHTML = parts.join(' ');
+  summary.innerHTML = notes.length
+    ? '<span class="pull-note">' + escapeHtml(notes.join(' ')) + '</span>' : '';
+  applyBtn.disabled = false;
+
+  const changed = rows.map((r) => '' +
+    '<div class="pull-row' + (r.fixesBrackets ? ' pull-row-fix' : '') + '">' +
+      '<div class="pull-body">' +
+        '<div class="pull-ref">' + (r.parts.sec ? '§' + escapeHtml(r.parts.sec) + ' ' : '') +
+          escapeHtml(r.parts.num) + '.' +
+          (r.fixesBrackets ? ' <span class="pull-badge">fixes bracket</span>' : '') + '</div>' +
+        '<div class="pull-line pull-mine"><span class="pull-tag">here</span>' + renderAtf(r.mine) + '</div>' +
+        '<div class="pull-line pull-theirs"><span class="pull-tag">eBL</span>' + renderAtf(r.theirs) + '</div>' +
+      '</div></div>').join('');
+
+  const added = additions.map((a) => '' +
+    '<div class="pull-row pull-row-add">' +
+      '<div class="pull-body">' +
+        '<div class="pull-ref">' + escapeHtml(a.num) + '. ' +
+          '<span class="pull-badge pull-badge-add">new · ' + escapeHtml(a.surface) + '</span></div>' +
+        '<div class="pull-line pull-theirs"><span class="pull-tag">eBL</span>' + renderAtf(a.text) + '</div>' +
+      '</div></div>').join('');
+
+  box.innerHTML = changed + added;
+  const total = rows.length + additions.length;
+  applyBtn.textContent =
+    (rows.length && additions.length)
+      ? 'Overwrite ' + rows.length + ', add ' + additions.length
+      : rows.length ? 'Overwrite ' + rows.length + ' line' + (rows.length === 1 ? '' : 's')
+                    : 'Add ' + additions.length + ' line' + (additions.length === 1 ? '' : 's');
   document.getElementById('ebl-pull-dialog').showModal();
 }
 
 function applyPull() {
   if (!pullState) return;
-  const { rows, lines: base } = pullState;
-  if (rows.length === 0) { closePullDialog(); return; }
+  const { rows, additions, lines: base } = pullState;
+  if (rows.length === 0 && additions.length === 0) { closePullDialog(); return; }
 
   const lines = base.slice();
+  // overwrite first, by stored index, before any insertion shifts them
   for (const r of rows) lines[r.row] = rebuildScoreLine(r.parts, r.theirs);
+  for (const a of additions) insertEblOnlyLine(lines, a);
   const content = lines.join('\n');
 
   manuscripts[pullState.id].content = content;

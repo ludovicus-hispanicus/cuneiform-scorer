@@ -2778,3 +2778,12 @@ body.dark-mode .viewer-footer {
   color: var(--type-library-text);
   overflow-wrap: anywhere;
 }
+
+/* A line eBL has that this file does not — added, not compared. */
+.pull-row-add { background: color-mix(in srgb, var(--type-excerpt) 10%, transparent); }
+
+.pull-badge-add {
+  color: var(--type-excerpt-text);
+  background: transparent;
+  border-color: currentColor;
+}
