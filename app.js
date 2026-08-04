@@ -494,6 +494,16 @@ function getManuscriptSortKey(el) {
 // Witnesses are ordered the same way the sidebar is grouped: by type first
 // (manuscripts, then commentaries, then excerpts, …), then by the label
 // currently on show.
+// Ordering inside one section: by witness first, then a manuscript's own
+// "$" directives after its reading, so a ruling sits under the line it
+// follows rather than at the foot of the section.
+function scoreEntryOrder(a, b) {
+  const byWitness = witnessOrder(a, b);
+  if (byWitness !== 0) return byWitness;
+  const rank = (e) => (e.type === 'line' ? 0 : 1);
+  return rank(a) - rank(b);
+}
+
 function witnessOrder(a, b) {
   const ra = TYPE_ORDER.indexOf(manuscriptTypes[a.siglum] || 'none');
   const rb = TYPE_ORDER.indexOf(manuscriptTypes[b.siglum] || 'none');
@@ -912,44 +922,35 @@ function buildScore() {
     allEntries.push(...entries);
   }
 
-  // Group by target line (only for 'line' type entries)
-  // Rulings and comments are stored separately
+  // Everything assigned to a § goes into scoreLines, tagged with its type —
+  // readings and the "$" directives alike. Keeping the directives in a second
+  // bucket meant only whichever view remembered to read it saw them, which is
+  // how the score pane and the reconstructed view came to disagree. One
+  // channel, so a consumer cannot silently miss them; each decides what to do
+  // with a non-'line' entry.
   const scoreLines = {};
   const rulings = [];
   const comments = [];
-  // Rulings and comments that carry a § of their own belong to that section of
-  // the score, so they are kept per target line as well as in the flat lists.
-  const scoreExtras = {};
 
   for (const entry of allEntries) {
     if (entry.type === 'ruling' || entry.type === 'comment') {
       (entry.type === 'ruling' ? rulings : comments).push(entry);
-      if (entry.targetLine) {
-        if (!scoreExtras[entry.targetLine]) scoreExtras[entry.targetLine] = [];
-        scoreExtras[entry.targetLine].push(entry);
-      }
-    } else if (entry.type === 'line') {
-      if (!scoreLines[entry.targetLine]) {
-        scoreLines[entry.targetLine] = [];
-      }
-      scoreLines[entry.targetLine].push(entry);
+      if (!entry.targetLine) continue;      // unassigned: not part of the score
+    } else if (entry.type !== 'line') {
+      continue;
     }
+    if (!scoreLines[entry.targetLine]) scoreLines[entry.targetLine] = [];
+    scoreLines[entry.targetLine].push(entry);
   }
 
-  for (const n of Object.keys(scoreLines)) scoreLines[n].sort(witnessOrder);
-  for (const n of Object.keys(scoreExtras)) scoreExtras[n].sort(witnessOrder);
+  for (const n of Object.keys(scoreLines)) scoreLines[n].sort(scoreEntryOrder);
 
-  // A § may consist only of a ruling, with no witness reading at all
-  for (const n of Object.keys(scoreExtras)) {
-    if (!scoreLines[n]) scoreLines[n] = [];
-  }
-
-  return { scoreLines, scoreExtras, rulings, comments };
+  return { scoreLines, rulings, comments };
 }
 
 // Render the score panel
 function renderScore() {
-  const { scoreLines, scoreExtras } = buildScore();
+  const { scoreLines } = buildScore();
   const sortedLineNumbers = Object.keys(scoreLines).map(Number).sort((a, b) => a - b);
 
   if (sortedLineNumbers.length === 0) {
@@ -970,20 +971,19 @@ function renderScore() {
     html += `<div class="translation-line"><span class="translation-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(translation)}</span></div>`;
     html += `<div class="score-line-header"><span class="line-label">§ ${lineNum}</span> <span class="reconstructed-text" contenteditable="true" data-line="${lineNum}">${renderAtf(reconstructed)}</span></div>`;
 
-    // A "$" directive assigned to this section is drawn with the witness it
-    // belongs to, not collected at the foot of the section.
-    const extras = (scoreExtras[lineNum] || []).slice();
-    const emitExtra = (x) => {
-      const ref = x.sourceLine
-        ? displaySiglum(x.siglum) + ' ' + abbreviateSurface(x.surface) + ' ' + x.sourceLine
-        : displaySiglum(x.siglum);
-      html += `<div class="score-extra${typeClass(x.siglum)}">`;
-      html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
-      html += `<span class="score-extra-text">${escapeHtml(x.content || ((x.rulingType || 'single') + ' ruling'))}</span>`;
-      html += `</div>`;
-    };
-
     for (const w of witnesses) {
+      // A "$" directive assigned to this section: a ruling on the tablet,
+      // shown against the witness it belongs to rather than as a reading.
+      if (w.type !== 'line') {
+        const ref = w.sourceLine
+          ? displaySiglum(w.siglum) + ' ' + abbreviateSurface(w.surface) + ' ' + w.sourceLine
+          : displaySiglum(w.siglum);
+        html += `<div class="score-extra${typeClass(w.siglum)}">`;
+        html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
+        html += `<span class="score-extra-text">${escapeHtml(w.content || ((w.rulingType || 'single') + ' ruling'))}</span>`;
+        html += `</div>`;
+        continue;
+      }
       const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
       html += `<div class="score-witness${typeClass(w.siglum)}">`;
       html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
@@ -1010,15 +1010,7 @@ function renderScore() {
         html += `</details>`;
       }
 
-      const mine = extras.filter((x) => x.siglum === w.siglum);
-      for (const x of mine) {
-        emitExtra(x);
-        extras.splice(extras.indexOf(x), 1);
-      }
     }
-
-    // anything whose witness has no reading in this section
-    for (const x of extras) emitExtra(x);
 
     html += `</div>`;
   }
@@ -2435,6 +2427,14 @@ function generateScoreText() {
     text += `§ ${lineNum} ${reconstructed}\n`;
 
     for (const w of witnesses) {
+      if (w.type !== 'line') {
+        const r = w.sourceLine
+          ? displaySiglum(w.siglum) + ' ' + abbreviateSurface(w.surface) + ' ' + w.sourceLine
+          : displaySiglum(w.siglum);
+        text += '  ' + r.padEnd(22) + ' $ ' +
+          (w.content || ((w.rulingType || 'single') + ' ruling')) + String.fromCharCode(10);
+        continue;
+      }
       const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`.padEnd(22);
       text += `  ${ref} ${w.content}\n`;
 

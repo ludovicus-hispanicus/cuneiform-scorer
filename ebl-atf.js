@@ -42,6 +42,13 @@
       if (key) idByKey.set(key, m.id || 9999);
     }
 
+    // The "$" directives in a section that belong to one manuscript.
+    function directivesFor(entries, siglum) {
+      return (entries || []).filter(
+        (e) => e.type !== 'line' && e.siglum === siglum
+      );
+    }
+
     function witnessSort(a, b) {
       const ia = idByKey.get(a.siglum) ?? 9999;
       const ib = idByKey.get(b.siglum) ?? 9999;
@@ -108,6 +115,26 @@
             });
             lines.push(formatContinuation(cont));
           }
+        }
+
+        // Rulings assigned to this witness. The chapter grammar allows
+        // paratext after a manuscript line —
+        //   manuscript_line: ... manuscript_text paratext_line*
+        //   paratext_line:   _NEWLINE _WHITE_SPACE? paratext
+        //   paratext:        note_line | dollar_line
+        // so an indented $-line here is valid and survives the round trip.
+        for (const x of directivesFor(scoreLines[n], w.siglum)) {
+          const directive = x.content || ((x.rulingType || 'single') + ' ruling');
+          lineMap.push({
+            row: lines.length,
+            kind: 'witness-paratext',
+            lineNum: n,
+            eblSiglum,
+            msKey: w.siglum,
+            sourceLine: w.sourceLine,
+            content: directive,
+          });
+          lines.push(formatContinuation('$ ' + directive));
         }
       }
 
