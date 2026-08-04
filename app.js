@@ -386,12 +386,13 @@ const ATF_PAIRS = [['[', ']'], ['⸢', '⸣'], ['{', '}'], ['<', '>']];
 const ATF_OPENERS = new Map(ATF_PAIRS.map(([o, c]) => [o, c]));
 const ATF_CLOSERS = new Map(ATF_PAIRS.map(([o, c]) => [c, o]));
 
-// Indices of unmatched brackets in a line.
-function unmatchedBrackets(text) {
+// Balance check over a line, optionally ignoring some positions.
+function scanBrackets(text, skip) {
   const bad = new Set();
   for (const [open, close] of ATF_PAIRS) {
     const stack = [];
     for (let i = 0; i < text.length; i++) {
+      if (skip && skip.has(i)) continue;
       if (text[i] === open) stack.push(i);
       else if (text[i] === close) {
         if (stack.length) stack.pop();
@@ -401,6 +402,44 @@ function unmatchedBrackets(text) {
     for (const i of stack) bad.add(i); // still open at end of line
   }
   return bad;
+}
+
+// Positions of a bracket repeated within one "/" word — the second and later
+// occurrences of the same character.
+function repeatedAlternativeBrackets(text) {
+  const skip = new Set();
+  const word = /\S+/g;
+  let m;
+  while ((m = word.exec(text)) !== null) {
+    if (m[0].indexOf('/') === -1) continue;
+    const seen = new Set();
+    for (let k = 0; k < m[0].length; k++) {
+      const ch = m[0][k];
+      if (!ATF_OPENERS.has(ch) && !ATF_CLOSERS.has(ch)) continue;
+      if (seen.has(ch)) skip.add(m.index + k);
+      else seen.add(ch);
+    }
+  }
+  return skip;
+}
+
+// Indices of unmatched brackets in a line.
+//
+// A "/" inside a word offers alternative readings the editor could not decide
+// between, and their brackets do not read linearly. Sometimes the break is
+// written once per reading and is one bracket seen twice —
+// "NI[GIN/NI[GIN₂-ME/MEŠ]" — and sometimes the alternation is only in the final
+// signs and every bracket is its own — "m]i?-iq#-[tu₂/tu₄]", "{mul/d}]e₂".
+// Which applies cannot be told without expanding the alternatives, so a line is
+// accepted if it balances under either reading: literally, or with a bracket
+// repeated inside a "/" word counted once. Only a line that fails both is
+// reported, and the positions shown are the literal ones.
+function unmatchedBrackets(text) {
+  const literal = scanBrackets(text, null);
+  if (literal.size === 0) return literal;
+  const repeats = repeatedAlternativeBrackets(text);
+  if (repeats.size === 0) return literal;
+  return scanBrackets(text, repeats).size === 0 ? new Set() : literal;
 }
 
 // Escape for HTML and wrap each bracket in its own span.
