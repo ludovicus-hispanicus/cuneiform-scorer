@@ -1291,6 +1291,191 @@ async function loadScoreData() {
   }
 }
 
+// ---- Pull a source's transliteration from eBL -----------------------------
+// eBL's fragment ATF is already in this app's format, but it carries no § score
+// assignments — those are ours. So a pull never overwrites the file: it matches
+// line for line, shows what differs, and rewrites only the transliteration that
+// follows the "§N n." prefix, leaving every assignment intact.
+
+// "§12 7'. DIŠ ..." -> {sec:'12', num:"7'", text:'DIŠ ...'}
+// "7'. DIŠ ..."     -> {sec:null, num:"7'", text:'DIŠ ...'}
+function splitScoreLine(rawLine) {
+  // Project files written on Windows are CRLF; a trailing \r is a line
+  // terminator to the regex engine, so "$" never reaches it and every line
+  // silently fails to parse.
+  const line = rawLine.replace(/\r$/, '');
+  let m = line.match(/^(\s*)§(\d+)\s+(\S+?)\.\s?(.*)$/);
+  if (m) return { indent: m[1], sec: m[2], num: m[3], text: m[4] };
+  m = line.match(/^(\s*)(\d+['’]?[ab]?)\.\s?(.*)$/);
+  if (m) return { indent: m[1], sec: null, num: m[2], text: m[3] };
+  return null;
+}
+
+function rebuildScoreLine(parts, text) {
+  const prefix = parts.sec ? `§${parts.sec} ` : '';
+  return `${parts.indent}${prefix}${parts.num}. ${text}`;
+}
+
+// A line is identified by surface + number. The surface is essential: K.2246
+// has an obverse 10 and a reverse 10', which collapse onto each other once the
+// prime is normalised. Within a single surface a primed and a plain line never
+// share a number, so dropping the prime there is safe — and needed, because our
+// build normalised the .ebl's inconsistent primes.
+const SURFACE_RE = /^@(obverse|reverse|edge|left edge|right edge|top|bottom|colophon)/i;
+
+function refKey(surface, num) {
+  return surface + '|' + String(num).replace(/[’']/g, '').toLowerCase();
+}
+
+function parseEblAtf(atf) {
+  const out = new Map();
+  let surface = 'obverse';
+  for (const raw of atf.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const sm = line.match(SURFACE_RE);
+    if (sm) { surface = sm[1].toLowerCase(); continue; }
+    if (/^[$#]/.test(line) || line.startsWith('//')) continue;
+    const p = splitScoreLine(line);
+    if (p) out.set(refKey(surface, p.num), p.text);
+  }
+  return out;
+}
+
+let pullState = null;
+
+async function pullFromEbl() {
+  const btn = document.getElementById('ebl-pull-btn');
+  const ms = manuscripts[activeManuscript];
+  if (!ms || !window.EblClient) return;
+
+  const primary = EblClient.extractMuseumNumber(ms.siglum).primary;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Pulling…';
+  let frag;
+  try {
+    frag = await EblClient.getFragment(primary);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert(`Could not fetch ${primary} from eBL.\n\n${err && err.message ? err.message : err}`);
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = original;
+
+  if (!frag || !frag.atf) {
+    alert(`${primary} has no transliteration in eBL yet.`);
+    return;
+  }
+
+  const theirs = parseEblAtf(frag.atf);
+  // Split on either ending: project files written on Windows are CRLF, and a
+  // stray \r would otherwise survive into the rebuilt lines and mix endings.
+  const lines = ms.content.split(/\r?\n/);
+  const rows = [];
+  let surface = 'obverse';
+  for (let i = 0; i < lines.length; i++) {
+    const sm = lines[i].trim().match(SURFACE_RE);
+    if (sm) { surface = sm[1].toLowerCase(); continue; }
+    const p = splitScoreLine(lines[i]);
+    if (!p) continue;
+    const t = theirs.get(refKey(surface, p.num));
+    if (t === undefined || t === p.text) continue;
+    rows.push({
+      row: i, parts: p, mine: p.text, theirs: t,
+      // a line whose brackets don't balance here but do at eBL is a
+      // transcription slip, so those are pre-selected; everything else is
+      // left for the editor to judge.
+      fixesBrackets: unmatchedBrackets(p.text).size > 0 &&
+                     unmatchedBrackets(t).size === 0,
+    });
+  }
+
+  pullState = { id: activeManuscript, primary, rows, lines };
+  renderPullDialog();
+}
+
+function renderPullDialog() {
+  const { primary, rows } = pullState;
+  document.getElementById('pull-source-name').textContent = `· ${primary}`;
+  const box = document.getElementById('pull-diff');
+  const summary = document.getElementById('pull-summary');
+  const applyBtn = document.getElementById('pull-apply-btn');
+  const selectAll = document.getElementById('pull-select-all');
+
+  if (rows.length === 0) {
+    summary.textContent = 'This source already matches its eBL transliteration line for line.';
+    box.innerHTML = '';
+    applyBtn.disabled = true;
+    selectAll.disabled = true;
+  } else {
+    const fixes = rows.filter(r => r.fixesBrackets).length;
+    summary.textContent =
+      `${rows.length} line${rows.length === 1 ? '' : 's'} differ` +
+      (fixes ? ` · ${fixes} would fix an unmatched bracket (pre-selected)` : '') +
+      '. Score assignments are kept — only the transliteration is replaced.';
+    applyBtn.disabled = false;
+    selectAll.disabled = false;
+    box.innerHTML = rows.map((r, i) => `
+      <div class="pull-row${r.fixesBrackets ? ' pull-row-fix' : ''}">
+        <label class="pull-check">
+          <input type="checkbox" data-i="${i}"${r.fixesBrackets ? ' checked' : ''}>
+        </label>
+        <div class="pull-body">
+          <div class="pull-ref">${r.parts.sec ? `§${escapeHtml(r.parts.sec)} ` : ''}${escapeHtml(r.parts.num)}.${
+            r.fixesBrackets ? ' <span class="pull-badge">fixes bracket</span>' : ''}</div>
+          <div class="pull-line pull-mine"><span class="pull-tag">here</span>${renderAtf(r.mine)}</div>
+          <div class="pull-line pull-theirs"><span class="pull-tag">eBL</span>${renderAtf(r.theirs)}</div>
+        </div>
+      </div>`).join('');
+  }
+  selectAll.checked = rows.length > 0 && rows.every(r => r.fixesBrackets);
+  document.getElementById('ebl-pull-dialog').showModal();
+}
+
+function applyPull() {
+  if (!pullState) return;
+  const boxes = document.querySelectorAll('#pull-diff input[type="checkbox"][data-i]');
+  const chosen = [];
+  boxes.forEach(b => { if (b.checked) chosen.push(pullState.rows[Number(b.dataset.i)]); });
+  if (chosen.length === 0) { document.getElementById('ebl-pull-dialog').close(); return; }
+
+  const lines = pullState.lines.slice();   // already 
+-free
+  for (const r of chosen) lines[r.row] = rebuildScoreLine(r.parts, r.theirs);
+  const content = lines.join('\n');
+
+  manuscripts[pullState.id].content = content;
+  if (pullState.id === activeManuscript) setEditorContent(content);
+  saveCurrentManuscript();
+  syncManuscriptToYjs(pullState.id);
+  renderScore();
+  updateSourceHeader(pullState.id);
+  markUnsaved();
+
+  document.getElementById('ebl-pull-dialog').close();
+  pullState = null;
+}
+
+function setupEblPull() {
+  const btn = document.getElementById('ebl-pull-btn');
+  if (btn) btn.addEventListener('click', pullFromEbl);
+  const cancel = document.getElementById('pull-cancel-btn');
+  if (cancel) cancel.addEventListener('click', () => {
+    document.getElementById('ebl-pull-dialog').close();
+    pullState = null;
+  });
+  const apply = document.getElementById('pull-apply-btn');
+  if (apply) apply.addEventListener('click', applyPull);
+  const all = document.getElementById('pull-select-all');
+  if (all) all.addEventListener('change', (e) => {
+    document.querySelectorAll('#pull-diff input[type="checkbox"][data-i]')
+      .forEach(b => { b.checked = e.target.checked; });
+  });
+}
+
 // Header of the Source Text pane: a link straight to this source's eBL entry,
 // and a count of any brackets in it that have no partner on their line. The
 // point of pairing them is that an unmatched bracket here is usually a typo
@@ -1312,12 +1497,14 @@ function updateSourceHeader(id) {
       link.hidden = true;
     }
   }
+  const pull = document.getElementById('ebl-pull-btn');
+  if (pull) pull.hidden = !ms;
 
   if (!status) return;
   if (!ms) { status.hidden = true; return; }
 
   let bad = 0;
-  const lines = ms.content.split('\n');
+  const lines = ms.content.split(/\r?\n/);
   const rows = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -3500,6 +3687,7 @@ async function init() {
 
   // Setup siglum toggle
   setupSiglaToggle();
+  setupEblPull();
 
   // Initialize collaboration
   initCollaboration();

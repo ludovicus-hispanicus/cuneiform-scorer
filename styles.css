@@ -2542,3 +2542,121 @@ body.dark-mode .viewer-footer {
 }
 
 .bracket-status[hidden] { display: none; }
+
+/* ---- Pull from eBL -------------------------------------------------------
+   A review step, not an overwrite: each differing line is shown side by side
+   and only the ticked ones are replaced. Lines whose brackets balance at eBL
+   but not here are pre-ticked, since those are transcription slips. */
+.ebl-pull-btn {
+  background: var(--bg-white);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ebl-pull-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ebl-pull-dialog {
+  max-width: min(980px, 92vw);
+  width: 980px;
+}
+
+.pull-source-name {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.pull-summary {
+  margin: 0.5rem 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.pull-diff {
+  max-height: 55vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.pull-diff:empty { display: none; }
+
+.pull-row {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.pull-row:last-child { border-bottom: none; }
+
+.pull-row-fix { background: var(--accent-light); }
+
+.pull-body { flex: 1; min-width: 0; }
+
+.pull-ref {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+
+.pull-badge {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-weight: 600;
+  color: var(--atf-bracket-bad);
+  background: var(--atf-bracket-bad-bg);
+  border: 1px solid currentColor;
+}
+
+.pull-line {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  color: var(--text-dark);
+}
+
+.pull-tag {
+  display: inline-block;
+  width: 3.2em;
+  flex-shrink: 0;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.pull-mine .pull-tag { color: var(--atf-bracket-bad); }
+.pull-theirs .pull-tag { color: var(--type-excerpt-text); }
+
+.pull-select-all {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.pull-spacer { flex: 1; }
+
+.pull-apply-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+}
+
+.pull-apply-btn:disabled { opacity: 0.5; }
+
+.ebl-pull-dialog .dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
