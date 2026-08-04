@@ -1231,6 +1231,28 @@ async function saveAll() {
   }
 }
 
+// Project settings live in manage.html, which reads the same project from
+// sessionStorage and writes the same files. Save first so it cannot open a
+// stale copy of manuscripts.json or index.json.
+async function openProjectSettings() {
+  const btn = document.getElementById('settings-btn');
+  if (hasUnsavedChanges) {
+    const proceed = confirm(
+      'This project has unsaved changes.\n\n' +
+      'OK: save them, then open Settings.\n' +
+      'Cancel: stay here.');
+    if (!proceed) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    await saveAll();
+    if (btn) { btn.disabled = false; btn.textContent = 'Settings'; }
+    if (hasUnsavedChanges) {          // saveAll reports failure via setStatus
+      alert('Could not save. Settings was not opened.');
+      return;
+    }
+  }
+  window.location.href = 'manage.html';
+}
+
 // Ctrl+S to save
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -3711,6 +3733,9 @@ async function init() {
 
   // Setup search all manuscripts
   setupSearchAll();
+
+  const settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) settingsBtn.addEventListener('click', openProjectSettings);
 
   // Setup siglum toggle
   setupSiglaToggle();
