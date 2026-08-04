@@ -511,6 +511,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .editor-pane {
@@ -1093,17 +1094,13 @@ body.dark-mode .reconstructed-text:empty::before {
   border-bottom: 1px solid var(--border-color);
 }
 
-/* Responsive */
+/* Responsive.
+   The panes deliberately stay side by side at every width. A stacked layout
+   collapsed the divider to 6x0px and, before Ace had positioned its content,
+   pushed the score pane past the bottom of the clipped .work-area entirely --
+   which a Mac at 200% zoom or a half-screen window reached without anyone
+   asking for a narrow layout. Side by side still reads down to ~500px. */
 @media (max-width: 700px) {
-  .work-area {
-    flex-direction: column;
-  }
-
-  .editor-pane {
-    border-right: none;
-    border-bottom: 1px solid var(--border-color);
-  }
-
   .search-modal {
     width: 95vw;
   }
@@ -2863,3 +2860,44 @@ body.dark-mode .viewer-footer {
 .score-extra.type-quotation  { border-left-color: var(--type-quotation); }
 .score-extra.type-parallel   { border-left-color: var(--type-parallel); }
 .score-extra.type-none       { border-left-color: var(--type-none); }
+
+/* Delete control on a sidebar row. Kept faint until the row is hovered so it
+   does not compete with the siglum, and never on the row's own click path. */
+.manuscript-item {
+  position: relative;
+}
+
+.delete-manuscript-btn {
+  position: absolute;
+  top: 50%;
+  right: 0.35rem;
+  transform: translateY(-50%);
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.manuscript-item:hover .delete-manuscript-btn,
+.delete-manuscript-btn:focus-visible {
+  opacity: 1;
+}
+
+.delete-manuscript-btn:hover,
+.delete-manuscript-btn:focus-visible {
+  background: var(--atf-bracket-bad-bg);
+  color: var(--atf-bracket-bad);
+}
+
+/* Leave room so a long siglum never runs under the button. */
+.manuscript-item a[data-ebl-link] {
+  padding-right: 1.5rem;
+}

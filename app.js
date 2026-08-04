@@ -357,6 +357,15 @@ function addManuscriptToList(id, museumNum) {
   link.appendChild(museumSpan);
   li.appendChild(link);
 
+  const del = document.createElement('button');
+  del.className = 'delete-manuscript-btn';
+  del.type = 'button';
+  del.dataset.id = id;
+  del.title = 'Delete ' + museumNum;
+  del.setAttribute('aria-label', 'Delete ' + museumNum);
+  del.innerHTML = '&times;';
+  li.appendChild(del);
+
   li.classList.add(...(typeClass(museumNum).trim() ? [typeClass(museumNum).trim()] : []));
 
   // Update visibility based on toggle state
@@ -1947,6 +1956,64 @@ async function fetchManuscriptFromEbl() {
   });
 }
 
+const CHR_NL = String.fromCharCode(10);
+
+// Remove a source: the file, its place in the index, and its row. The eBL
+// metadata is left to reconcileManuscripts, which drops entries whose file is
+// gone the next time Settings or the reconstructed view runs — deleting the
+// row here as well would only race it.
+async function deleteManuscript(id) {
+  const ms = manuscripts[id];
+  if (!ms) return;
+  const label = displaySiglum(ms.siglum);
+  const shown = label === ms.siglum ? ms.siglum : label + ' (' + ms.siglum + ')';
+  const lines = (ms.content || '').split(/\r?\n/)
+    .filter((l) => /^\s*§\d+\s/.test(l)).length;
+  const warning = lines
+    ? CHR_NL + CHR_NL + 'It has ' + lines + ' line' + (lines === 1 ? '' : 's') +
+      ' assigned to the score; those readings will disappear from it.'
+    : '';
+  if (!confirm('Delete "' + shown + '"?' + warning + CHR_NL + CHR_NL +
+               'The file is removed from the project folder.')) return;
+
+  try {
+    const ok = await FileSystem.deleteManuscript(dirHandle, ms.siglum);
+    if (!ok) throw new Error('the file could not be removed');
+    const index = await FileSystem.readManuscriptIndex(dirHandle) || [];
+    await FileSystem.writeManuscriptIndex(dirHandle, index.filter((x) => x !== ms.siglum));
+  } catch (err) {
+    console.error('Delete failed:', err);
+    alert('Could not delete "' + ms.siglum + '".' + CHR_NL + CHR_NL +
+          (err && err.message ? err.message : err));
+    return;
+  }
+
+  delete manuscripts[id];
+  delete manuscriptTypes[ms.siglum];   // else the legend keeps an empty type
+  const row = manuscriptList.querySelector('.manuscript-item[data-id="' + id + '"]');
+  if (row) row.remove();
+
+  // If it was the open one, fall back to whatever is left rather than leaving
+  // the editor showing a source that no longer exists.
+  if (activeManuscript === id) {
+    activeManuscript = null;
+    const next = manuscriptList.querySelector('.manuscript-item');
+    if (next) {
+      loadManuscript(next.dataset.id);
+    } else {
+      setEditorContent('');
+      updateSourceHeader(null);
+    }
+  }
+
+  resortManuscriptList();
+  renderTypeLegend();
+  renderScore();
+  setStatus('connected', 'Deleted ' + ms.siglum);
+  markUnsaved();
+}
+
+
 // Create a new empty manuscript
 async function createNewManuscript() {
   const siglum = prompt('Enter filename (e.g., K.3547, BM.12345):');
@@ -2051,6 +2118,15 @@ async function importManuscripts() {
 manuscriptList.addEventListener('click', (e) => {
   const item = e.target.closest('.manuscript-item');
   if (!item) return;
+  // The delete button sits inside the row, so it has to claim the click
+  // before the row treats it as a selection.
+  const del = e.target.closest('.delete-manuscript-btn');
+  if (del) {
+    e.preventDefault();
+    e.stopPropagation();
+    deleteManuscript(del.dataset.id);
+    return;
+  }
   // Modifier-click on the eBL link → let the browser open it in a new tab
   if (e.target.closest('a[data-ebl-link]') && (e.ctrlKey || e.metaKey || e.shiftKey)) {
     return;
