@@ -725,6 +725,7 @@ function initAceEditor() {
     saveCurrentManuscript();
     syncManuscriptToYjs(activeManuscript);
     renderScore();
+    updateSourceHeader(activeManuscript);   // bracket count follows the edits
     markUnsaved();
   });
 
@@ -1290,6 +1291,50 @@ async function loadScoreData() {
   }
 }
 
+// Header of the Source Text pane: a link straight to this source's eBL entry,
+// and a count of any brackets in it that have no partner on their line. The
+// point of pairing them is that an unmatched bracket here is usually a typo
+// inherited from eBL, so the link is one click away from checking the original.
+function updateSourceHeader(id) {
+  const link = document.getElementById('ebl-entry-link');
+  const status = document.getElementById('bracket-status');
+  const ms = manuscripts[id];
+
+  if (link) {
+    if (ms) {
+      const primary = window.EblClient
+        ? window.EblClient.extractMuseumNumber(ms.siglum).primary
+        : ms.siglum.split(/\s*\(\s*\+\s*\)\s*/)[0];
+      link.href = `https://www.ebl.lmu.de/library/${encodeURIComponent(primary)}`;
+      link.title = `Open ${primary} in the eBL Fragmentarium`;
+      link.hidden = false;
+    } else {
+      link.hidden = true;
+    }
+  }
+
+  if (!status) return;
+  if (!ms) { status.hidden = true; return; }
+
+  let bad = 0;
+  const lines = ms.content.split('\n');
+  const rows = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || /^\s*(?:[@$]|\/\/|#)/.test(line)) continue;
+    const n = unmatchedBrackets(line).size;
+    if (n) { bad += n; rows.push(i + 1); }
+  }
+  if (!bad) {
+    status.hidden = true;
+    return;
+  }
+  status.hidden = false;
+  status.textContent = `${bad} unmatched bracket${bad === 1 ? '' : 's'}`;
+  status.title = `Line${rows.length === 1 ? '' : 's'} ${rows.join(', ')} — ` +
+    'check the eBL entry to see whether the original has it too';
+}
+
 // Load a manuscript into the editor
 function loadManuscript(id) {
   // Save current first
@@ -1305,6 +1350,8 @@ function loadManuscript(id) {
 
   // Load content into Ace Editor
   setEditorContent(manuscripts[id].content);
+
+  updateSourceHeader(id);
 
   // Re-render score
   renderScore();
