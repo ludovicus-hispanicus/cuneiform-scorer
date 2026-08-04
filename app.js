@@ -970,6 +970,19 @@ function renderScore() {
     html += `<div class="translation-line"><span class="translation-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(translation)}</span></div>`;
     html += `<div class="score-line-header"><span class="line-label">§ ${lineNum}</span> <span class="reconstructed-text" contenteditable="true" data-line="${lineNum}">${renderAtf(reconstructed)}</span></div>`;
 
+    // A "$" directive assigned to this section is drawn with the witness it
+    // belongs to, not collected at the foot of the section.
+    const extras = (scoreExtras[lineNum] || []).slice();
+    const emitExtra = (x) => {
+      const ref = x.sourceLine
+        ? displaySiglum(x.siglum) + ' ' + abbreviateSurface(x.surface) + ' ' + x.sourceLine
+        : displaySiglum(x.siglum);
+      html += `<div class="score-extra${typeClass(x.siglum)}">`;
+      html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
+      html += `<span class="score-extra-text">${escapeHtml(x.content || ((x.rulingType || 'single') + ' ruling'))}</span>`;
+      html += `</div>`;
+    };
+
     for (const w of witnesses) {
       const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
       html += `<div class="score-witness${typeClass(w.siglum)}">`;
@@ -996,18 +1009,16 @@ function renderScore() {
         }
         html += `</details>`;
       }
+
+      const mine = extras.filter((x) => x.siglum === w.siglum);
+      for (const x of mine) {
+        emitExtra(x);
+        extras.splice(extras.indexOf(x), 1);
+      }
     }
 
-    // Rulings and other "$" directives assigned to this section
-    for (const x of (scoreExtras[lineNum] || [])) {
-      const ref = x.sourceLine
-        ? displaySiglum(x.siglum) + ' ' + abbreviateSurface(x.surface) + ' ' + x.sourceLine
-        : displaySiglum(x.siglum);
-      html += `<div class="score-extra${typeClass(x.siglum)}">`;
-      html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
-      html += `<span class="score-extra-text">${escapeHtml(x.content || ((x.rulingType || 'single') + ' ruling'))}</span>`;
-      html += `</div>`;
-    }
+    // anything whose witness has no reading in this section
+    for (const x of extras) emitExtra(x);
 
     html += `</div>`;
   }

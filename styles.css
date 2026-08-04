@@ -2830,8 +2830,8 @@ body.dark-mode .viewer-footer {
 
 .pull-result-dialog .pull-warning { margin-top: 0.75rem; }
 
-/* A "$" directive assigned to a score section — a ruling on the tablet, not a
-   reading, so it is drawn as a rule rather than set as text. */
+/* A "$" directive assigned to a score section — a ruling on the tablet
+   rather than a reading, shown beside the witness it belongs to. */
 .score-extra {
   display: flex;
   flex-wrap: wrap;
@@ -2852,14 +2852,6 @@ body.dark-mode .viewer-footer {
   font-size: 0.78rem;
   font-style: italic;
   color: var(--text-muted);
-}
-
-.score-extra-text::after {
-  content: "";
-  flex: 1;
-  height: 0;
-  border-top: 2px solid var(--text-muted);
-  opacity: 0.5;
 }
 
 .score-extra.type-library    { border-left-color: var(--type-library); }
