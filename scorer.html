@@ -49,7 +49,8 @@
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
         </svg>
       </button>
-      <button id="settings-btn" title="Project settings, eBL metadata and export">Settings</button>
+      <button id="settings-btn" class="icon-btn" title="Project settings, eBL metadata and export"
+        aria-label="Project settings">&#9881;</button>
       <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes</button>
       <button id="recon-view-btn" title="Open Reconstructed View (export artifact)">Recon view</button>
       <button id="export-btn">Export</button>
@@ -185,6 +186,28 @@
       </div>
     </div>
   </div>
+
+  <!-- Fetch a source from eBL by museum number -->
+  <dialog id="ebl-fetch-dialog" class="dialog ebl-fetch-dialog">
+    <h2>Fetch from eBL</h2>
+    <form method="dialog" id="ebl-fetch-form">
+      <label class="field-label" for="ebl-fetch-input">Museum number</label>
+      <input type="text" id="ebl-fetch-input" class="field-input" autocomplete="off"
+             placeholder="K.2246" spellcheck="false">
+      <p class="field-hint">e.g. <code>K.2246</code>, <code>BM.34653</code>,
+         <code>1881,0727.62</code>, <code>Rm-II.548</code></p>
+      <div class="url-preview">
+        <span class="url-preview-label">Will fetch</span>
+        <code id="ebl-fetch-url" class="url-preview-value">&mdash;</code>
+      </div>
+      <p id="ebl-fetch-note" class="field-hint field-note" hidden></p>
+      <div class="dialog-actions">
+        <span class="pull-spacer"></span>
+        <button type="button" id="ebl-fetch-cancel">Cancel</button>
+        <button type="submit" id="ebl-fetch-go" class="pull-apply-btn" disabled>Fetch</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Pull from eBL: line-by-line diff -->
   <dialog id="ebl-pull-dialog" class="dialog ebl-pull-dialog">

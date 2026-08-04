@@ -73,6 +73,7 @@
 }
 
 body.dark-mode {
+  color-scheme: dark;
   --border-color: #444;
   --bg-light: #252526;
   --bg-white: #1e1e1e;
@@ -1113,6 +1114,10 @@ body.dark-mode .reconstructed-text:empty::before {
   border: none;
   border-radius: 8px;
   padding: 1.5rem;
+  /* Without these a <dialog> uses the UA's Canvas/CanvasText, which stay
+     white-on-black in dark mode and leave dark-token buttons unreadable. */
+  background: var(--bg-white);
+  color: var(--text-dark);
   max-width: 400px;
   width: 90%;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
@@ -1145,11 +1150,13 @@ body.dark-mode .reconstructed-text:empty::before {
   font-size: 0.9rem;
   cursor: pointer;
   background: var(--bg-light);
+  color: var(--text-dark);
   border: 1px solid var(--border-color);
 }
 
 .dialog-actions button:hover {
-  background: #e0e0e0;
+  background: var(--accent-light);
+  border-color: var(--accent);
 }
 
 /* Add Manuscript Dialog */
@@ -2684,3 +2691,90 @@ body.dark-mode .viewer-footer {
 }
 
 .pull-row .pull-body { margin-left: 0; }
+
+/* Icon-only header button — the gear matches the one on the project list. */
+.header-actions .icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+/* ---- Fetch from eBL: museum-number form ---------------------------------- */
+.ebl-fetch-dialog { max-width: 520px; }
+
+.field-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+
+.field-input {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.95rem;
+  color: var(--text-dark);
+  background: var(--bg-white);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.field-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+
+.field-hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.field-hint code {
+  font-size: 0.95em;
+  padding: 0 0.2em;
+  border-radius: 2px;
+  background: var(--bg-light);
+}
+
+.field-note {
+  color: var(--atf-bracket-bad);
+}
+
+.field-note[hidden] { display: none; }
+
+/* The URL that will actually be requested — a join resolves to its first
+   number, so what is typed and what is fetched can differ. */
+.url-preview {
+  margin-top: 0.8rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-light);
+}
+
+.url-preview-label {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+
+.url-preview-value {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.78rem;
+  color: var(--type-library-text);
+  overflow-wrap: anywhere;
+}

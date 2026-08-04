@@ -1241,9 +1241,13 @@ async function saveAll() {
 async function openProjectSettings() {
   const btn = document.getElementById('settings-btn');
   if (hasUnsavedChanges) {
-    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    // the label is a gear glyph, so keep it and just show the wait state
+    if (btn) { btn.disabled = true; btn.title = 'Saving…'; }
     await saveAll();
-    if (btn) { btn.disabled = false; btn.textContent = 'Settings'; }
+    if (btn) {
+      btn.disabled = false;
+      btn.title = 'Project settings, eBL metadata and export';
+    }
     if (hasUnsavedChanges) {
       alert('Could not save the pending changes, so Settings was not opened.\n' +
             'Settings writes the same files and would overwrite them.');
@@ -1661,26 +1665,94 @@ function showAddManuscriptDialog() {
 // back is already in this app's format (@obverse, "1. DIŠ …"), so it is stored
 // as-is; what it cannot carry is the § score assignments, which are this
 // project's own and have to be added by hand afterwards.
+// Ask for a museum number, showing the exact eBL URL that will be requested.
+// A join is filed under its first number, so what is typed and what is fetched
+// are not always the same — the preview makes that visible before committing.
+function eblFragmentUrl(museum) {
+  const primary = window.EblClient
+    ? EblClient.extractMuseumNumber(museum).primary
+    : museum;
+  const base = (window.EblClient && EblClient.getApiUrl)
+    ? EblClient.getApiUrl() : 'https://www.ebl.lmu.de/api';
+  return { primary, url: base + '/fragments/' + encodeURIComponent(primary) };
+}
+
+function askEblMuseumNumber() {
+  return new Promise((resolve) => {
+    const dialog = document.getElementById('ebl-fetch-dialog');
+    if (!dialog) {
+      const typed = prompt('Museum number to fetch from eBL:');
+      resolve(typed ? typed.trim() : null);
+      return;
+    }
+    const input = document.getElementById('ebl-fetch-input');
+    const urlEl = document.getElementById('ebl-fetch-url');
+    const noteEl = document.getElementById('ebl-fetch-note');
+    const goBtn = document.getElementById('ebl-fetch-go');
+    const cancelBtn = document.getElementById('ebl-fetch-cancel');
+    const form = document.getElementById('ebl-fetch-form');
+    const DUPLICATE = 'already in this project';
+
+    const refresh = () => {
+      const museum = input.value.trim();
+      if (!museum) {
+        urlEl.textContent = '—';
+        noteEl.hidden = true;
+        goBtn.disabled = true;
+        return;
+      }
+      const info = eblFragmentUrl(museum);
+      urlEl.textContent = info.url;
+      const notes = [];
+      if (info.primary !== museum) {
+        notes.push('A join is filed under its first number, so eBL is asked for '
+                   + info.primary + '.');
+      }
+      if (manuscripts['ms-' + museum.toLowerCase()]) {
+        notes.push('"' + museum + '" is ' + DUPLICATE + '.');
+      }
+      noteEl.textContent = notes.join(' ');
+      noteEl.hidden = notes.length === 0;
+      goBtn.disabled = notes.some(n => n.indexOf(DUPLICATE) !== -1);
+    };
+
+    const cleanup = (value) => {
+      input.removeEventListener('input', refresh);
+      cancelBtn.removeEventListener('click', onCancel);
+      form.removeEventListener('submit', onSubmit);
+      dialog.removeEventListener('cancel', onCancel);
+      dialog.close();
+      resolve(value);
+    };
+    const onCancel = (e) => { if (e) e.preventDefault(); cleanup(null); };
+    const onSubmit = (e) => {
+      e.preventDefault();
+      const museum = input.value.trim();
+      if (museum && !goBtn.disabled) cleanup(museum);
+    };
+
+    input.value = '';
+    refresh();
+    input.addEventListener('input', refresh);
+    cancelBtn.addEventListener('click', onCancel);
+    form.addEventListener('submit', onSubmit);
+    dialog.addEventListener('cancel', onCancel);
+    dialog.showModal();
+    input.focus();
+  });
+}
+
 async function fetchManuscriptFromEbl() {
   if (!window.EblClient) {
     alert('The eBL client is not loaded.');
     return;
   }
-  const input = prompt(
-    'Museum number to fetch from eBL:\n\n' +
-    'e.g. K.2246, BM.34653, 1881,0727.62, Rm-II.548');
-  if (!input) return;
-
-  const museum = input.trim();
+  const museum = await askEblMuseumNumber();
   if (!museum) return;
 
   // A join is filed at eBL under its first number.
   const primary = EblClient.extractMuseumNumber(museum).primary;
   const id = `ms-${museum.toLowerCase()}`;
-  if (manuscripts[id]) {
-    alert(`"${museum}" is already in this project.`);
-    return;
-  }
 
   setStatus('syncing', `Fetching ${primary} from eBL…`);
   let frag;
