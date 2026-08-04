@@ -2829,3 +2829,45 @@ body.dark-mode .viewer-footer {
 }
 
 .pull-result-dialog .pull-warning { margin-top: 0.75rem; }
+
+/* A "$" directive assigned to a score section — a ruling on the tablet, not a
+   reading, so it is drawn as a rule rather than set as text. */
+.score-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 0.15rem 0 0.15rem 1rem;
+  margin-left: 0.25rem;
+  border-left: 3px solid var(--border-color);
+}
+
+.score-extra .witness-siglum { color: var(--text-muted); }
+
+.score-extra-text {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.score-extra-text::after {
+  content: "";
+  flex: 1;
+  height: 0;
+  border-top: 2px solid var(--text-muted);
+  opacity: 0.5;
+}
+
+.score-extra.type-library    { border-left-color: var(--type-library); }
+.score-extra.type-commentary { border-left-color: var(--type-commentary); }
+.score-extra.type-excerpt    { border-left-color: var(--type-excerpt); }
+.score-extra.type-school     { border-left-color: var(--type-school); }
+.score-extra.type-varia      { border-left-color: var(--type-varia); }
+.score-extra.type-amulet     { border-left-color: var(--type-amulet); }
+.score-extra.type-quotation  { border-left-color: var(--type-quotation); }
+.score-extra.type-parallel   { border-left-color: var(--type-parallel); }
+.score-extra.type-none       { border-left-color: var(--type-none); }

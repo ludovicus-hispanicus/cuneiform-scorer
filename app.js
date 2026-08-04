@@ -787,6 +787,30 @@ function parseManuscript(siglum, text) {
       continue;
     }
 
+    // A "$" directive carrying a score assignment:
+    //   §18 18. $ single ruling   /   §18 $ single ruling   /   §21 23 $ ...
+    // Without this the first form parsed as a witness reading whose text was
+    // "$ single ruling", and the other two matched nothing at all and were
+    // dropped without a word. The manuscript line number is optional because a
+    // ruling sits between lines rather than on one.
+    const assignedDollar = trimmed.match(/^§(\d+)(?:\s+([^\s$]+))?\s*\$\s*(.*)$/);
+    if (assignedDollar) {
+      const directive = assignedDollar[3].trim();
+      const isRuling = /ruling/i.test(directive);
+      entries.push({
+        siglum,
+        type: isRuling ? 'ruling' : 'comment',
+        targetLine: parseInt(assignedDollar[1], 10),
+        sourceLine: (assignedDollar[2] || '').replace(/\.$/, ''),
+        rulingType: isRuling
+          ? (directive.match(/single|double|triple/i)?.[0]?.toLowerCase() || 'single')
+          : undefined,
+        content: directive,
+        surface: currentSurface
+      });
+      continue;
+    }
+
     // Check for ruling markers: $ single ruling, $ double ruling, etc.
     if (/^\$\s*(single|double|triple)?\s*ruling/i.test(trimmed)) {
       entries.push({
@@ -893,12 +917,17 @@ function buildScore() {
   const scoreLines = {};
   const rulings = [];
   const comments = [];
+  // Rulings and comments that carry a § of their own belong to that section of
+  // the score, so they are kept per target line as well as in the flat lists.
+  const scoreExtras = {};
 
   for (const entry of allEntries) {
-    if (entry.type === 'ruling') {
-      rulings.push(entry);
-    } else if (entry.type === 'comment') {
-      comments.push(entry);
+    if (entry.type === 'ruling' || entry.type === 'comment') {
+      (entry.type === 'ruling' ? rulings : comments).push(entry);
+      if (entry.targetLine) {
+        if (!scoreExtras[entry.targetLine]) scoreExtras[entry.targetLine] = [];
+        scoreExtras[entry.targetLine].push(entry);
+      }
     } else if (entry.type === 'line') {
       if (!scoreLines[entry.targetLine]) {
         scoreLines[entry.targetLine] = [];
@@ -908,13 +937,19 @@ function buildScore() {
   }
 
   for (const n of Object.keys(scoreLines)) scoreLines[n].sort(witnessOrder);
+  for (const n of Object.keys(scoreExtras)) scoreExtras[n].sort(witnessOrder);
 
-  return { scoreLines, rulings, comments };
+  // A § may consist only of a ruling, with no witness reading at all
+  for (const n of Object.keys(scoreExtras)) {
+    if (!scoreLines[n]) scoreLines[n] = [];
+  }
+
+  return { scoreLines, scoreExtras, rulings, comments };
 }
 
 // Render the score panel
 function renderScore() {
-  const { scoreLines } = buildScore();
+  const { scoreLines, scoreExtras } = buildScore();
   const sortedLineNumbers = Object.keys(scoreLines).map(Number).sort((a, b) => a - b);
 
   if (sortedLineNumbers.length === 0) {
@@ -961,6 +996,17 @@ function renderScore() {
         }
         html += `</details>`;
       }
+    }
+
+    // Rulings and other "$" directives assigned to this section
+    for (const x of (scoreExtras[lineNum] || [])) {
+      const ref = x.sourceLine
+        ? displaySiglum(x.siglum) + ' ' + abbreviateSurface(x.surface) + ' ' + x.sourceLine
+        : displaySiglum(x.siglum);
+      html += `<div class="score-extra${typeClass(x.siglum)}">`;
+      html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
+      html += `<span class="score-extra-text">${escapeHtml(x.content || ((x.rulingType || 'single') + ' ruling'))}</span>`;
+      html += `</div>`;
     }
 
     html += `</div>`;
