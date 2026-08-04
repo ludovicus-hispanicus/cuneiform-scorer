@@ -1647,19 +1647,67 @@ function applyPull() {
 
   const lost = [...secByKey.keys()].filter(k => !carried.has(k));
   closePullDialog();
+  showPullResult({
+    primary: primary,
+    carried: carried.size,
+    total: secByKey.size,
+    lost: lost,
+    differed: rows.length + additions.length + onlyHere.length,
+  });
+}
 
-  let msg = primary + ' replaced with the eBL version.\n\n' +
-    carried.size + ' of ' + secByKey.size + ' score assignment' +
-    (secByKey.size === 1 ? '' : 's') + ' carried over.';
-  if (lost.length) {
-    msg += '\n\n' + lost.length +
-      ' could not be matched — those lines are no longer in eBL’s ' +
-      'version under the same number:\n  ' +
-      lost.map(k => k.replace('|', ' ')).join(', ');
+// The outcome of a pull, in the app’s own overlay rather than a browser
+// alert: it has to carry a warning and possibly a list of line references,
+// which a native dialog renders as unformatted text.
+function showPullResult(r) {
+  const dialog = document.getElementById('pull-result-dialog');
+  if (!dialog) return;
+  const summary = document.getElementById('pull-result-summary');
+  const lostEl = document.getElementById('pull-result-lost');
+  const warnEl = document.getElementById('pull-result-warning');
+  const okBtn = document.getElementById('pull-result-ok');
+
+  summary.innerHTML =
+    '<strong>' + escapeHtml(r.primary) + '</strong> replaced with the eBL version. ' +
+    r.carried + ' of ' + r.total + ' score assignment' +
+    (r.total === 1 ? '' : 's') + ' carried over.';
+
+  if (r.lost.length) {
+    lostEl.hidden = false;
+    lostEl.innerHTML =
+      '<div class="pull-lost-head">' + r.lost.length + ' assignment' +
+      (r.lost.length === 1 ? '' : 's') + ' could not be carried — ' +
+      (r.lost.length === 1 ? 'that line is' : 'those lines are') +
+      ' no longer at eBL under the same number:</div>' +
+      '<div class="pull-lost-list">' +
+      r.lost.map(function (k) {
+        return '<code>' + escapeHtml(k.replace('|', ' ')) + '</code>';
+      }).join(' ') + '</div>';
+  } else {
+    lostEl.hidden = true;
+    lostEl.innerHTML = '';
   }
-  msg += '\n\nThe two versions differed, so check the line assignments: ' +
-    'eBL may have renumbered lines, and a § can end up on the wrong one.';
-  alert(msg);
+
+  if (r.differed) {
+    warnEl.hidden = false;
+    warnEl.innerHTML =
+      '<strong>The two versions differed.</strong> Check the line assignments: ' +
+      'if eBL renumbered a line, its § still matches the old reference and can ' +
+      'now sit on the wrong text.';
+  } else {
+    warnEl.hidden = true;
+    warnEl.innerHTML = '';
+  }
+
+  const close = function () {
+    okBtn.removeEventListener('click', close);
+    dialog.removeEventListener('cancel', close);
+    dialog.close();
+  };
+  okBtn.addEventListener('click', close);
+  dialog.addEventListener('cancel', close);
+  dialog.showModal();
+  okBtn.focus();
 }
 
 function closePullDialog() {

@@ -209,6 +209,18 @@
     </form>
   </dialog>
 
+  <!-- Result of a pull -->
+  <dialog id="pull-result-dialog" class="dialog pull-result-dialog">
+    <h2 id="pull-result-title">Pulled from eBL</h2>
+    <p id="pull-result-summary" class="pull-summary"></p>
+    <div id="pull-result-lost" class="pull-lost" hidden></div>
+    <div id="pull-result-warning" class="pull-warning" hidden></div>
+    <div class="dialog-actions">
+      <span class="pull-spacer"></span>
+      <button type="button" id="pull-result-ok" class="pull-apply-btn">OK</button>
+    </div>
+  </dialog>
+
   <!-- Pull from eBL: line-by-line diff -->
   <dialog id="ebl-pull-dialog" class="dialog ebl-pull-dialog">
     <h2>Pull from eBL <span id="pull-source-name" class="pull-source-name"></span></h2>
