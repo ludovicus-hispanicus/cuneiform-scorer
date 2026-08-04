@@ -14,6 +14,7 @@
   --accent-light: #e8f0fe;
   --text-dark: #333;
   --text-muted: #666;
+  --on-accent: #ffffff;
 
   /* Manuscript-type colours (categorical; light steps).
      Library/Commentary/Excerpt are the three types in normal use and are
@@ -79,6 +80,7 @@ body.dark-mode {
   --accent-light: #2d3846;
   --text-dark: #d4d4d4;
   --text-muted: #a0a0a0;
+  --on-accent: #10151d;
   background: #1e1e1e;
 
   /* Dark steps of the same hues, chosen for the dark surface and validated
@@ -2635,24 +2637,25 @@ body.dark-mode .viewer-footer {
 .pull-mine .pull-tag { color: var(--atf-bracket-bad); }
 .pull-theirs .pull-tag { color: var(--type-excerpt-text); }
 
-.pull-select-all {
-  font-size: 0.82rem;
-  color: var(--text-muted);
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  cursor: pointer;
-}
-
 .pull-spacer { flex: 1; }
 
-.pull-apply-btn {
+/* Needs to out-specify ".dialog-actions button", which sets its own background
+   and would otherwise leave white text on light grey. */
+.dialog-actions .pull-apply-btn {
   background: var(--accent);
-  color: white;
-  border: none;
+  color: var(--on-accent);
+  border: 1px solid var(--accent);
 }
 
-.pull-apply-btn:disabled { opacity: 0.5; }
+.dialog-actions .pull-apply-btn:hover {
+  background: var(--accent);
+  filter: brightness(0.94);
+}
+
+.dialog-actions .pull-apply-btn:disabled {
+  opacity: 0.5;
+  filter: none;
+}
 
 .ebl-pull-dialog .dialog-actions {
   display: flex;
@@ -2660,3 +2663,24 @@ body.dark-mode .viewer-footer {
   gap: 0.5rem;
   margin-top: 0.9rem;
 }
+
+/* The pull is a full overwrite, so say so before it happens. */
+.pull-warning {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--atf-bracket-bad);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: var(--atf-bracket-bad-bg);
+  color: var(--text-dark);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.pull-warning[hidden] { display: none; }
+
+.pull-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.pull-row .pull-body { margin-left: 0; }

@@ -1393,36 +1393,70 @@ async function pullFromEbl() {
     });
   }
 
-  pullState = { id: activeManuscript, primary, rows, lines };
+  // Lines that exist on only one side. eBL is the source of truth, but a line
+  // it does not have cannot simply be deleted (it may be a join fragment or a
+  // colophon eBL files elsewhere), and a line only eBL has cannot be inserted
+  // without knowing which § it belongs to. Both are reported, neither is applied.
+  const seen = new Set();
+  let surf2 = 'obverse';
+  for (const line of lines) {
+    const sm = line.trim().match(SURFACE_RE);
+    if (sm) { surf2 = sm[1].toLowerCase(); continue; }
+    const p = splitScoreLine(line);
+    if (p) seen.add(refKey(surf2, p.num));
+  }
+  const onlyHere = [];
+  surf2 = 'obverse';
+  for (const line of lines) {
+    const sm = line.trim().match(SURFACE_RE);
+    if (sm) { surf2 = sm[1].toLowerCase(); continue; }
+    const p = splitScoreLine(line);
+    if (p && !theirs.has(refKey(surf2, p.num))) onlyHere.push(p);
+  }
+  const onlyEbl = [...theirs.keys()].filter(k => !seen.has(k));
+
+  pullState = { id: activeManuscript, primary, rows, lines, onlyHere, onlyEbl };
   renderPullDialog();
 }
 
 function renderPullDialog() {
-  const { primary, rows } = pullState;
+  const { primary, rows, onlyHere, onlyEbl } = pullState;
   document.getElementById('pull-source-name').textContent = `· ${primary}`;
   const box = document.getElementById('pull-diff');
   const summary = document.getElementById('pull-summary');
+  const warn = document.getElementById('pull-warning');
   const applyBtn = document.getElementById('pull-apply-btn');
-  const selectAll = document.getElementById('pull-select-all');
+
+  const notes = [];
+  if (onlyHere.length) {
+    notes.push(`${onlyHere.length} line${onlyHere.length === 1 ? '' : 's'} here ` +
+               `${onlyHere.length === 1 ? 'has' : 'have'} no eBL counterpart ` +
+               `(${onlyHere.slice(0, 6).map(p => p.num).join(', ')}` +
+               `${onlyHere.length > 6 ? ', …' : ''}) — left untouched`);
+  }
+  if (onlyEbl.length) {
+    notes.push(`${onlyEbl.length} line${onlyEbl.length === 1 ? '' : 's'} exist only at eBL ` +
+               `(${onlyEbl.slice(0, 6).map(k => k.split('|')[1]).join(', ')}` +
+               `${onlyEbl.length > 6 ? ', …' : ''}) — not added, they have no § assignment`);
+  }
 
   if (rows.length === 0) {
-    summary.textContent = 'This source already matches its eBL transliteration line for line.';
+    warn.hidden = true;
+    summary.innerHTML = 'This source already matches its eBL transliteration line for line.' +
+      (notes.length ? `<br><span class="pull-note">${notes.map(escapeHtml).join('<br>')}</span>` : '');
     box.innerHTML = '';
     applyBtn.disabled = true;
-    selectAll.disabled = true;
   } else {
-    const fixes = rows.filter(r => r.fixesBrackets).length;
-    summary.textContent =
-      `${rows.length} line${rows.length === 1 ? '' : 's'} differ` +
-      (fixes ? ` · ${fixes} would fix an unmatched bracket (pre-selected)` : '') +
-      '. Score assignments are kept — only the transliteration is replaced.';
+    warn.hidden = false;
+    warn.innerHTML =
+      `<strong>The two versions differ on ${rows.length} line${rows.length === 1 ? '' : 's'}.</strong> ` +
+      'eBL is the source of truth, so pulling replaces every one of them with the eBL text — ' +
+      'any edit made here and not at eBL is lost. Score assignments are kept.';
+    summary.innerHTML = notes.length
+      ? `<span class="pull-note">${notes.map(escapeHtml).join('<br>')}</span>` : '';
     applyBtn.disabled = false;
-    selectAll.disabled = false;
-    box.innerHTML = rows.map((r, i) => `
+    box.innerHTML = rows.map((r) => `
       <div class="pull-row${r.fixesBrackets ? ' pull-row-fix' : ''}">
-        <label class="pull-check">
-          <input type="checkbox" data-i="${i}"${r.fixesBrackets ? ' checked' : ''}>
-        </label>
         <div class="pull-body">
           <div class="pull-ref">${r.parts.sec ? `§${escapeHtml(r.parts.sec)} ` : ''}${escapeHtml(r.parts.num)}.${
             r.fixesBrackets ? ' <span class="pull-badge">fixes bracket</span>' : ''}</div>
@@ -1431,20 +1465,18 @@ function renderPullDialog() {
         </div>
       </div>`).join('');
   }
-  selectAll.checked = rows.length > 0 && rows.every(r => r.fixesBrackets);
+  applyBtn.textContent = rows.length
+    ? `Overwrite ${rows.length} line${rows.length === 1 ? '' : 's'}` : 'Nothing to pull';
   document.getElementById('ebl-pull-dialog').showModal();
 }
 
 function applyPull() {
   if (!pullState) return;
-  const boxes = document.querySelectorAll('#pull-diff input[type="checkbox"][data-i]');
-  const chosen = [];
-  boxes.forEach(b => { if (b.checked) chosen.push(pullState.rows[Number(b.dataset.i)]); });
-  if (chosen.length === 0) { document.getElementById('ebl-pull-dialog').close(); return; }
+  const { rows, lines: base } = pullState;
+  if (rows.length === 0) { closePullDialog(); return; }
 
-  const lines = pullState.lines.slice();   // already 
--free
-  for (const r of chosen) lines[r.row] = rebuildScoreLine(r.parts, r.theirs);
+  const lines = base.slice();
+  for (const r of rows) lines[r.row] = rebuildScoreLine(r.parts, r.theirs);
   const content = lines.join('\n');
 
   manuscripts[pullState.id].content = content;
@@ -1454,7 +1486,10 @@ function applyPull() {
   renderScore();
   updateSourceHeader(pullState.id);
   markUnsaved();
+  closePullDialog();
+}
 
+function closePullDialog() {
   document.getElementById('ebl-pull-dialog').close();
   pullState = null;
 }
@@ -1463,17 +1498,9 @@ function setupEblPull() {
   const btn = document.getElementById('ebl-pull-btn');
   if (btn) btn.addEventListener('click', pullFromEbl);
   const cancel = document.getElementById('pull-cancel-btn');
-  if (cancel) cancel.addEventListener('click', () => {
-    document.getElementById('ebl-pull-dialog').close();
-    pullState = null;
-  });
+  if (cancel) cancel.addEventListener('click', closePullDialog);
   const apply = document.getElementById('pull-apply-btn');
   if (apply) apply.addEventListener('click', applyPull);
-  const all = document.getElementById('pull-select-all');
-  if (all) all.addEventListener('change', (e) => {
-    document.querySelectorAll('#pull-diff input[type="checkbox"][data-i]')
-      .forEach(b => { b.checked = e.target.checked; });
-  });
 }
 
 // Header of the Source Text pane: a link straight to this source's eBL entry,
