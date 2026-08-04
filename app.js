@@ -1506,7 +1506,8 @@ async function pullFromEbl() {
     })
     .sort((a, b) => a.surface.localeCompare(b.surface) || lineOrderCmp(a.num, b.num));
 
-  pullState = { id: activeManuscript, primary, rows, lines, onlyHere, additions };
+  pullState = { id: activeManuscript, primary, rows, lines, onlyHere, additions,
+                atf: frag.atf };
   renderPullDialog();
 }
 
@@ -1524,10 +1525,10 @@ function renderPullDialog() {
     notes.push(onlyHere.length + ' line' + (onlyHere.length === 1 ? '' : 's') +
       ' here ' + (onlyHere.length === 1 ? 'has' : 'have') + ' no eBL counterpart (' +
       onlyHere.slice(0, 8).map(p => p.num).join(', ') +
-      (onlyHere.length > 8 ? ', …' : '') + ') — kept as they are');
+      (onlyHere.length > 8 ? ', …' : '') + ') — these will be removed');
   }
 
-  if (nothingToDo) {
+  if (nothingToDo && onlyHere.length === 0) {
     warn.hidden = true;
     summary.innerHTML = 'This source already matches its eBL transliteration line for line.' +
       (notes.length ? '<br><span class="pull-note">' + escapeHtml(notes[0]) + '</span>' : '');
@@ -1550,7 +1551,14 @@ function renderPullDialog() {
       ' will be added</strong> from eBL, in place. They arrive without a § ' +
       'assignment, so they join the source but not the score until you map them.');
   }
-  parts.push('Existing score assignments are kept.');
+  if (onlyHere.length) {
+    parts.push('<strong>' + onlyHere.length + ' line' +
+      (onlyHere.length === 1 ? '' : 's') + ' here ' +
+      (onlyHere.length === 1 ? 'has' : 'have') + ' no eBL counterpart and will ' +
+      'be removed</strong> — the whole source is replaced by eBL’s version.');
+  }
+  parts.push('Score assignments are re-attached by line reference wherever the ' +
+    'line still exists at eBL.');
   warn.hidden = false;
   warn.innerHTML = parts.join(' ');
   summary.innerHTML = notes.length
@@ -1576,25 +1584,58 @@ function renderPullDialog() {
       '</div></div>').join('');
 
   box.innerHTML = changed + added;
-  const total = rows.length + additions.length;
-  applyBtn.textContent =
-    (rows.length && additions.length)
-      ? 'Overwrite ' + rows.length + ', add ' + additions.length
-      : rows.length ? 'Overwrite ' + rows.length + ' line' + (rows.length === 1 ? '' : 's')
-                    : 'Add ' + additions.length + ' line' + (additions.length === 1 ? '' : 's');
+  applyBtn.textContent = 'Overwrite';
   document.getElementById('ebl-pull-dialog').showModal();
 }
 
 function applyPull() {
   if (!pullState) return;
-  const { rows, additions, lines: base } = pullState;
-  if (rows.length === 0 && additions.length === 0) { closePullDialog(); return; }
+  const { rows, additions, onlyHere, lines: base, atf, primary } = pullState;
+  if (rows.length === 0 && additions.length === 0 && onlyHere.length === 0) {
+    closePullDialog();
+    return;
+  }
 
-  const lines = base.slice();
-  // overwrite first, by stored index, before any insertion shifts them
-  for (const r of rows) lines[r.row] = rebuildScoreLine(r.parts, r.theirs);
-  for (const a of additions) insertEblOnlyLine(lines, a);
-  const content = lines.join('\n');
+  // The file is rebuilt from eBL’s ATF rather than patched line by line: eBL
+  // is the source of truth, so its version wins whole — text, rulings,
+  // surfaces and all. The one thing it cannot supply is the § assignments,
+  // so those are carried across by line reference.
+  const secByKey = new Map();
+  let surface = 'obverse';
+  for (const line of base) {
+    const sm = line.trim().match(SURFACE_RE);
+    if (sm) { surface = sm[1].toLowerCase(); continue; }
+    const p = splitScoreLine(line);
+    if (p && p.sec) secByKey.set(refKey(surface, p.num), p.sec);
+  }
+
+  // Anything above the first surface marker or numbered line is ours — the
+  // siglum and the eBL-siglum comment — and is kept.
+  const preamble = [];
+  for (const line of base) {
+    const t = line.trim();
+    if (t && (SURFACE_RE.test(t) || /^\$/.test(t) || splitScoreLine(line))) break;
+    preamble.push(line);
+  }
+
+  const body = [];
+  const carried = new Set();
+  surface = 'obverse';
+  for (const raw of atf.split('\n')) {
+    const t = raw.trim();
+    const sm = t.match(SURFACE_RE);
+    if (sm) { surface = sm[1].toLowerCase(); body.push(t); continue; }
+    const p = t ? splitScoreLine(t) : null;
+    if (!p) { body.push(t); continue; }
+    const key = refKey(surface, p.num);
+    const sec = secByKey.get(key);
+    if (sec) carried.add(key);
+    body.push(sec ? '§' + sec + ' ' + p.num + '. ' + p.text
+                  : p.num + '. ' + p.text);
+  }
+  while (body.length && body[body.length - 1] === '') body.pop();
+
+  const content = preamble.concat(body).join('\n') + '\n';
 
   manuscripts[pullState.id].content = content;
   if (pullState.id === activeManuscript) setEditorContent(content);
@@ -1603,7 +1644,22 @@ function applyPull() {
   renderScore();
   updateSourceHeader(pullState.id);
   markUnsaved();
+
+  const lost = [...secByKey.keys()].filter(k => !carried.has(k));
   closePullDialog();
+
+  let msg = primary + ' replaced with the eBL version.\n\n' +
+    carried.size + ' of ' + secByKey.size + ' score assignment' +
+    (secByKey.size === 1 ? '' : 's') + ' carried over.';
+  if (lost.length) {
+    msg += '\n\n' + lost.length +
+      ' could not be matched — those lines are no longer in eBL’s ' +
+      'version under the same number:\n  ' +
+      lost.map(k => k.replace('|', ' ')).join(', ');
+  }
+  msg += '\n\nThe two versions differed, so check the line assignments: ' +
+    'eBL may have renumbered lines, and a § can end up on the wrong one.';
+  alert(msg);
 }
 
 function closePullDialog() {
