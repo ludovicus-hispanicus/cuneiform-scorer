@@ -1231,26 +1231,31 @@ async function saveAll() {
   }
 }
 
-// Project settings live in manage.html, which reads the same project from
-// sessionStorage and writes the same files. Save first so it cannot open a
-// stale copy of manuscripts.json or index.json.
+// Project settings open in their own window, so the score stays put. The id
+// travels in the URL: session storage is per-tab and a new window does not
+// reliably inherit it.
+//
+// Both pages write the same files, so pending edits are flushed first —
+// otherwise Settings could load a stale manuscripts.json and write it back
+// over them.
 async function openProjectSettings() {
   const btn = document.getElementById('settings-btn');
   if (hasUnsavedChanges) {
-    const proceed = confirm(
-      'This project has unsaved changes.\n\n' +
-      'OK: save them, then open Settings.\n' +
-      'Cancel: stay here.');
-    if (!proceed) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     await saveAll();
     if (btn) { btn.disabled = false; btn.textContent = 'Settings'; }
-    if (hasUnsavedChanges) {          // saveAll reports failure via setStatus
-      alert('Could not save. Settings was not opened.');
+    if (hasUnsavedChanges) {
+      alert('Could not save the pending changes, so Settings was not opened.\n' +
+            'Settings writes the same files and would overwrite them.');
       return;
     }
   }
-  window.location.href = 'manage.html';
+  const url = projectId
+    ? `manage.html?project=${encodeURIComponent(projectId)}`
+    : 'manage.html';
+  const win = window.open(url, 'scorer-settings');
+  if (win) win.focus();
+  else window.location.href = url;   // pop-up blocked: fall back to this tab
 }
 
 // Ctrl+S to save
@@ -1609,6 +1614,8 @@ async function addManuscript() {
     await createNewManuscript();
   } else if (choice === 'import') {
     await importManuscripts();
+  } else if (choice === 'ebl') {
+    await fetchManuscriptFromEbl();
   }
 }
 
@@ -1627,23 +1634,91 @@ function showAddManuscriptDialog() {
 
     const newBtn = document.getElementById('add-new-manuscript-btn');
     const importBtn = document.getElementById('import-manuscripts-btn');
+    const eblBtn = document.getElementById('fetch-ebl-manuscript-btn');
     const cancelBtn = document.getElementById('cancel-add-manuscript-btn');
 
     const cleanup = () => {
       dialog.close();
       newBtn.removeEventListener('click', onNew);
       importBtn.removeEventListener('click', onImport);
+      if (eblBtn) eblBtn.removeEventListener('click', onEbl);
       cancelBtn.removeEventListener('click', onCancel);
     };
 
     const onNew = () => { cleanup(); resolve('new'); };
     const onImport = () => { cleanup(); resolve('import'); };
+    const onEbl = () => { cleanup(); resolve('ebl'); };
     const onCancel = () => { cleanup(); resolve(null); };
 
     newBtn.addEventListener('click', onNew);
     importBtn.addEventListener('click', onImport);
+    if (eblBtn) eblBtn.addEventListener('click', onEbl);
     cancelBtn.addEventListener('click', onCancel);
   });
+}
+
+// Add a source by downloading its transliteration from eBL. The ATF that comes
+// back is already in this app's format (@obverse, "1. DIŠ …"), so it is stored
+// as-is; what it cannot carry is the § score assignments, which are this
+// project's own and have to be added by hand afterwards.
+async function fetchManuscriptFromEbl() {
+  if (!window.EblClient) {
+    alert('The eBL client is not loaded.');
+    return;
+  }
+  const input = prompt(
+    'Museum number to fetch from eBL:\n\n' +
+    'e.g. K.2246, BM.34653, 1881,0727.62, Rm-II.548');
+  if (!input) return;
+
+  const museum = input.trim();
+  if (!museum) return;
+
+  // A join is filed at eBL under its first number.
+  const primary = EblClient.extractMuseumNumber(museum).primary;
+  const id = `ms-${museum.toLowerCase()}`;
+  if (manuscripts[id]) {
+    alert(`"${museum}" is already in this project.`);
+    return;
+  }
+
+  setStatus('syncing', `Fetching ${primary} from eBL…`);
+  let frag;
+  try {
+    frag = await EblClient.getFragment(primary);
+  } catch (err) {
+    setStatus('error', 'eBL fetch failed');
+    const msg = err && err.status === 404
+      ? `eBL has no fragment "${primary}".`
+      : `Could not reach eBL.\n\n${err && err.message ? err.message : err}`;
+    alert(msg);
+    return;
+  }
+
+  if (!frag || !frag.atf || !frag.atf.trim()) {
+    setStatus('connected', 'Ready');
+    alert(`${primary} exists at eBL but has no transliteration yet.`);
+    return;
+  }
+
+  const content = `${museum}\n${frag.atf.replace(/\r?\n$/, '')}\n`;
+
+  manuscripts[id] = { siglum: museum, content };
+  addManuscriptToList(id, museum);
+  try {
+    await FileSystem.writeManuscript(dirHandle, museum, content);
+    await updateManuscriptIndex();
+  } catch (err) {
+    console.error('Failed to save fetched manuscript:', err);
+  }
+  loadManuscript(id);
+  markUnsaved();
+
+  const lineCount = frag.atf.split('\n').filter(l => /^\s*\d+['’]?[ab]?\./.test(l)).length;
+  setStatus('connected', `Fetched ${primary}`);
+  alert(`${museum} added — ${lineCount} line${lineCount === 1 ? '' : 's'} from eBL.\n\n` +
+        'eBL carries no score assignments, so add the "§N " prefixes to map ' +
+        'these lines onto the score.');
 }
 
 // Create a new empty manuscript

@@ -619,11 +619,19 @@
   </main>
 
   <script>
-    // Get project from sessionStorage (set by index.html)
-    const projectId = sessionStorage.getItem('currentProjectId');
+    // Project id: the ?project= parameter wins, then sessionStorage. The
+    // parameter matters when this page is opened in its own window — session
+    // storage is per-tab and is not reliably inherited by a new one.
+    const projectId =
+      new URLSearchParams(location.search).get('project') ||
+      sessionStorage.getItem('currentProjectId');
 
     if (!projectId) {
       window.location.href = 'index.html';
+    } else {
+      // keep this tab's own session in step, so a reload without the parameter
+      // still resolves
+      sessionStorage.setItem('currentProjectId', projectId);
     }
 
     // Update scorer link (will navigate via sessionStorage)
