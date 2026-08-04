@@ -1647,57 +1647,54 @@ function applyPull() {
 
   const lost = [...secByKey.keys()].filter(k => !carried.has(k));
   closePullDialog();
+  const differed = rows.length + additions.length + onlyHere.length;
   showPullResult({
-    primary: primary,
-    carried: carried.size,
-    total: secByKey.size,
+    title: 'Pulled from eBL',
+    summaryHtml: '<strong>' + escapeHtml(primary) + '</strong> replaced with the ' +
+      'eBL version. ' + carried.size + ' of ' + secByKey.size +
+      ' score assignment' + (secByKey.size === 1 ? '' : 's') + ' carried over.',
     lost: lost,
-    differed: rows.length + additions.length + onlyHere.length,
+    warnHtml: differed
+      ? '<strong>The two versions differed.</strong> Check the line assignments: ' +
+        'if eBL renumbered a line, its § still matches the old reference and ' +
+        'can now sit on the wrong text.'
+      : '',
   });
 }
 
 // The outcome of a pull, in the app’s own overlay rather than a browser
 // alert: it has to carry a warning and possibly a list of line references,
 // which a native dialog renders as unformatted text.
+// A result overlay shared by the pull and the eBL fetch: a title, a summary,
+// an optional list of line references, and an optional warning.
 function showPullResult(r) {
   const dialog = document.getElementById('pull-result-dialog');
   if (!dialog) return;
+  const titleEl = document.getElementById('pull-result-title');
   const summary = document.getElementById('pull-result-summary');
   const lostEl = document.getElementById('pull-result-lost');
   const warnEl = document.getElementById('pull-result-warning');
   const okBtn = document.getElementById('pull-result-ok');
 
-  summary.innerHTML =
-    '<strong>' + escapeHtml(r.primary) + '</strong> replaced with the eBL version. ' +
-    r.carried + ' of ' + r.total + ' score assignment' +
-    (r.total === 1 ? '' : 's') + ' carried over.';
+  titleEl.textContent = r.title || 'Pulled from eBL';
+  summary.innerHTML = r.summaryHtml || '';
 
-  if (r.lost.length) {
-    lostEl.hidden = false;
-    lostEl.innerHTML =
-      '<div class="pull-lost-head">' + r.lost.length + ' assignment' +
-      (r.lost.length === 1 ? '' : 's') + ' could not be carried — ' +
-      (r.lost.length === 1 ? 'that line is' : 'those lines are') +
-      ' no longer at eBL under the same number:</div>' +
-      '<div class="pull-lost-list">' +
-      r.lost.map(function (k) {
-        return '<code>' + escapeHtml(k.replace('|', ' ')) + '</code>';
-      }).join(' ') + '</div>';
-  } else {
-    lostEl.hidden = true;
-    lostEl.innerHTML = '';
-  }
+  const lost = r.lost || [];
+  lostEl.hidden = lost.length === 0;
+  lostEl.innerHTML = lost.length
+    ? '<div class="pull-lost-head">' + lost.length + ' assignment' +
+        (lost.length === 1 ? '' : 's') +
+        ' could not be carried — ' +
+        (lost.length === 1 ? 'that line is' : 'those lines are') +
+        ' no longer at eBL under the same number:</div>' +
+        '<div class="pull-lost-list">' +
+        lost.map(function (k) {
+          return '<code>' + escapeHtml(k.replace('|', ' ')) + '</code>';
+        }).join(' ') + '</div>'
+    : '';
 
-  if (r.differed) {
-    warnEl.hidden = false;
-    warnEl.innerHTML =
-      '<strong>The two versions differed.</strong> Check the line assignments: ' +
-      'if eBL renumbered a line, its § still matches the old reference and can ' +
-      'now sit on the wrong text.';
-  } else {
-    warnEl.hidden = true;
-    warnEl.innerHTML = '';
-  }
+  warnEl.hidden = !r.warnHtml;
+  warnEl.innerHTML = r.warnHtml || '';
 
   const close = function () {
     okBtn.removeEventListener('click', close);
@@ -1855,132 +1852,50 @@ function showAddManuscriptDialog() {
 // back is already in this app's format (@obverse, "1. DIŠ …"), so it is stored
 // as-is; what it cannot carry is the § score assignments, which are this
 // project's own and have to be added by hand afterwards.
-// Ask for a museum number, showing the exact eBL URL that will be requested.
-// A join is filed under its first number, so what is typed and what is fetched
-// are not always the same — the preview makes that visible before committing.
-function eblFragmentUrl(museum) {
-  const primary = window.EblClient
-    ? EblClient.extractMuseumNumber(museum).primary
-    : museum;
-  const base = (window.EblClient && EblClient.getApiUrl)
-    ? EblClient.getApiUrl() : 'https://www.ebl.lmu.de/api';
-  return { primary, url: base + '/fragments/' + encodeURIComponent(primary) };
-}
-
-function askEblMuseumNumber() {
-  return new Promise((resolve) => {
-    const dialog = document.getElementById('ebl-fetch-dialog');
-    if (!dialog) {
-      const typed = prompt('Museum number to fetch from eBL:');
-      resolve(typed ? typed.trim() : null);
-      return;
-    }
-    const input = document.getElementById('ebl-fetch-input');
-    const urlEl = document.getElementById('ebl-fetch-url');
-    const noteEl = document.getElementById('ebl-fetch-note');
-    const goBtn = document.getElementById('ebl-fetch-go');
-    const cancelBtn = document.getElementById('ebl-fetch-cancel');
-    const form = document.getElementById('ebl-fetch-form');
-    const DUPLICATE = 'already in this project';
-
-    const refresh = () => {
-      const museum = input.value.trim();
-      if (!museum) {
-        urlEl.textContent = '—';
-        noteEl.hidden = true;
-        goBtn.disabled = true;
-        return;
-      }
-      const info = eblFragmentUrl(museum);
-      urlEl.textContent = info.url;
-      const notes = [];
-      if (info.primary !== museum) {
-        notes.push('A join is filed under its first number, so eBL is asked for '
-                   + info.primary + '.');
-      }
-      if (manuscripts['ms-' + museum.toLowerCase()]) {
-        notes.push('"' + museum + '" is ' + DUPLICATE + '.');
-      }
-      noteEl.textContent = notes.join(' ');
-      noteEl.hidden = notes.length === 0;
-      goBtn.disabled = notes.some(n => n.indexOf(DUPLICATE) !== -1);
-    };
-
-    const cleanup = (value) => {
-      input.removeEventListener('input', refresh);
-      cancelBtn.removeEventListener('click', onCancel);
-      form.removeEventListener('submit', onSubmit);
-      dialog.removeEventListener('cancel', onCancel);
-      dialog.close();
-      resolve(value);
-    };
-    const onCancel = (e) => { if (e) e.preventDefault(); cleanup(null); };
-    const onSubmit = (e) => {
-      e.preventDefault();
-      const museum = input.value.trim();
-      if (museum && !goBtn.disabled) cleanup(museum);
-    };
-
-    input.value = '';
-    refresh();
-    input.addEventListener('input', refresh);
-    cancelBtn.addEventListener('click', onCancel);
-    form.addEventListener('submit', onSubmit);
-    dialog.addEventListener('cancel', onCancel);
-    dialog.showModal();
-    input.focus();
-  });
-}
-
+// Add a source by downloading its transliteration from eBL. The ATF is
+// already in this app’s format, so it is stored as-is; what it cannot carry
+// is the § score assignments, which are this project’s own.
 async function fetchManuscriptFromEbl() {
-  if (!window.EblClient) {
-    alert('The eBL client is not loaded.');
-    return;
-  }
-  const museum = await askEblMuseumNumber();
+  if (!window.EblFetch) { alert('The eBL fetch module is not loaded.'); return; }
+
+  const museum = await EblFetch.askMuseumNumber({
+    exists: (m) => !!manuscripts['ms-' + m.toLowerCase()],
+  });
   if (!museum) return;
 
-  // A join is filed at eBL under its first number.
-  const primary = EblClient.extractMuseumNumber(museum).primary;
-  const id = `ms-${museum.toLowerCase()}`;
-
-  setStatus('syncing', `Fetching ${primary} from eBL…`);
-  let frag;
+  const id = 'ms-' + museum.toLowerCase();
+  setStatus('syncing', 'Fetching from eBL…');
+  let res;
   try {
-    frag = await EblClient.getFragment(primary);
+    res = await EblFetch.fetchFragment(museum);
   } catch (err) {
     setStatus('error', 'eBL fetch failed');
-    const msg = err && err.status === 404
-      ? `eBL has no fragment "${primary}".`
-      : `Could not reach eBL.\n\n${err && err.message ? err.message : err}`;
-    alert(msg);
+    alert(err.message);
     return;
   }
 
-  if (!frag || !frag.atf || !frag.atf.trim()) {
-    setStatus('connected', 'Ready');
-    alert(`${primary} exists at eBL but has no transliteration yet.`);
-    return;
-  }
-
-  const content = `${museum}\n${frag.atf.replace(/\r?\n$/, '')}\n`;
-
-  manuscripts[id] = { siglum: museum, content };
+  manuscripts[id] = { siglum: museum, content: res.content };
   addManuscriptToList(id, museum);
   try {
-    await FileSystem.writeManuscript(dirHandle, museum, content);
+    await FileSystem.writeManuscript(dirHandle, museum, res.content);
     await updateManuscriptIndex();
   } catch (err) {
     console.error('Failed to save fetched manuscript:', err);
   }
   loadManuscript(id);
   markUnsaved();
+  setStatus('connected', 'Fetched ' + res.primary);
 
-  const lineCount = frag.atf.split('\n').filter(l => /^\s*\d+['’]?[ab]?\./.test(l)).length;
-  setStatus('connected', `Fetched ${primary}`);
-  alert(`${museum} added — ${lineCount} line${lineCount === 1 ? '' : 's'} from eBL.\n\n` +
-        'eBL carries no score assignments, so add the "§N " prefixes to map ' +
-        'these lines onto the score.');
+  showPullResult({
+    title: museum + ' added from eBL',
+    summaryHtml: '<strong>' + escapeHtml(museum) + '</strong> added with ' +
+      res.lineCount + ' line' + (res.lineCount === 1 ? '' : 's') +
+      ' from eBL.',
+    lost: [],
+    warnHtml: '<strong>No score assignments.</strong> eBL carries none, so ' +
+      'these lines are in the source but not in the score until you add the ' +
+      '§ prefixes.',
+  });
 }
 
 // Create a new empty manuscript

@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="index.css">
   <script src="file-system.js"></script>
   <script src="ebl-client.js"></script>
+  <script src="ebl-fetch.js"></script>
   <style>
     .manage-content {
       max-width: 1400px;
@@ -489,6 +490,8 @@
       </div>
 
       <div class="actions">
+        <button id="new-source-btn" class="btn btn-secondary">+ Create New</button>
+        <button id="fetch-ebl-btn" class="btn btn-secondary">&#8595; Fetch from eBL</button>
         <a id="open-scorer-btn" class="btn btn-secondary" href="#">Open Scorer</a>
       </div>
     </div>
@@ -1255,6 +1258,67 @@
     }
 
     // Clear import
+    // Create an empty source, matching the scorer's + Add.
+    document.getElementById('new-source-btn').addEventListener('click', async () => {
+      const siglum = prompt('Filename for the new source (e.g. K.3547, BM.12345):');
+      if (!siglum) return;
+      const name = siglum.trim();
+      if (!name) return;
+      if (manuscriptFiles.includes(name)) {
+        showStatus('"' + name + '" already exists in this project.', 'error');
+        return;
+      }
+      try {
+        const stub = name + '\n@obverse\n§1 1. ';
+        await FileSystem.writeManuscript(dirHandle, name, stub);
+        const index = await FileSystem.readManuscriptIndex(dirHandle) || [];
+        if (!index.includes(name)) {
+          index.push(name);
+          await FileSystem.writeManuscriptIndex(dirHandle, index.sort());
+        }
+        await loadFiles();
+        showStatus('Created "' + name + '".', 'success');
+      } catch (err) {
+        showStatus('Could not create the source: ' + err.message, 'error');
+      }
+    });
+
+    // Download a transliteration from eBL. Same form and same request as the
+    // scorer uses — both go through ebl-fetch.js.
+    document.getElementById('fetch-ebl-btn').addEventListener('click', async () => {
+      if (!window.EblFetch) {
+        showStatus('The eBL fetch module is not loaded.', 'error');
+        return;
+      }
+      const museum = await EblFetch.askMuseumNumber({
+        exists: (m) => manuscriptFiles.includes(m),
+      });
+      if (!museum) return;
+
+      const btn = document.getElementById('fetch-ebl-btn');
+      btn.disabled = true;
+      showStatus('Fetching from eBL…', 'info');
+      try {
+        const res = await EblFetch.fetchFragment(museum);
+        await FileSystem.writeManuscript(dirHandle, museum, res.content);
+        const index = await FileSystem.readManuscriptIndex(dirHandle) || [];
+        if (!index.includes(museum)) {
+          index.push(museum);
+          await FileSystem.writeManuscriptIndex(dirHandle, index.sort());
+        }
+        await loadFiles();
+        // No score assignments come with it: eBL has none, so the lines are in
+        // the source but not in the score until they are mapped in the scorer.
+        showStatus(museum + ' added with ' + res.lineCount + ' line' +
+          (res.lineCount === 1 ? '' : 's') + ' from eBL. It has no § score ' +
+          'assignments yet — add those in the scorer.', 'success');
+      } catch (err) {
+        showStatus(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     document.getElementById('clear-import-btn').addEventListener('click', () => {
       filesToImport = [];
       fileInput.value = '';

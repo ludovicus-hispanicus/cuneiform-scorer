@@ -10,6 +10,7 @@
   <script src="file-system.js"></script>
   <!-- eBL API client + ATF compiler -->
   <script src="ebl-client.js"></script>
+  <script src="ebl-fetch.js"></script>
   <script src="ebl-atf.js"></script>
   <!-- Ace Editor -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
@@ -186,28 +187,6 @@
       </div>
     </div>
   </div>
-
-  <!-- Fetch a source from eBL by museum number -->
-  <dialog id="ebl-fetch-dialog" class="dialog ebl-fetch-dialog">
-    <h2>Fetch from eBL</h2>
-    <form method="dialog" id="ebl-fetch-form">
-      <label class="field-label" for="ebl-fetch-input">Museum number</label>
-      <input type="text" id="ebl-fetch-input" class="field-input" autocomplete="off"
-             placeholder="K.2246" spellcheck="false">
-      <p class="field-hint">e.g. <code>K.2246</code>, <code>BM.34653</code>,
-         <code>1881,0727.62</code>, <code>Rm-II.548</code></p>
-      <div class="url-preview">
-        <span class="url-preview-label">Will fetch</span>
-        <code id="ebl-fetch-url" class="url-preview-value">&mdash;</code>
-      </div>
-      <p id="ebl-fetch-note" class="field-hint field-note" hidden></p>
-      <div class="dialog-actions">
-        <span class="pull-spacer"></span>
-        <button type="button" id="ebl-fetch-cancel">Cancel</button>
-        <button type="submit" id="ebl-fetch-go" class="pull-apply-btn" disabled>Fetch</button>
-      </div>
-    </form>
-  </dialog>
 
   <!-- Result of a pull -->
   <dialog id="pull-result-dialog" class="dialog pull-result-dialog">
