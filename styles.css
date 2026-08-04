@@ -14,6 +14,61 @@
   --accent-light: #e8f0fe;
   --text-dark: #333;
   --text-muted: #666;
+
+  /* Manuscript-type colours (categorical; light steps).
+     Library/Commentary/Excerpt are the three types in normal use and are
+     validated on the all-pairs list: worst CVD ΔE 9.2, normal-vision ΔE 24.0.
+     The remaining hues pass on the adjacent pairlist. */
+  --type-library:    #2a78d6;
+  --type-commentary: #eb6834;
+  --type-excerpt:    #1baf7a;
+  --type-school:     #eda100;
+  --type-varia:      #e87ba4;
+  --type-amulet:     #008300;
+  --type-quotation:  #4a3aa7;
+  --type-parallel:   #e34948;
+  --type-none:       #8a8a8a;
+
+  /* Text steps of the same hues. The mark colours are too light to sit on
+     white as body text, so each hue gets a darker step that clears 4.5:1
+     against the score background while keeping the same hue. */
+  --type-library-text:    #2976d3;
+  --type-commentary-text: #cf4914;
+  --type-excerpt-text:    #15875e;
+  --type-school-text:     #9f6c00;
+  --type-varia-text:      #db2f70;
+  --type-amulet-text:     #008400;
+  --type-quotation-text:  #4e3daf;
+  --type-parallel-text:   #df3231;
+  --type-none-text:       #767676;
+
+  /* ATF brackets. A hue deliberately outside the categorical palette so it
+     stays distinct whatever type colour the line carries. */
+  --atf-bracket:        #a11d8f;
+  --atf-bracket-bad:    #b3161c;
+  --atf-bracket-bad-bg: #fde4e4;
+
+  /* Selected list item: a pastel of the type colour, with a text step
+     that clears 4.5:1 on it. */
+  --sel-library-bg:    #d4e4f7;
+  --sel-commentary-bg: #faddd1;
+  --sel-excerpt-bg:    #d3f8eb;
+  --sel-school-bg:     #faedd1;
+  --sel-varia-bg:      #f7d4e1;
+  --sel-amulet-bg:     #d1fad1;
+  --sel-quotation-bg:  #ddd9f2;
+  --sel-parallel-bg:   #f8d3d3;
+  --sel-none-bg:       #e6e6e6;
+  --sel-library-text:  #2364b4;
+  --sel-commentary-text:#b03f11;
+  --sel-excerpt-text:  #137c56;
+  --sel-school-text:   #8f6408;
+  --sel-varia-text:    #b92059;
+  --sel-amulet-text:   #077e07;
+  --sel-quotation-text:#4b3baa;
+  --sel-parallel-text: #bc1e1d;
+  --sel-none-text:     #676767;
+  --sel-muted:         #606060;   /* secondary text, >=4.5:1 on every tint */
 }
 
 body.dark-mode {
@@ -25,6 +80,53 @@ body.dark-mode {
   --text-dark: #d4d4d4;
   --text-muted: #a0a0a0;
   background: #1e1e1e;
+
+  /* Dark steps of the same hues, chosen for the dark surface and validated
+     as a set — not an automatic lightening of the light values. */
+  --type-library:    #3987e5;
+  --type-commentary: #d95926;
+  --type-excerpt:    #199e70;
+  --type-school:     #c98500;
+  --type-varia:      #d55181;
+  --type-amulet:     #008300;
+  --type-quotation:  #9085e9;
+  --type-parallel:   #e66767;
+  --type-none:       #9a9a9a;
+
+  /* Text steps for the dark surface (lighter, same hues), also >= 4.5:1. */
+  --type-library-text:    #3987e5;
+  --type-commentary-text: #db602f;
+  --type-excerpt-text:    #199d6f;
+  --type-school-text:     #c68300;
+  --type-varia-text:      #d75a87;
+  --type-amulet-text:     #009b00;
+  --type-quotation-text:  #8e83e9;
+  --type-parallel-text:   #e66464;
+  --type-none-text:       #979797;
+
+  --atf-bracket:        #f77fe0;
+  --atf-bracket-bad:    #ff9d97;
+  --atf-bracket-bad-bg: #4a1d1d;
+
+  --sel-library-bg:    #1e324a;
+  --sel-commentary-bg: #4a2b1e;
+  --sel-excerpt-bg:    #1e4a3b;
+  --sel-school-bg:     #4a3b1e;
+  --sel-varia-bg:      #4a1e2e;
+  --sel-amulet-bg:     #1e4a1e;
+  --sel-quotation-bg:  #231e4a;
+  --sel-parallel-bg:   #4a1e1e;
+  --sel-none-bg:       #343434;
+  --sel-library-text:  #5a9be9;
+  --sel-commentary-text:#e2815a;
+  --sel-excerpt-text:  #39e0a6;
+  --sel-school-text:   #f4ae25;
+  --sel-varia-text:    #dd7198;
+  --sel-amulet-text:   #25f425;
+  --sel-quotation-text:#897de8;
+  --sel-parallel-text: #e76c6c;
+  --sel-none-text:     #9c9c9c;
+  --sel-muted:         #aeaeae;
 }
 
 body {
@@ -2142,4 +2244,264 @@ body.dark-mode .viewer-footer {
 
 .modal-actions button.btn-primary:hover:not(:disabled) {
   background: #3d5d8a;
+}
+/* ---- Manuscript type colouring ------------------------------------------
+   The colour rides on a mark (the witness's left rule, a dot in the sidebar),
+   never on the text: sigla and readings keep their ink colour so contrast is
+   unaffected, and the type is already spelled out in the siglum ("…Com1",
+   "…Ex1") and in the legend, so hue is never the only cue. */
+
+.score-witness.type-library    { border-left-color: var(--type-library); }
+.score-witness.type-commentary { border-left-color: var(--type-commentary); }
+.score-witness.type-excerpt    { border-left-color: var(--type-excerpt); }
+.score-witness.type-school     { border-left-color: var(--type-school); }
+.score-witness.type-varia      { border-left-color: var(--type-varia); }
+.score-witness.type-amulet     { border-left-color: var(--type-amulet); }
+.score-witness.type-quotation  { border-left-color: var(--type-quotation); }
+.score-witness.type-parallel   { border-left-color: var(--type-parallel); }
+.score-witness.type-none       { border-left-color: var(--type-none); }
+
+/* Sidebar: a left rule, matching the score. A ::before dot is not usable here
+   because .manuscript-item and its link are flex columns, which would stack the
+   marker above the siglum instead of beside it. */
+.manuscript-item[class*="type-"] {
+  border-left: 3px solid var(--type-none);
+}
+.manuscript-item.type-library    { border-left-color: var(--type-library); }
+.manuscript-item.type-commentary { border-left-color: var(--type-commentary); }
+.manuscript-item.type-excerpt    { border-left-color: var(--type-excerpt); }
+.manuscript-item.type-school     { border-left-color: var(--type-school); }
+.manuscript-item.type-varia      { border-left-color: var(--type-varia); }
+.manuscript-item.type-amulet     { border-left-color: var(--type-amulet); }
+.manuscript-item.type-quotation  { border-left-color: var(--type-quotation); }
+.manuscript-item.type-parallel   { border-left-color: var(--type-parallel); }
+
+/* Legend — always present when more than one type occurs, so identity is
+   never colour-alone. */
+.type-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.type-legend:empty { display: none; }
+
+.type-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.type-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: var(--type-none);
+}
+.type-swatch.type-library    { background: var(--type-library); }
+.type-swatch.type-commentary { background: var(--type-commentary); }
+.type-swatch.type-excerpt    { background: var(--type-excerpt); }
+.type-swatch.type-school     { background: var(--type-school); }
+.type-swatch.type-varia      { background: var(--type-varia); }
+.type-swatch.type-amulet     { background: var(--type-amulet); }
+.type-swatch.type-quotation  { background: var(--type-quotation); }
+.type-swatch.type-parallel   { background: var(--type-parallel); }
+
+/* The witness rule is the primary mark; give it enough width to read. */
+.score-witness { border-left-width: 3px; }
+
+@media (forced-colors: active) {
+  .score-witness[class*="type-"] { border-left-color: CanvasText; }
+  .manuscript-item[class*="type-"] { border-left-color: CanvasText; }
+  .type-swatch { forced-color-adjust: none; }
+}
+
+/* Type colour on the witness line itself. The rule in the margin keeps the
+   stronger mark colour; the text uses the darker/lighter text step so it stays
+   at 4.5:1 against the score background in both themes. */
+.score-witness.type-library    .witness-siglum,
+.score-witness.type-library    .witness-text    { color: var(--type-library-text); }
+.score-witness.type-commentary .witness-siglum,
+.score-witness.type-commentary .witness-text    { color: var(--type-commentary-text); }
+.score-witness.type-excerpt    .witness-siglum,
+.score-witness.type-excerpt    .witness-text    { color: var(--type-excerpt-text); }
+.score-witness.type-school     .witness-siglum,
+.score-witness.type-school     .witness-text    { color: var(--type-school-text); }
+.score-witness.type-varia      .witness-siglum,
+.score-witness.type-varia      .witness-text    { color: var(--type-varia-text); }
+.score-witness.type-amulet     .witness-siglum,
+.score-witness.type-amulet     .witness-text    { color: var(--type-amulet-text); }
+.score-witness.type-quotation  .witness-siglum,
+.score-witness.type-quotation  .witness-text    { color: var(--type-quotation-text); }
+.score-witness.type-parallel   .witness-siglum,
+.score-witness.type-parallel   .witness-text    { color: var(--type-parallel-text); }
+.score-witness.type-none       .witness-siglum,
+.score-witness.type-none       .witness-text    { color: var(--type-none-text); }
+
+/* Sidebar siglum takes the same text step. */
+.manuscript-item.type-library    .siglum { color: var(--type-library-text); }
+.manuscript-item.type-commentary .siglum { color: var(--type-commentary-text); }
+.manuscript-item.type-excerpt    .siglum { color: var(--type-excerpt-text); }
+.manuscript-item.type-school     .siglum { color: var(--type-school-text); }
+.manuscript-item.type-varia      .siglum { color: var(--type-varia-text); }
+.manuscript-item.type-amulet     .siglum { color: var(--type-amulet-text); }
+.manuscript-item.type-quotation  .siglum { color: var(--type-quotation-text); }
+.manuscript-item.type-parallel   .siglum { color: var(--type-parallel-text); }
+
+@media (forced-colors: active) {
+  .score-witness[class*="type-"] .witness-siglum,
+  .score-witness[class*="type-"] .witness-text,
+  .manuscript-item[class*="type-"] .siglum { color: CanvasText; }
+}
+
+/* ---- ATF brackets --------------------------------------------------------
+   Every [ ] ⸢ ⸣ { } < > is marked so breaks and damage are scannable at a
+   glance. A bracket with no partner on its line is flagged: the tinted chip,
+   not the hue, is the signal, so it survives colour-blindness and sits happily
+   next to the orange Commentary text. */
+.atf-br {
+  color: var(--atf-bracket);
+  font-weight: normal;
+}
+
+.atf-br-bad {
+  color: var(--atf-bracket-bad);
+  background: var(--atf-bracket-bad-bg);
+  font-weight: normal;
+  border-radius: 2px;
+  padding: 0 1px;
+  outline: 1px solid currentColor;
+}
+
+/* The type colour must not override the bracket colour. */
+.score-witness[class*="type-"] .witness-text .atf-br     { color: var(--atf-bracket); }
+.score-witness[class*="type-"] .witness-text .atf-br-bad { color: var(--atf-bracket-bad); }
+
+@media (forced-colors: active) {
+  .atf-br { color: CanvasText; }
+  .atf-br-bad { color: LinkText; outline: 2px solid LinkText; }
+}
+
+/* Editor: brackets while typing, and unmatched ones flagged inline. */
+.ace_atfbracket {
+  color: var(--atf-bracket) !important;
+  font-weight: normal;
+}
+
+.ace_marker-layer .atf-bad-marker {
+  position: absolute;
+  background: var(--atf-bracket-bad-bg);
+  border-bottom: 2px solid var(--atf-bracket-bad);
+  z-index: 4;
+}
+
+/* ---- Selected manuscript ------------------------------------------------
+   The old rule painted the row with the app accent and white text, which the
+   per-type siglum colour then overrode - leaving e.g. dark green on blue. The
+   selected row now takes a pastel of its own type colour. Because a few of
+   those tints are deliberately soft against the sidebar, the type rule also
+   thickens, so selection never depends on the tint alone. */
+.manuscript-item.active {
+  background: var(--sel-none-bg);
+  color: var(--sel-none-text);
+}
+
+.manuscript-item[class*="type-"].active {
+  border-left-width: 7px;
+}
+
+.manuscript-item.type-library.active { background: var(--sel-library-bg); }
+.manuscript-item.type-commentary.active { background: var(--sel-commentary-bg); }
+.manuscript-item.type-excerpt.active { background: var(--sel-excerpt-bg); }
+.manuscript-item.type-school.active { background: var(--sel-school-bg); }
+.manuscript-item.type-varia.active { background: var(--sel-varia-bg); }
+.manuscript-item.type-amulet.active { background: var(--sel-amulet-bg); }
+.manuscript-item.type-quotation.active { background: var(--sel-quotation-bg); }
+.manuscript-item.type-parallel.active { background: var(--sel-parallel-bg); }
+.manuscript-item.type-none.active { background: var(--sel-none-bg); }
+
+.manuscript-item.type-library.active .siglum { color: var(--sel-library-text); }
+.manuscript-item.type-commentary.active .siglum { color: var(--sel-commentary-text); }
+.manuscript-item.type-excerpt.active .siglum { color: var(--sel-excerpt-text); }
+.manuscript-item.type-school.active .siglum { color: var(--sel-school-text); }
+.manuscript-item.type-varia.active .siglum { color: var(--sel-varia-text); }
+.manuscript-item.type-amulet.active .siglum { color: var(--sel-amulet-text); }
+.manuscript-item.type-quotation.active .siglum { color: var(--sel-quotation-text); }
+.manuscript-item.type-parallel.active .siglum { color: var(--sel-parallel-text); }
+.manuscript-item.type-none.active .siglum { color: var(--sel-none-text); }
+
+/* The secondary museum number needs a stronger muted than the sidebar default:
+   --text-muted only reaches 4.17:1 on the softest tint. */
+.manuscript-item.active .museum-number {
+  color: var(--sel-muted);
+}
+
+@media (forced-colors: active) {
+  .manuscript-item.active { background: Highlight; color: HighlightText; }
+  .manuscript-item.active .siglum { color: HighlightText; }
+}
+
+/* ---- Sidebar type groups -------------------------------------------------
+   A heading per manuscript type. Purely a label: the click handler only reacts
+   to .manuscript-item, so these are inert. */
+.ms-group-header {
+  list-style: none;
+  padding: 0.5rem 0.5rem 0.25rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  background: transparent;
+  border-bottom: 1px solid var(--border-color);
+  border-left: 3px solid transparent;
+  cursor: default;
+  user-select: none;
+}
+
+.ms-group-header:first-child {
+  padding-top: 0.35rem;
+}
+
+/* Tie the heading to its group with the same rule the rows carry. */
+.ms-group-header.type-library    { border-left-color: var(--type-library); }
+.ms-group-header.type-commentary { border-left-color: var(--type-commentary); }
+.ms-group-header.type-excerpt    { border-left-color: var(--type-excerpt); }
+.ms-group-header.type-school     { border-left-color: var(--type-school); }
+.ms-group-header.type-varia      { border-left-color: var(--type-varia); }
+.ms-group-header.type-amulet     { border-left-color: var(--type-amulet); }
+.ms-group-header.type-quotation  { border-left-color: var(--type-quotation); }
+.ms-group-header.type-parallel   { border-left-color: var(--type-parallel); }
+.ms-group-header.type-none       { border-left-color: var(--type-none); }
+
+/* Count badge — on the sidebar heading and on each group heading. */
+.ms-count {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 0 0.35em;
+  margin-left: 0.4em;
+  border-radius: 999px;
+  background: var(--border-color);
+  color: var(--text-muted);
+  font-size: 0.72em;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  vertical-align: 0.08em;
+  letter-spacing: 0;
+}
+
+.ms-group-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.ms-group-header .ms-count {
+  margin-left: auto;
 }

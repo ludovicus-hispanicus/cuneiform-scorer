@@ -40,7 +40,7 @@
         <span id="status-text">Ready</span>
       </div>
       <button id="save-btn" title="Save (Ctrl+S)">Save</button>
-      <button id="search-all-btn" title="Search all manuscripts (Ctrl+Shift+F)">Search All</button>
+      <button id="search-all-btn" title="Search all sources (Ctrl+Shift+F)">Search All</button>
       <button id="add-manuscript-btn">+ Add</button>
       <button id="theme-toggle-btn" title="Toggle Dark/Light Mode"
         style="display: flex; align-items: center; justify-content: center;">
@@ -58,7 +58,7 @@
   <main class="content">
     <aside class="manuscript-list" id="manuscript-sidebar">
       <div class="sidebar-header">
-        <h2>Manuscripts</h2>
+        <h2>Sources <span id="ms-total" class="ms-count"></span></h2>
         <button id="toggle-siglum-btn" class="toggle-siglum-btn"
           title="Toggle between museum number and siglum">M#</button>
       </div>
@@ -70,7 +70,7 @@
     <section class="work-area">
       <div class="editor-pane">
         <div class="pane-header">
-          <h2>Manuscript Text</h2>
+          <h2>Source Text</h2>
           <span class="help-hint">Ctrl+F search | §[score-line] [ms-line]. to map</span>
         </div>
         <div id="editor" class="editor"></div>
@@ -87,11 +87,12 @@
           </div>
           <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
         </div>
+        <div id="type-legend" class="type-legend"></div>
         <div id="score" class="score tab-content active" data-tab="score"></div>
         <div id="colophons" class="score tab-content" data-tab="colophons"></div>
         <div id="images-tab" class="tab-content" data-tab="images">
           <div id="images-grid" class="images-grid">
-            <div class="images-empty">No images for this manuscript.</div>
+            <div class="images-empty">No images for this source.</div>
           </div>
           <div id="image-viewer" class="image-viewer hidden">
             <div class="viewer-toolbar">
@@ -150,11 +151,11 @@
     </section>
   </main>
 
-  <!-- Search All Manuscripts Modal -->
+  <!-- Search All Sources Modal -->
   <div id="search-modal" class="modal hidden">
     <div class="modal-content search-modal">
       <div class="modal-header">
-        <h3>Search All Manuscripts</h3>
+        <h3>Search All Sources</h3>
         <button class="modal-close" id="close-search">&times;</button>
       </div>
       <div class="search-input-row">
@@ -178,15 +179,15 @@
     </div>
   </div>
 
-  <!-- Add Manuscript Dialog -->
+  <!-- Add Source Dialog -->
   <dialog id="add-manuscript-dialog" class="dialog add-manuscript-dialog">
-    <h2>Add Manuscript</h2>
+    <h2>Add Source</h2>
     <div class="add-manuscript-options">
       <button id="add-new-manuscript-btn" class="add-option-btn">
         <span class="option-icon">+</span>
         <span class="option-text">
           <strong>Create New</strong>
-          <small>Start with an empty manuscript</small>
+          <small>Start with an empty source</small>
         </span>
       </button>
       <button id="import-manuscripts-btn" class="add-option-btn">

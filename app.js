@@ -270,6 +270,7 @@ async function loadManuscripts() {
 
     // Load manuscripts.json (eBL metadata) — used by Recon view + Export
     manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
+    rebuildTypeMap();
 
     // Scan for new/removed .txt files vs index.json
     const { newFiles, removedFiles } = await FileSystem.scanForNewManuscripts(dirHandle);
@@ -356,6 +357,8 @@ function addManuscriptToList(id, museumNum) {
   link.appendChild(museumSpan);
   li.appendChild(link);
 
+  li.classList.add(...(typeClass(museumNum).trim() ? [typeClass(museumNum).trim()] : []));
+
   // Update visibility based on toggle state
   updateManuscriptItemDisplay(li);
 
@@ -363,35 +366,201 @@ function addManuscriptToList(id, museumNum) {
   insertManuscriptSorted(li);
 }
 
-// Get the sort key for a manuscript list item based on current toggle
-function getManuscriptSortKey(el) {
-  const museum = el.dataset.museum;
+// ---- ATF bracket rendering ------------------------------------------------
+// Marks every bracket, and flags any that has no partner on its own line.
+//
+// Each pair is counted INDEPENDENTLY rather than on one shared nesting stack:
+// ATF lets brackets interleave — "[DIŠ {mu]l}UDU.IDIM" is correct, the ] closing
+// the [ while the { is still open — and a single stack would report that as an
+// error. Brackets are expected to balance within a line.
+const ATF_PAIRS = [['[', ']'], ['⸢', '⸣'], ['{', '}'], ['<', '>']];
+const ATF_OPENERS = new Map(ATF_PAIRS.map(([o, c]) => [o, c]));
+const ATF_CLOSERS = new Map(ATF_PAIRS.map(([o, c]) => [c, o]));
+
+// Indices of unmatched brackets in a line.
+function unmatchedBrackets(text) {
+  const bad = new Set();
+  for (const [open, close] of ATF_PAIRS) {
+    const stack = [];
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === open) stack.push(i);
+      else if (text[i] === close) {
+        if (stack.length) stack.pop();
+        else bad.add(i);          // closer with nothing open
+      }
+    }
+    for (const i of stack) bad.add(i); // still open at end of line
+  }
+  return bad;
+}
+
+// Escape for HTML and wrap each bracket in its own span.
+function renderAtf(text) {
+  const bad = unmatchedBrackets(text);
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const esc = ch === '&' ? '&amp;' : ch === '<' ? '&lt;'
+      : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : ch;
+    if (ATF_OPENERS.has(ch) || ATF_CLOSERS.has(ch)) {
+      const cls = bad.has(i) ? 'atf-br atf-br-bad' : 'atf-br';
+      const title = bad.has(i) ? ' title="unmatched bracket"' : '';
+      out += `<span class="${cls}"${title}>${esc}</span>`;
+    } else {
+      out += esc;
+    }
+  }
+  return out;
+}
+
+// ---- Manuscript type colouring -------------------------------------------
+// The eBL manuscript type (Library / Commentary / Excerpt / …) is shown as a
+// coloured mark beside each witness, never as coloured text: the siglum itself
+// already spells the type out ("…Com1", "…Ex1"), so colour stays redundant and
+// identity is never carried by hue alone.
+const MANUSCRIPT_TYPE_SLUGS = {
+  'Library': 'library',
+  'Commentary': 'commentary',
+  'Excerpt': 'excerpt',
+  'School': 'school',
+  'Varia': 'varia',
+  'Amulet': 'amulet',
+  'Quotation': 'quotation',
+  'Parallel': 'parallel',
+  'None': 'none',
+};
+
+let manuscriptTypes = {}; // museum number -> type slug
+
+function rebuildTypeMap() {
+  manuscriptTypes = {};
+  for (const m of (manuscriptsMeta && manuscriptsMeta.manuscripts) || []) {
+    const key = (m.file || '').replace(/\.txt$/, '');
+    if (!key) continue;
+    manuscriptTypes[key] = MANUSCRIPT_TYPE_SLUGS[m.type] || 'none';
+  }
+  renderTypeLegend();
+  // grouping depends on the types, so re-sort if the list is already built
+  if (typeof manuscriptList !== 'undefined' && manuscriptList &&
+      manuscriptList.querySelector('.manuscript-item')) {
+    resortManuscriptList();
+  }
+}
+
+function typeClass(museumNum) {
+  const slug = manuscriptTypes[museumNum];
+  return slug ? ` type-${slug}` : '';
+}
+
+// Legend: every type present in this project, named in text next to its colour.
+function renderTypeLegend() {
+  const el = document.getElementById('type-legend');
+  if (!el) return;
+  const present = [];
+  for (const [label, slug] of Object.entries(MANUSCRIPT_TYPE_SLUGS)) {
+    if (Object.values(manuscriptTypes).includes(slug) && !present.some(p => p[1] === slug)) {
+      present.push([label, slug]);
+    }
+  }
+  if (present.length < 2) { el.innerHTML = ''; return; }
+  el.innerHTML = present
+    .map(([label, slug]) =>
+      `<span class="type-legend-item"><span class="type-swatch type-${slug}"></span>${escapeHtml(label)}</span>`)
+    .join('');
+}
+
+// The sidebar is grouped by manuscript type, in the order the source lists use:
+// the running text first, then commentaries, then excerpts, then the rest.
+const TYPE_ORDER = ['library', 'commentary', 'excerpt', 'school', 'varia',
+                    'amulet', 'quotation', 'parallel', 'none'];
+const TYPE_LABEL = {
+  library: 'Manuscripts', commentary: 'Commentaries', excerpt: 'Excerpts',
+  school: 'School', varia: 'Varia', amulet: 'Amulets',
+  quotation: 'Quotations', parallel: 'Parallels', none: 'Unclassified',
+};
+
+// The label a manuscript is shown under, honouring the M#/Sig toggle. Used by
+// the sidebar, the score, the colophons and the exported score alike, so the
+// toggle changes every view at once.
+function displaySiglum(museum) {
   return (showSigla && siglaMappings[museum]) ? siglaMappings[museum] : museum;
 }
 
-// Insert a manuscript <li> into the sidebar in sorted position
-function insertManuscriptSorted(li) {
-  const key = getManuscriptSortKey(li);
-  const existing = Array.from(manuscriptList.children).filter(el => el !== li);
-  const insertBefore = existing.find(el =>
-    getManuscriptSortKey(el).localeCompare(key, undefined, { numeric: true, sensitivity: 'base' }) > 0
-  );
-  if (insertBefore) {
-    manuscriptList.insertBefore(li, insertBefore);
-  } else {
-    manuscriptList.appendChild(li);
-  }
+// Get the sort key for a manuscript list item based on current toggle
+function getManuscriptSortKey(el) {
+  return displaySiglum(el.dataset.museum);
 }
 
-// Re-sort all manuscript items in the sidebar
+// Witnesses are ordered the same way the sidebar is grouped: by type first
+// (manuscripts, then commentaries, then excerpts, …), then by the label
+// currently on show.
+function witnessOrder(a, b) {
+  const ra = TYPE_ORDER.indexOf(manuscriptTypes[a.siglum] || 'none');
+  const rb = TYPE_ORDER.indexOf(manuscriptTypes[b.siglum] || 'none');
+  const da = ra === -1 ? TYPE_ORDER.length : ra;
+  const db = rb === -1 ? TYPE_ORDER.length : rb;
+  if (da !== db) return da - db;
+  return displaySiglum(a.siglum).localeCompare(
+    displaySiglum(b.siglum), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function itemTypeSlug(el) {
+  return manuscriptTypes[el.dataset.museum] || 'none';
+}
+
+function typeRank(el) {
+  const i = TYPE_ORDER.indexOf(itemTypeSlug(el));
+  return i === -1 ? TYPE_ORDER.length : i;
+}
+
+// Insert a manuscript <li> into the sidebar. Grouping means the headers have to
+// be rebuilt anyway, so this defers to the full resort rather than trying to
+// splice a single row into the right group.
+function insertManuscriptSorted(li) {
+  manuscriptList.appendChild(li);
+  resortManuscriptList();
+}
+
+// Re-sort the sidebar: by type group, then by the current label (siglum or
+// museum number, per the toggle). Group headers are regenerated each time.
 function resortManuscriptList() {
-  const items = Array.from(manuscriptList.children);
-  items.sort((a, b) =>
-    getManuscriptSortKey(a).localeCompare(getManuscriptSortKey(b), undefined, { numeric: true, sensitivity: 'base' })
-  );
+  for (const h of Array.from(manuscriptList.querySelectorAll('.ms-group-header'))) {
+    h.remove();
+  }
+  const items = Array.from(manuscriptList.children)
+    .filter(el => el.classList.contains('manuscript-item'));
+  items.sort((a, b) => {
+    const d = typeRank(a) - typeRank(b);
+    if (d !== 0) return d;
+    return getManuscriptSortKey(a).localeCompare(
+      getManuscriptSortKey(b), undefined, { numeric: true, sensitivity: 'base' });
+  });
+  // counts per group, for the headings
+  const counts = {};
   for (const item of items) {
+    const slug = itemTypeSlug(item);
+    counts[slug] = (counts[slug] || 0) + 1;
+  }
+
+  let lastType = null;
+  for (const item of items) {
+    const slug = itemTypeSlug(item);
+    if (slug !== lastType) {
+      const header = document.createElement('li');
+      header.className = `ms-group-header type-${slug}`;
+      header.append(TYPE_LABEL[slug] || slug);
+      const n = document.createElement('span');
+      n.className = 'ms-count';
+      n.textContent = counts[slug];
+      header.appendChild(n);
+      manuscriptList.appendChild(header);
+      lastType = slug;
+    }
     manuscriptList.appendChild(item);
   }
+
+  const total = document.getElementById('ms-total');
+  if (total) total.textContent = items.length;
 }
 
 // Update single manuscript item display based on toggle
@@ -448,6 +617,8 @@ function setupSiglaToggle() {
     updateSiglaToggle();
     updateAllManuscriptDisplays();
     resortManuscriptList();
+    renderScore();          // labels and within-section order both depend on it
+    if (typeof renderColophons === 'function') renderColophons();
   });
 }
 
@@ -549,6 +720,7 @@ function initAceEditor() {
 
   // Handle changes
   aceEditor.session.on('change', () => {
+    markUnmatchedBrackets(aceEditor);
     if (isPollingUpdate || isLoadingContent) return; // Skip programmatic content changes
     saveCurrentManuscript();
     syncManuscriptToYjs(activeManuscript);
@@ -557,6 +729,29 @@ function initAceEditor() {
   });
 
   return aceEditor;
+}
+
+// Highlight every bracket that has no partner on its line. The gutter is
+// hidden in this editor, so the flag has to live in the text itself.
+// Keyed by session: the main editor and the reconstruction editor each keep
+// their own marker ids, so clearing one never touches the other's session.
+const bracketMarkers = new WeakMap();
+function markUnmatchedBrackets(editor) {
+  if (!editor) return;
+  const session = editor.session;
+  for (const id of (bracketMarkers.get(session) || [])) session.removeMarker(id);
+  const marks = [];
+  bracketMarkers.set(session, marks);
+  const Range = ace.require('ace/range').Range;
+  const lines = session.getDocument().getAllLines();
+  for (let row = 0; row < lines.length; row++) {
+    const line = lines[row];
+    if (!line || /^\s*(?:[@$]|\/\/|#)/.test(line)) continue; // markers and notes
+    for (const col of unmatchedBrackets(line)) {
+      marks.push(
+        session.addMarker(new Range(row, col, row, col + 1), 'atf-bad-marker', 'text'));
+    }
+  }
 }
 
 // Getter for editor content (compatibility layer)
@@ -711,6 +906,8 @@ function buildScore() {
     }
   }
 
+  for (const n of Object.keys(scoreLines)) scoreLines[n].sort(witnessOrder);
+
   return { scoreLines, rulings, comments };
 }
 
@@ -735,21 +932,21 @@ function renderScore() {
     html += `<div class="score-line">`;
     // Translation line (above reconstructed)
     html += `<div class="translation-line"><span class="translation-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(translation)}</span></div>`;
-    html += `<div class="score-line-header"><span class="line-label">§ ${lineNum}</span> <span class="reconstructed-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(reconstructed)}</span></div>`;
+    html += `<div class="score-line-header"><span class="line-label">§ ${lineNum}</span> <span class="reconstructed-text" contenteditable="true" data-line="${lineNum}">${renderAtf(reconstructed)}</span></div>`;
 
     for (const w of witnesses) {
-      const ref = `${w.siglum} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
-      html += `<div class="score-witness">`;
+      const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
+      html += `<div class="score-witness${typeClass(w.siglum)}">`;
       html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
-      html += `<span class="witness-text">${escapeHtml(w.content)}</span>`;
+      html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
       html += `</div>`;
 
       // Render continuation lines if any
       if (w.continuation && w.continuation.length > 0) {
         for (const cont of w.continuation) {
-          html += `<div class="score-witness continuation">`;
+          html += `<div class="score-witness continuation${typeClass(w.siglum)}">`;
           html += `<span class="witness-siglum"></span>`;
-          html += `<span class="witness-text">${escapeHtml(cont)}</span>`;
+          html += `<span class="witness-text">${renderAtf(cont)}</span>`;
           html += `</div>`;
         }
       }
@@ -786,6 +983,19 @@ function renderScore() {
       reconstructedLines[lineNum] = e.target.innerText;
       syncReconstructedToYjs(lineNum, e.target.innerText); // Sync to collaborators
       markUnsaved();
+    });
+    // The composite line is contenteditable, so the bracket spans are only
+    // shown while it is NOT being edited: typing inside styled spans makes the
+    // browser split and merge them and the caret jumps. Plain text on focus,
+    // colour back on blur. The stored value is unaffected either way — the
+    // input handler reads innerText, which ignores markup.
+    el.addEventListener('focus', (e) => {
+      e.target.textContent = reconstructedLines[e.target.dataset.line] || '';
+    });
+    el.addEventListener('blur', (e) => {
+      const text = e.target.innerText;
+      reconstructedLines[e.target.dataset.line] = text;
+      e.target.innerHTML = renderAtf(text);
     });
   });
 }
@@ -882,14 +1092,14 @@ function renderColophons() {
   const colophons = parseColophons();
 
   if (colophons.length === 0) {
-    colophonsPanel.innerHTML = '<div class="colophons-empty">No colophons found. Use @colophon in manuscripts to mark colophon sections.</div>';
+    colophonsPanel.innerHTML = '<div class="colophons-empty">No colophons found. Use @colophon in sources to mark colophon sections.</div>';
     return;
   }
 
   let html = '';
   for (const col of colophons) {
     html += `<div class="colophon-entry">`;
-    html += `<div class="colophon-header">${escapeHtml(col.siglum)}</div>`;
+    html += `<div class="colophon-header">${escapeHtml(displaySiglum(col.siglum))}</div>`;
     html += `<div class="colophon-lines">`;
 
     for (const line of col.lines) {
@@ -1125,7 +1335,7 @@ function showAddManuscriptDialog() {
     const dialog = document.getElementById('add-manuscript-dialog');
     if (!dialog) {
       // Fallback to prompt if dialog doesn't exist
-      const choice = confirm('Click OK to create a new manuscript, or Cancel to import files');
+      const choice = confirm('Click OK to create a new source, or Cancel to import files');
       resolve(choice ? 'new' : 'import');
       return;
     }
@@ -1160,7 +1370,7 @@ async function createNewManuscript() {
 
   const id = `ms-${siglum.toLowerCase()}`;
   if (manuscripts[id]) {
-    alert('A manuscript with this name already exists.');
+    alert('A source with this name already exists.');
     return;
   }
 
@@ -1633,7 +1843,7 @@ function generateScoreText() {
     text += `§ ${lineNum} ${reconstructed}\n`;
 
     for (const w of witnesses) {
-      const ref = `${w.siglum} ${abbreviateSurface(w.surface)} ${w.sourceLine}`.padEnd(22);
+      const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`.padEnd(22);
       text += `  ${ref} ${w.content}\n`;
 
       // Add continuation lines
@@ -1886,7 +2096,7 @@ function generateImageFileName(siglum, extension, pdfInfo) {
 // Unified upload: accepts images (PNG/JPG) and PDFs
 async function uploadFile() {
   if (!activeManuscript || !manuscripts[activeManuscript]) {
-    alert('Please select a manuscript first.');
+    alert('Please select a source first.');
     return;
   }
 
@@ -2047,7 +2257,7 @@ async function renderImages() {
   closeViewer(true);
 
   if (!activeManuscript || !manuscripts[activeManuscript]) {
-    grid.innerHTML = '<div class="images-empty">Select a manuscript to view its images.</div>';
+    grid.innerHTML = '<div class="images-empty">Select a source to view its images.</div>';
     return;
   }
 
@@ -3426,6 +3636,8 @@ function initReconAce() {
     useSoftTabs: true,
   });
   reconAceEditor.setValue(reconOriginalAtf, -1);
+  markUnmatchedBrackets(reconAceEditor);
+  reconAceEditor.session.on('change', () => markUnmatchedBrackets(reconAceEditor));
 }
 
 // ---- Sync witness edits back to manuscript files ----

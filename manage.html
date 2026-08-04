@@ -481,7 +481,7 @@
 
     <!-- Manuscript Files Section -->
     <div class="section">
-      <h2>Manuscript Files</h2>
+      <h2>Source Files</h2>
       <p>These are the .txt files in your project folder.</p>
 
       <div id="file-list" class="file-list">
@@ -592,7 +592,7 @@
 
     <!-- Import Section -->
     <div class="section">
-      <h2>Import Manuscripts</h2>
+      <h2>Import Sources</h2>
       <p>Drag and drop .txt files here or click to select files to import into this project.</p>
 
       <div id="import-zone" class="import-zone">
@@ -720,7 +720,7 @@
       const container = document.getElementById('file-list');
 
       if (manuscriptFiles.length === 0) {
-        container.innerHTML = '<div class="file-item">No manuscript files found</div>';
+        container.innerHTML = '<div class="file-item">No source files found</div>';
         return;
       }
 
@@ -766,7 +766,7 @@
       const tbody = document.getElementById('mapping-tbody');
 
       if (!manuscriptsMeta.manuscripts || manuscriptsMeta.manuscripts.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="mapping-empty">No manuscripts yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="mapping-empty">No sources yet</td></tr>';
         return;
       }
 

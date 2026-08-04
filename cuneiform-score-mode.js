@@ -35,6 +35,12 @@ ace.define("ace/mode/cuneiform_score_highlight_rules", ["require", "exports", "m
                 {
                     token: "constant.language", // ($___$)
                     regex: /\(\$___\$\)/
+                },
+                {
+                    // ATF brackets: [ ] restoration, ⸢ ⸣ damage,
+                    // { } determinative, < > scribal omission.
+                    token: "atfbracket",
+                    regex: /[\[\]⸢⸣{}<>]/
                 }
             ]
         };
