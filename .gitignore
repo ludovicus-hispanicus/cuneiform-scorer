@@ -8,6 +8,10 @@ server.js
 projects/
 manuscripts/
 
+# Raw eBL sign records, refetched by tools/build-sign-index.js.
+# data/sign-index.json is the built artifact and IS committed — the app loads it.
+tools/.sign-cache.json
+
 # OS files
 .DS_Store
 Thumbs.db

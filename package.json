@@ -34,12 +34,15 @@
       "app.js",
       "ebl-client.js",
       "ebl-atf.js",
+      "ebl-corpus.js",
+      "ebl-ngram.js",
       "file-system.js",
       "cuneiform-score-mode.js",
       "fabric.min.js",
       "server.js",
       "electron/**",
-      "ebl-grammar/**"
+      "ebl-grammar/**",
+      "data/**"
     ],
     "extraResources": [
       {

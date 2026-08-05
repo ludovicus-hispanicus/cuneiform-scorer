@@ -127,8 +127,48 @@
     });
   }
 
-  // Resolves to { primary, atf, content, lineCount }; rejects with an Error
-  // whose message is already fit to show.
+  // "K.5283" + its joined pieces, as eBL records them. The pieces are separate
+  // records with transliterations of their own, so knowing the join is not the
+  // same as having the text.
+  function joinsOf(fragment, primary) {
+    const out = [];
+    for (const group of (fragment.joins || [])) {
+      for (const piece of group) {
+        const mn = piece.museumNumber || {};
+        const prefix = mn.prefix || '';
+        const number = mn.number || '';
+        if (!prefix && !number) continue;
+        const museum = mn.suffix ? prefix + '.' + number + '.' + mn.suffix
+                                 : prefix + '.' + number;
+        if (museum !== primary && out.indexOf(museum) === -1) out.push(museum);
+      }
+    }
+    return out;
+  }
+
+  // Recorded in the file rather than only in memory, so the join survives a
+  // reload, a share and a git history. A "//" line before the first score line
+  // is inert to the parser, which is why the siglum comment lives there too.
+  const JOINS_PREFIX = '// joins: ';
+  const JOINS_SEPARATOR = ' (+) ';
+
+  function readStoredJoins(content) {
+    for (const line of String(content || '').split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.indexOf(JOINS_PREFIX) === 0) {
+        return trimmed.slice(JOINS_PREFIX.length)
+          .split(/\s*\(\s*\+\s*\)\s*/)
+          .map(function (s) { return s.trim(); })
+          .filter(Boolean);
+      }
+      // The header ends at the first transliterated line.
+      if (/^§?\s*\d+['’]?[a-z]?\.\s/.test(trimmed) || /^@/.test(trimmed)) break;
+    }
+    return null;
+  }
+
+  // Resolves to { primary, atf, content, lineCount, joins }; rejects with an
+  // Error whose message is already fit to show.
   async function fetchFragment(museum) {
     if (!window.EblClient || !window.EblClient.getFragment) {
       throw new Error('The eBL client is not loaded.');
@@ -150,14 +190,22 @@
     const atf = frag.atf.replace(/[\r\n]+$/, '');
     const lineCount = atf.split('\n')
       .filter((l) => /^\s*\d+['’]?[ab]?\./.test(l)).length;
+    const joins = joinsOf(frag, primary);
+    const header = joins.length
+      ? museum + '\n' + JOINS_PREFIX + joins.join(JOINS_SEPARATOR) + '\n'
+      : museum + '\n';
     return {
       primary,
       atf,
+      joins,
       // the siglum line is this app's own convention; eBL's ATF follows it
-      content: museum + '\n' + atf + '\n',
+      content: header + atf + '\n',
       lineCount,
     };
   }
 
-  window.EblFetch = { primaryOf, fragmentUrl, ensureDialog, askMuseumNumber, fetchFragment, esc };
+  window.EblFetch = {
+    primaryOf, fragmentUrl, ensureDialog, askMuseumNumber, fetchFragment, esc,
+    readStoredJoins, JOINS_PREFIX, JOINS_SEPARATOR,
+  };
 })();

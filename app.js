@@ -200,6 +200,17 @@ const manuscripts = {};
 let activeManuscript = null;
 const reconstructedLines = {}; // Store editable reconstructed text for each line
 const translationLines = {}; // Store editable translation for each line
+// The rest of the eBL "reconstruction" block. The grammar allows at most one
+// note and any number of parallels per reading —
+//   reconstruction: text_line [_NEWLINE note_line] (_NEWLINE parallel_line)*
+// so a note is a single string and parallels are an ordered list.
+const noteLines = {};     // { [lineNum]: string }   — text after "#note: "
+const parallelLines = {}; // { [lineNum]: string[] } — text after "// "
+// Readings *beyond* the first. The main reading stays in the three maps above
+// so older score-data.json files keep loading; this holds variants 1..n, each
+// with its own note and parallels like any other reading.
+//   { [lineNum]: [{ text, note, parallels }] }
+const variantLines = {};
 let siglaMappings = {}; // Museum number -> Siglum (from project config)
 
 let imagesIndex = {}; // { siglum: [{ fileName, originalName, addedAt }] }
@@ -829,6 +840,40 @@ function setEditorContent(content) {
 }
 
 // Parse a manuscript text and extract scored lines
+// ---- Line variants -------------------------------------------------------
+// A reading is tied to one of a line's variants by a letter on the § marker:
+// "§34" (or "§34a") is the main reading, "§34b" the second, "§34c" the third.
+// eBL keeps the first variant's line number for the whole chapter line and
+// discards the rest, so the letter is ours alone — it never leaves this app.
+function variantIndexOf(letter) {
+  if (!letter) return 0;
+  const i = letter.toLowerCase().charCodeAt(0) - 97; // 'a' -> 0, 'b' -> 1
+  return i > 0 ? i : 0;
+}
+
+function variantLetterOf(index) {
+  return index > 0 ? String.fromCharCode(97 + index) : '';
+}
+
+// One uniform list of a line's readings. Index 0 is assembled from the primary
+// maps, so everything downstream can loop over readings without caring that
+// the first one is stored differently on disk.
+function variantsFor(lineNum) {
+  const readings = [{
+    text: reconstructedLines[lineNum] || '',
+    note: noteLines[lineNum],
+    parallels: parallelLines[lineNum] || [],
+  }];
+  for (const v of (variantLines[lineNum] || [])) {
+    readings.push({
+      text: (v && v.text) || '',
+      note: v ? v.note : undefined,
+      parallels: (v && v.parallels) || [],
+    });
+  }
+  return readings;
+}
+
 function parseManuscript(siglum, text) {
   const lines = text.split('\n');
   const entries = [];
@@ -851,15 +896,16 @@ function parseManuscript(siglum, text) {
     // "$ single ruling", and the other two matched nothing at all and were
     // dropped without a word. The manuscript line number is optional because a
     // ruling sits between lines rather than on one.
-    const assignedDollar = trimmed.match(/^§(\d+)(?:\s+([^\s$]+))?\s*\$\s*(.*)$/);
+    const assignedDollar = trimmed.match(/^§(\d+)([a-z]?)(?:\s+([^\s$]+))?\s*\$\s*(.*)$/);
     if (assignedDollar) {
-      const directive = assignedDollar[3].trim();
+      const directive = assignedDollar[4].trim();
       const isRuling = /ruling/i.test(directive);
       entries.push({
         siglum,
         type: isRuling ? 'ruling' : 'comment',
         targetLine: parseInt(assignedDollar[1], 10),
-        sourceLine: (assignedDollar[2] || '').replace(/\.$/, ''),
+        variant: variantIndexOf(assignedDollar[2]),
+        sourceLine: (assignedDollar[3] || '').replace(/\.$/, ''),
         rulingType: isRuling
           ? (directive.match(/single|double|triple/i)?.[0]?.toLowerCase() || 'single')
           : undefined,
@@ -913,17 +959,20 @@ function parseManuscript(siglum, text) {
       continue;
     }
 
-    // Check for §[target] [source]. pattern - supports primed numbers like 1', 2'
-    const match = trimmed.match(/^§(\d+)\s+(\d+'?)\.\s*(.*)$/);
+    // Check for §[target][variant] [source]. pattern — supports primed numbers
+    // like 1', 2' and an optional variant letter: "§34b 7'." puts this reading
+    // under the line's second variant instead of its main one.
+    const match = trimmed.match(/^§(\d+)([a-z]?)\s+(\d+'?)\.\s*(.*)$/);
     if (match) {
       const targetLine = parseInt(match[1], 10);
-      const sourceLine = match[2].trim();
-      const content = match[3].trim();
+      const sourceLine = match[3].trim();
+      const content = match[4].trim();
 
       const entry = {
         siglum,
         type: 'line',
         targetLine,
+        variant: variantIndexOf(match[2]),
         sourceLine,
         surface: currentSurface,
         content,
@@ -936,16 +985,17 @@ function parseManuscript(siglum, text) {
     }
 
     // Also support old format: §[target] [source]. with non-numeric source
-    const oldMatch = trimmed.match(/^§(\d+)\s+([^.]+)\.\s*(.*)$/);
+    const oldMatch = trimmed.match(/^§(\d+)([a-z]?)\s+([^.]+)\.\s*(.*)$/);
     if (oldMatch) {
       const targetLine = parseInt(oldMatch[1], 10);
-      const sourceLine = oldMatch[2].trim();
-      const content = oldMatch[3].trim();
+      const sourceLine = oldMatch[3].trim();
+      const content = oldMatch[4].trim();
 
       const entry = {
         siglum,
         type: 'line',
         targetLine,
+        variant: variantIndexOf(oldMatch[2]),
         sourceLine,
         surface: currentSurface,
         content,
@@ -1010,55 +1060,95 @@ function renderScore() {
   for (const lineNum of sortedLineNumbers) {
     const witnesses = scoreLines[lineNum];
 
-    // Get translation and reconstructed text or default to empty
     const translation = translationLines[lineNum] || '';
-    const reconstructed = reconstructedLines[lineNum] || '';
 
     html += `<div class="score-line">`;
-    // Translation line (above reconstructed)
+    // Translation line — it belongs to the chapter line, so it stays above
+    // every reading rather than under one of them.
     html += `<div class="translation-line"><span class="translation-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(translation)}</span></div>`;
-    html += `<div class="score-line-header"><span class="line-label">§ ${lineNum}</span> <span class="reconstructed-text" contenteditable="true" data-line="${lineNum}">${renderAtf(reconstructed)}</span></div>`;
 
-    for (const w of witnesses) {
-      // A "$" directive assigned to this section: a ruling on the tablet,
-      // shown against the witness it belongs to rather than as a reading.
-      if (w.type !== 'line') {
-        const ref = w.sourceLine
-          ? displaySiglum(w.siglum) + ' ' + abbreviateSurface(w.surface) + ' ' + w.sourceLine
-          : displaySiglum(w.siglum);
-        html += `<div class="score-extra${typeClass(w.siglum)}">`;
-        html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
-        html += `<span class="score-extra-text">${escapeHtml(w.content || ((w.rulingType || 'single') + ' ruling'))}</span>`;
-        html += `</div>`;
-        continue;
+    // One block per reading: the reading itself, its note and parallels, then
+    // the witnesses that attest it (those whose § marker carries its letter).
+    const readings = variantsFor(lineNum);
+    for (let vi = 0; vi < readings.length; vi++) {
+      const reading = readings[vi];
+      const letter = variantLetterOf(vi);
+
+      html += `<div class="score-line-header${vi ? ' is-variant' : ''}">`;
+      html += `<span class="line-label">§ ${lineNum}${letter}</span> `;
+      html += `<span class="reconstructed-text" contenteditable="true" data-line="${lineNum}" data-variant="${vi}">${renderAtf(reading.text)}</span>`;
+      // One affordance, not three. The grammar allows a single note per reading,
+      // so that entry disables itself once this reading has one.
+      html += `<span class="recon-add-wrap">`;
+      html += `<button class="recon-add" data-line="${lineNum}" data-variant="${vi}" title="Add a note, a parallel or a variant">+</button>`;
+      html += `<span class="recon-add-menu hidden">`;
+      html += `<button class="recon-add-item" data-kind="note" data-line="${lineNum}" data-variant="${vi}"${reading.note != null ? ' disabled' : ''}>Note<em>#note:</em></button>`;
+      html += `<button class="recon-add-item" data-kind="parallel" data-line="${lineNum}" data-variant="${vi}">Parallel<em>//</em></button>`;
+      html += `<button class="recon-add-item" data-kind="variant" data-line="${lineNum}" data-variant="${vi}">Variant<em>§${lineNum}${variantLetterOf(readings.length)}</em></button>`;
+      if (vi > 0) {
+        html += `<button class="recon-add-item danger" data-kind="drop-variant" data-line="${lineNum}" data-variant="${vi}">Delete this variant<em>✕</em></button>`;
       }
-      const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
-      html += `<div class="score-witness${typeClass(w.siglum)}">`;
-      html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
-      html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
+      html += `</span></span>`;
       html += `</div>`;
 
-      // Render continuation lines if any
-      if (w.continuation && w.continuation.length > 0) {
-        for (const cont of w.continuation) {
-          html += `<div class="score-witness continuation${typeClass(w.siglum)}">`;
-          html += `<span class="witness-siglum"></span>`;
-          html += `<span class="witness-text">${renderAtf(cont)}</span>`;
+      // The rest of the reconstruction block, in the order eBL fixes: note, then
+      // parallels. Both hang off the reading above them.
+      // != null, not truthiness — a freshly added row is an empty string and
+      // still has to render so the caret has somewhere to go.
+      if (reading.note != null) {
+        html += `<div class="recon-extra recon-note">`;
+        html += `<span class="recon-extra-prefix">#note:</span>`;
+        html += `<span class="recon-extra-text" contenteditable="true" data-kind="note" data-line="${lineNum}" data-variant="${vi}">${escapeHtml(reading.note)}</span>`;
+        html += `</div>`;
+      }
+      for (let pi = 0; pi < reading.parallels.length; pi++) {
+        html += `<div class="recon-extra recon-parallel">`;
+        html += `<span class="recon-extra-prefix">//</span>`;
+        html += `<span class="recon-extra-text" contenteditable="true" data-kind="parallel" data-line="${lineNum}" data-variant="${vi}" data-index="${pi}">${escapeHtml(reading.parallels[pi])}</span>`;
+        html += `</div>`;
+      }
+
+      for (const w of witnesses.filter((x) => (x.variant || 0) === vi)) {
+        // A "$" directive assigned to this section: a ruling on the tablet,
+        // shown against the witness it belongs to rather than as a reading.
+        if (w.type !== 'line') {
+          const ref = w.sourceLine
+            ? displaySiglum(w.siglum) + ' ' + abbreviateSurface(w.surface) + ' ' + w.sourceLine
+            : displaySiglum(w.siglum);
+          html += `<div class="score-extra${typeClass(w.siglum)}">`;
+          html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
+          html += `<span class="score-extra-text">${escapeHtml(w.content || ((w.rulingType || 'single') + ' ruling'))}</span>`;
           html += `</div>`;
+          continue;
         }
-      }
+        const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
+        html += `<div class="score-witness${typeClass(w.siglum)}">`;
+        html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
+        html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
+        html += `</div>`;
 
-      // Render parallels if any (expandable)
-      if (w.parallels && w.parallels.length > 0) {
-        html += `<details class="parallels-section">`;
-        html += `<summary class="parallels-header">// ${w.parallels.length} parallel(s)</summary>`;
-        for (const parallel of w.parallels) {
-          html += `<div class="parallel-line">// ${escapeHtml(parallel)}</div>`;
+        // Render continuation lines if any
+        if (w.continuation && w.continuation.length > 0) {
+          for (const cont of w.continuation) {
+            html += `<div class="score-witness continuation${typeClass(w.siglum)}">`;
+            html += `<span class="witness-siglum"></span>`;
+            html += `<span class="witness-text">${renderAtf(cont)}</span>`;
+            html += `</div>`;
+          }
         }
-        html += `</details>`;
-      }
 
-    }
+        // Render parallels if any (expandable)
+        if (w.parallels && w.parallels.length > 0) {
+          html += `<details class="parallels-section">`;
+          html += `<summary class="parallels-header">// ${w.parallels.length} parallel(s)</summary>`;
+          for (const parallel of w.parallels) {
+            html += `<div class="parallel-line">// ${escapeHtml(parallel)}</div>`;
+          }
+          html += `</details>`;
+        }
+
+      }
+    } // end of readings loop
 
     html += `</div>`;
   }
@@ -1078,8 +1168,10 @@ function renderScore() {
   scorePanel.querySelectorAll('.reconstructed-text').forEach(el => {
     el.addEventListener('input', (e) => {
       const lineNum = e.target.dataset.line;
-      reconstructedLines[lineNum] = e.target.innerText;
-      syncReconstructedToYjs(lineNum, e.target.innerText); // Sync to collaborators
+      const vi = Number(e.target.dataset.variant || 0);
+      writeReading(lineNum, vi, e.target.innerText);
+      // Collaborators only mirror the main reading for now.
+      if (!vi) syncReconstructedToYjs(lineNum, e.target.innerText);
       markUnsaved();
     });
     // The composite line is contenteditable, so the bracket spans are only
@@ -1088,14 +1180,302 @@ function renderScore() {
     // colour back on blur. The stored value is unaffected either way — the
     // input handler reads innerText, which ignores markup.
     el.addEventListener('focus', (e) => {
-      e.target.textContent = reconstructedLines[e.target.dataset.line] || '';
+      e.target.textContent = readReading(e.target.dataset.line, Number(e.target.dataset.variant || 0));
     });
     el.addEventListener('blur', (e) => {
       const text = e.target.innerText;
-      reconstructedLines[e.target.dataset.line] = text;
+      writeReading(e.target.dataset.line, Number(e.target.dataset.variant || 0), text);
       e.target.innerHTML = renderAtf(text);
     });
+    // Same two additions without reaching for the mouse.
+    el.addEventListener('keydown', (e) => {
+      if (!e.ctrlKey || !e.shiftKey) return;
+      const key = e.key.toLowerCase();
+      if (key !== 'n' && key !== 'p') return;
+      e.preventDefault();
+      addReconExtra(e.target.dataset.line, Number(e.target.dataset.variant || 0),
+                    key === 'n' ? 'note' : 'parallel');
+    });
   });
+
+  // The "+" affordance on each reading
+  scorePanel.querySelectorAll('.recon-add').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const menu = btn.parentElement.querySelector('.recon-add-menu');
+      const wasHidden = menu.classList.contains('hidden');
+      closeReconAddMenus();
+      if (wasHidden) menu.classList.remove('hidden');
+    });
+  });
+  scorePanel.querySelectorAll('.recon-add-item').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeReconAddMenus();
+      const lineNum = btn.dataset.line;
+      const vi = Number(btn.dataset.variant || 0);
+      if (btn.dataset.kind === 'variant') openVariantDialog(lineNum, vi);
+      else if (btn.dataset.kind === 'drop-variant') dropVariant(lineNum, vi);
+      else addReconExtra(lineNum, vi, btn.dataset.kind);
+    });
+  });
+
+  // Note and parallel rows. The "#note:" / "//" prefix is a chip owned by the
+  // row rather than text to retype, so it cannot be mistyped or lost.
+  scorePanel.querySelectorAll('.recon-extra-text').forEach(el => {
+    el.addEventListener('input', (e) => {
+      writeReconExtra(e.target, e.target.innerText);
+      markUnsaved();
+    });
+    // Clearing a row and leaving it is how you delete it.
+    el.addEventListener('blur', (e) => {
+      const text = e.target.innerText.trim();
+      writeReconExtra(e.target, text);
+      if (!text) {
+        removeReconExtra(e.target);
+        renderScore();
+      }
+      saveScoreDataToFile();
+    });
+  });
+}
+
+// ---- Note / parallel rows under a reading ----
+
+function closeReconAddMenus() {
+  document.querySelectorAll('.recon-add-menu').forEach(m => m.classList.add('hidden'));
+}
+document.addEventListener('click', closeReconAddMenus);
+
+// Reading 0 lives in the primary maps, readings 1..n in variantLines. These
+// four keep that split in one place so callers just say "line 34, reading 1".
+function variantSlot(lineNum, vi) {
+  if (!vi) return null;
+  const list = variantLines[lineNum];
+  return Array.isArray(list) ? list[vi - 1] : null;
+}
+
+function readReading(lineNum, vi) {
+  const slot = variantSlot(lineNum, vi);
+  return (slot ? slot.text : reconstructedLines[lineNum]) || '';
+}
+
+function writeReading(lineNum, vi, text) {
+  const slot = variantSlot(lineNum, vi);
+  if (slot) slot.text = text;
+  else reconstructedLines[lineNum] = text;
+}
+
+// Add a note or a parallel to one reading, then put the caret in it.
+function addReconExtra(lineNum, vi, kind) {
+  const slot = variantSlot(lineNum, vi);
+  if (kind === 'note') {
+    if (slot) {
+      if (slot.note != null) return;      // the grammar allows only one
+      slot.note = '';
+    } else {
+      if (noteLines[lineNum] != null) return;
+      noteLines[lineNum] = '';
+    }
+  } else {
+    if (slot) {
+      if (!Array.isArray(slot.parallels)) slot.parallels = [];
+      slot.parallels.push('');
+    } else {
+      if (!Array.isArray(parallelLines[lineNum])) parallelLines[lineNum] = [];
+      parallelLines[lineNum].push('');
+    }
+  }
+  markUnsaved();
+  renderScore();
+
+  const base = `.recon-extra-text[data-kind="${kind}"][data-line="${lineNum}"][data-variant="${vi}"]`;
+  const list = slot ? slot.parallels : parallelLines[lineNum];
+  const sel = kind === 'note' ? base : `${base}[data-index="${list.length - 1}"]`;
+  const el = scorePanel.querySelector(sel);
+  if (el) el.focus();
+}
+
+// ---- Add a line variant --------------------------------------------------
+
+// What the user has selected inside a reading, if anything. Used to prefill
+// the dialog so a one-word divergence doesn't mean retyping the whole line.
+function selectionWithin(el) {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  if (!el.contains(range.commonAncestorContainer)) return null;
+  const text = sel.toString();
+  return text.trim() ? text : null;
+}
+
+// srcVi is the reading the "+" was pressed on; the new variant is appended
+// after every existing one, so its letter is readings.length.
+function openVariantDialog(lineNum, srcVi) {
+  const dialog = document.getElementById('variant-dialog');
+  const textEl = document.getElementById('variant-text');
+  const listEl = document.getElementById('variant-witnesses');
+  const titleEl = document.getElementById('variant-dialog-title');
+  const cancelBtn = document.getElementById('variant-cancel');
+  const form = document.getElementById('variant-form');
+  if (!dialog) return;
+
+  const readings = variantsFor(lineNum);
+  const newVi = readings.length;
+  const newLetter = variantLetterOf(newVi);
+  titleEl.textContent = `Add variant §${lineNum}${newLetter}`;
+
+  // Start from the reading it branches off, so only the divergence is retyped.
+  const sourceEl = scorePanel.querySelector(
+    `.reconstructed-text[data-line="${lineNum}"][data-variant="${srcVi}"]`);
+  const base = readings[srcVi] ? readings[srcVi].text : '';
+  const picked = sourceEl ? selectionWithin(sourceEl) : null;
+  textEl.value = base;
+
+  const { scoreLines } = buildScore();
+  const witnesses = (scoreLines[lineNum] || []).filter((w) => w.type === 'line');
+  listEl.innerHTML = witnesses.length
+    ? witnesses.map((w, i) => {
+        const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
+        return `<label class="variant-witness">` +
+          `<input type="checkbox" data-idx="${i}">` +
+          `<span class="variant-witness-ref">${escapeHtml(ref)}</span>` +
+          `<span class="variant-witness-text">${renderAtf(w.content)}</span>` +
+          `</label>`;
+      }).join('')
+    : '<p class="field-hint">No witnesses on this line yet.</p>';
+
+  const cleanup = () => {
+    cancelBtn.removeEventListener('click', onCancel);
+    form.removeEventListener('submit', onSubmit);
+    dialog.removeEventListener('cancel', onCancel);
+    dialog.close();
+  };
+  const onCancel = (e) => { if (e) e.preventDefault(); cleanup(); };
+  const onSubmit = (e) => {
+    e.preventDefault();
+    const text = textEl.value.trim();
+    if (!text) return;
+    const chosen = [...listEl.querySelectorAll('input:checked')]
+      .map((cb) => witnesses[Number(cb.dataset.idx)])
+      .filter(Boolean);
+    cleanup();
+    createVariant(lineNum, text, chosen);
+  };
+
+  cancelBtn.addEventListener('click', onCancel);
+  form.addEventListener('submit', onSubmit);
+  dialog.addEventListener('cancel', onCancel);
+  dialog.showModal();
+
+  // Put the caret on the selected span so it is the first thing replaced.
+  textEl.focus();
+  const at = picked ? base.indexOf(picked) : -1;
+  if (at >= 0) textEl.setSelectionRange(at, at + picked.length);
+  else textEl.setSelectionRange(base.length, base.length);
+}
+
+// Move readings between variants by rewriting their § marker in the .txt —
+// the manuscript file stays the single source of truth for what attests what.
+// Returns the sigla actually touched.
+async function assignWitnessesToVariant(witnesses, lineNum, variantIndex) {
+  const letter = variantLetterOf(variantIndex);
+  const byMs = new Map();
+  for (const w of witnesses) {
+    if (!byMs.has(w.siglum)) byMs.set(w.siglum, []);
+    byMs.get(w.siglum).push(w);
+  }
+
+  const touched = [];
+  for (const [msKey, group] of byMs) {
+    const msEntry = Object.values(manuscripts).find((m) => m.siglum === msKey);
+    if (!msEntry) continue;
+    let content = msEntry.content;
+    for (const w of group) {
+      const res = EblAtf.setWitnessVariant(content, {
+        lineNum, sourceLine: w.sourceLine, letter,
+      });
+      if (res.ok) content = res.content;
+    }
+    if (content !== msEntry.content) {
+      msEntry.content = content;
+      await FileSystem.writeManuscript(dirHandle, msKey, content);
+      touched.push(msKey);
+      if (activeManuscript === msEntry.id && aceEditor) {
+        const pos = aceEditor.getCursorPosition();
+        aceEditor.setValue(content, -1);
+        aceEditor.moveCursorToPosition(pos);
+      }
+    }
+  }
+  return touched;
+}
+
+async function createVariant(lineNum, text, witnesses) {
+  if (!Array.isArray(variantLines[lineNum])) variantLines[lineNum] = [];
+  variantLines[lineNum].push({ text, parallels: [] });
+  const newVi = variantLines[lineNum].length; // 0 is the main reading
+
+  const moved = await assignWitnessesToVariant(witnesses, lineNum, newVi);
+  await saveScoreDataToFile();
+  renderScore();
+
+  if (moved.length) {
+    setStatus('connected', `Variant §${lineNum}${variantLetterOf(newVi)} — moved ${moved.length} witness${moved.length === 1 ? '' : 'es'} (${moved.join(', ')})`);
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
+}
+
+// Drop a variant and return its witnesses to the main reading.
+async function dropVariant(lineNum, vi) {
+  const list = variantLines[lineNum];
+  if (!Array.isArray(list) || vi < 1 || vi > list.length) return;
+  const reading = list[vi - 1];
+  const preview = (reading && reading.text ? reading.text : '(empty)').slice(0, 60);
+  if (!confirm(`Delete variant §${lineNum}${variantLetterOf(vi)}?\n\n${preview}\n\nIts witnesses go back to the main reading.`)) return;
+
+  const { scoreLines } = buildScore();
+  const attached = (scoreLines[lineNum] || [])
+    .filter((w) => w.type === 'line' && (w.variant || 0) === vi);
+  await assignWitnessesToVariant(attached, lineNum, 0);
+
+  list.splice(vi - 1, 1);
+  if (!list.length) delete variantLines[lineNum];
+  // Letters are positional, so anything after the hole shifts down by one.
+  const { scoreLines: after } = buildScore();
+  for (let later = vi + 1; later <= list.length + 1; later++) {
+    const stragglers = (after[lineNum] || [])
+      .filter((w) => w.type === 'line' && (w.variant || 0) === later);
+    await assignWitnessesToVariant(stragglers, lineNum, later - 1);
+  }
+
+  await saveScoreDataToFile();
+  renderScore();
+}
+
+function writeReconExtra(el, text) {
+  const slot = variantSlot(el.dataset.line, Number(el.dataset.variant || 0));
+  if (el.dataset.kind === 'note') {
+    if (slot) slot.note = text;
+    else noteLines[el.dataset.line] = text;
+    return;
+  }
+  const list = slot ? slot.parallels : parallelLines[el.dataset.line];
+  if (Array.isArray(list)) list[Number(el.dataset.index)] = text;
+}
+
+function removeReconExtra(el) {
+  const lineNum = el.dataset.line;
+  const slot = variantSlot(lineNum, Number(el.dataset.variant || 0));
+  if (el.dataset.kind === 'note') {
+    if (slot) delete slot.note;
+    else delete noteLines[lineNum];
+    return;
+  }
+  const list = slot ? slot.parallels : parallelLines[lineNum];
+  if (!Array.isArray(list)) return;
+  list.splice(Number(el.dataset.index), 1);
+  if (!list.length && !slot) delete parallelLines[lineNum];
 }
 
 // Parse colophons from all manuscripts
@@ -1216,6 +1596,505 @@ function renderColophons() {
   colophonsPanel.innerHTML = html;
 }
 
+// ===========================================
+// PARALLELS
+// ===========================================
+// Ranks the whole Fragmentarium against this project's sources, to surface
+// fragments that transmit the same composition or come from the same scribe.
+//
+// The corpus is eBL's sign dump, cached locally, so a sweep costs no requests
+// and can be re-run freely. Scoring is in ebl-ngram.js; the sources are turned
+// into sign codes by ebl-atf-signs.js.
+//
+// Two scores per hit, because they answer different questions:
+//   text      shared composition  -> another witness
+//   colophon  shared scribe/library -> a join candidate
+// Merged into one number, whichever is smaller disappears.
+
+const parallelsState = {
+  corpus: null,        // [{ id, signs }] once loaded
+  retrieved: null,
+  results: null,
+  running: false,
+  message: '',
+  converter: null,
+  // Measured against EAE 56, using eBL's own recorded joins as the answer key.
+  //
+  // Weighting: rare-sequence weighting beat plain overlap at every n (summed
+  // ranks of the five known pieces, 33 -> 21 at n=3), so it is the default.
+  //
+  // Sign run: longer runs rank the known pieces slightly better but at a steep
+  // cost in reach — 26,481 fragments have a trigram in common with this
+  // edition, 15,224 have a 4-run, 7,187 a 5-run. Since what is being hunted is
+  // broken fragments preserving short stretches, 3 is the safe default and the
+  // longer settings are there for when a list comes back too noisy.
+  options: { n: 3, weighting: 'tfidf', minDocNgrams: 20 },
+};
+
+let signIndexPromise = null;
+
+// The sign table is 800 KB and only this feature needs it, so it is fetched on
+// first use rather than at page load.
+function loadSignIndex() {
+  if (!signIndexPromise) {
+    signIndexPromise = fetch('data/sign-index.json')
+      .then((res) => {
+        if (!res.ok) throw new Error(`sign-index.json returned ${res.status}`);
+        return res.json();
+      })
+      .catch((err) => {
+        signIndexPromise = null;
+        throw err;
+      });
+  }
+  return signIndexPromise;
+}
+
+// Turn one source's text into sign codes, split at its @colophon marker.
+//
+// The source's own text is converted rather than eBL's `signs` for that
+// fragment, for three reasons: it needs no request, it covers sources eBL does
+// not have (and reconstructions, which by definition it never will), and the
+// colophon boundary is exact because this file is where @colophon is written.
+// The cost is that conversion is ~94% line-accurate against eBL's own parser
+// rather than authoritative — which trigram overlap absorbs comfortably.
+function sourceToSignLines(content, converter) {
+  const text = [];
+  const colophon = [];
+  let inColophon = false;
+
+  for (const raw of String(content || '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    if (/^@colophon/i.test(line)) { inColophon = true; continue; }
+    if (/^@/.test(line)) continue;              // another surface
+    if (/^(\/\/|#|\$)/.test(line)) continue;    // parallel, note, directive
+
+    // "§12 7. text" in the score, or a plain "7. text" inside a colophon.
+    const scored = line.match(/^§\d+\s+(.*)$/);
+    const body = scored ? scored[1] : line;
+    if (!/^\d+['’]?[a-z]?\.\s/.test(body)) continue;
+
+    const converted = converter.convertLine(body);
+    if (converted.codes.length) {
+      (inColophon ? colophon : text).push(converted.codes.join(' '));
+    }
+  }
+
+  return { text: text.join('\n'), colophon: colophon.join('\n') };
+}
+
+// eBL records which fragments are physically joined, and a hit that is already
+// a known join of one of this project's sources means something quite specific:
+// not a new witness, but a piece of a tablet the edition already uses whose
+// text it does not yet carry. Worth labelling rather than hiding — K.20497 is
+// joined to K.5283 and still has 23 lines of its own.
+//
+// Only the project's own sources are looked up, so this is one request each,
+// cached with their ATF. Failure is not fatal: without the map the results are
+// simply unlabelled.
+async function loadJoinMap(sources, say) {
+  const joinedTo = {};
+  let checked = 0;
+
+  // A source's own museum number, not its filename. Files are often named for
+  // the whole join — "K.14874 (+) BM.41031 (+) BM.41691" — and using that as a
+  // label produced rows reading "joins K.14874, K.14874 (+) BM.41031 (+) …".
+  const label = (siglum) => EblFetch.primaryOf(siglum);
+
+  function record(partner, siglum) {
+    if (!partner) return;
+    const owner = label(siglum);
+    if (partner === owner) return;
+    const list = (joinedTo[partner] = joinedTo[partner] || []);
+    if (list.indexOf(owner) === -1) list.push(owner);
+  }
+
+  // A source pulled from eBL carries "// joins:" in its own file, so most
+  // projects need no requests at all here.
+  const needFetch = [];
+  for (const source of sources) {
+    const stored = EblFetch.readStoredJoins(source.content);
+    if (stored) {
+      for (const partner of stored) record(partner, source.siglum);
+      // A file named for the whole join names its own partners too.
+      for (const partner of EblClient.extractMuseumNumber(source.siglum).joins) {
+        record(partner, source.siglum);
+      }
+      checked++;
+    } else {
+      needFetch.push(source);
+    }
+  }
+  if (checked) say(`Read known joins from ${checked} source file(s)…`);
+
+  // A fragment record carries its ATF and annotations, so each one takes a
+  // second or two. Run in a small pool: sequentially this was two minutes for
+  // 26 sources, which is most of a first sweep. Six at a time is brisk without
+  // making eBL carry a burst.
+  const CONCURRENCY = 6;
+  const queue = [...needFetch];
+
+  async function worker() {
+    for (;;) {
+      const source = queue.shift();
+      if (!source) return;
+      try {
+        const fragment = await EblCorpus.getAtf(label(source.siglum));
+        for (const group of fragment.joins || []) {
+          for (const piece of group) {
+            record(formatMuseumNumber(piece.museumNumber), source.siglum);
+          }
+        }
+      } catch (err) {
+        // Not in eBL, or offline. That source contributes no joins.
+      }
+      say(`Checking known joins — ${++checked}/${sources.length}…`);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, needFetch.length) }, worker));
+  return joinedTo;
+}
+
+function formatMuseumNumber(museumNumber) {
+  if (!museumNumber) return '';
+  const { prefix = '', number = '', suffix = '' } = museumNumber;
+  if (!prefix && !number) return '';
+  return suffix ? `${prefix}.${number}.${suffix}` : `${prefix}.${number}`;
+}
+
+async function ensureParallelsCorpus(onProgress) {
+  if (parallelsState.corpus) return parallelsState.corpus;
+  const loaded = await EblCorpus.load({ onProgress });
+  parallelsState.corpus = loaded.entries;
+  parallelsState.retrieved = loaded.retrieved;
+  return loaded.entries;
+}
+
+async function runParallelSweep() {
+  if (parallelsState.running) return;
+  if (!window.EblCorpus || !window.EblNgram || !window.EblAtfSigns) {
+    parallelsState.message = 'The parallel-search modules are not loaded.';
+    renderParallels();
+    return;
+  }
+
+  parallelsState.running = true;
+  parallelsState.results = null;
+  const say = (text) => { parallelsState.message = text; renderParallels(); };
+
+  try {
+    say('Loading the sign table…');
+    if (!parallelsState.converter) {
+      parallelsState.converter = EblAtfSigns.create(await loadSignIndex());
+    }
+
+    say('Loading the corpus…');
+    const entries = await ensureParallelsCorpus((p) => {
+      if (p.phase === 'downloading') {
+        say(`Downloading the corpus from eBL — ${(p.bytes / 1e6).toFixed(1)} MB so far…`);
+      } else if (p.phase === 'parsing') {
+        say('Reading the corpus…');
+      } else if (p.phase === 'storing') {
+        say('Caching the corpus for next time…');
+      }
+    });
+
+    say('Converting this project’s sources…');
+    const textLines = [];
+    const colophonLines = [];
+    const exclude = new Set();
+    let withColophon = 0;
+
+    for (const ms of Object.values(manuscripts)) {
+      // A source is excluded from its own results under the museum number it
+      // is filed as; the siglum is that number in this app's convention.
+      exclude.add(ms.siglum);
+      const split = sourceToSignLines(ms.content, parallelsState.converter);
+      if (split.text) textLines.push(split.text);
+      if (split.colophon) { colophonLines.push(split.colophon); withColophon++; }
+    }
+
+    if (!textLines.length) {
+      parallelsState.message = 'No sources with score assignments to search with yet.';
+      return;
+    }
+
+    const joinedTo = await loadJoinMap(Object.values(manuscripts), say);
+
+    say(`Ranking ${entries.length.toLocaleString()} fragments…`);
+    // Yield once so the message paints before the sweep blocks the thread.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const { n, weighting, minDocNgrams } = parallelsState.options;
+    const nValues = [n];
+    const profiles = { text: EblNgram.buildProfile(textLines, { nValues }) };
+    if (colophonLines.length) {
+      profiles.colophon = EblNgram.buildProfile(colophonLines, { nValues });
+    }
+
+    const started = Date.now();
+    // Deep enough that each channel has its own candidates to draw on; the
+    // panel ranks the two separately rather than showing this order.
+    const outcome = EblNgram.rank(profiles, entries, {
+      exclude, limit: 400, minDocNgrams, weighting,
+    });
+
+    // A fragment eBL already records as joined to one of these sources is not a
+    // find — it is bookkeeping — so it is kept out of the ranking. Which ones
+    // were removed is still reported: their own transliteration may be missing
+    // from the edition even though the join is known.
+    const excludedJoins = outcome.results.filter((r) => joinedTo[r.id]).map((r) => r.id);
+    outcome.results = outcome.results.filter((r) => !joinedTo[r.id]);
+
+    parallelsState.results = {
+      ...outcome,
+      joinedTo,
+      excludedJoins,
+      elapsed: Date.now() - started,
+      scanned: entries.length,
+      sources: textLines.length,
+      withColophon,
+    };
+    parallelsState.message = '';
+  } catch (err) {
+    console.error('Parallel sweep failed:', err);
+    parallelsState.message = `Could not run the search: ${err.message}`;
+  } finally {
+    parallelsState.running = false;
+    renderParallels();
+  }
+}
+
+async function refreshParallelsCorpus() {
+  if (parallelsState.running) return;
+  parallelsState.running = true;
+  parallelsState.message = 'Re-downloading the corpus from eBL…';
+  renderParallels();
+  try {
+    const loaded = await EblCorpus.refresh({
+      onProgress: (p) => {
+        if (p.phase !== 'downloading') return;
+        parallelsState.message = `Re-downloading — ${(p.bytes / 1e6).toFixed(1)} MB so far…`;
+        renderParallels();
+      },
+    });
+    parallelsState.corpus = loaded.entries;
+    parallelsState.retrieved = loaded.retrieved;
+    parallelsState.results = null;
+    parallelsState.message = `Corpus refreshed — ${loaded.count.toLocaleString()} fragments.`;
+  } catch (err) {
+    parallelsState.message = `Refresh failed: ${err.message}`;
+  } finally {
+    parallelsState.running = false;
+    renderParallels();
+  }
+}
+
+// Pull a candidate in as a source, reusing the same path as "+ Add > from eBL".
+async function addParallelAsSource(museum) {
+  const id = 'ms-' + museum.toLowerCase();
+  if (manuscripts[id]) { alert(`"${museum}" is already in this project.`); return; }
+
+  setStatus('syncing', 'Fetching from eBL…');
+  let res;
+  try {
+    res = await EblFetch.fetchFragment(museum);
+  } catch (err) {
+    setStatus('error', 'eBL fetch failed');
+    alert(err.message);
+    return;
+  }
+
+  manuscripts[id] = { siglum: museum, content: res.content };
+  addManuscriptToList(id, museum);
+  try {
+    await FileSystem.writeManuscript(dirHandle, museum, res.content);
+    await updateManuscriptIndex();
+  } catch (err) {
+    console.error('Failed to save fetched manuscript:', err);
+  }
+  loadManuscript(id);
+  markUnsaved();
+  setStatus('connected', 'Added ' + res.primary);
+  renderParallels();
+}
+
+// One ranked table for one channel. `channel` decides both the order and which
+// score the "shared" count refers to, so a row means the same thing throughout.
+function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
+  const ranked = rows
+    .filter((r) => r.scores[channel] && r.scores[channel].shared > 0)
+    .sort((a, b) => b.scores[channel].overlap - a.scores[channel].overlap ||
+                    b.scores[channel].shared - a.scores[channel].shared)
+    .slice(0, limit);
+
+  if (!ranked.length) return '';
+
+  let html = `<div class="parallels-section"><h3 class="parallels-section-title">${escapeHtml(title)}</h3>`;
+  html += `<p class="parallels-section-blurb">${escapeHtml(blurb)}</p>`;
+  html += '<table class="parallels-table"><thead><tr>';
+  html += '<th>#</th><th>Fragment</th>';
+  html += '<th title="Shared composition — another witness">Text</th>';
+  html += '<th title="Shared scribe or library — a join candidate">Colophon</th>';
+  html += '<th title="Shared trigrams on this channel">Shared</th><th></th>';
+  html += '</tr></thead><tbody>';
+
+  ranked.forEach((row, i) => {
+    const text = row.scores.text;
+    const colophon = row.scores.colophon;
+    const inProject = !!manuscripts['ms-' + row.id.toLowerCase()];
+    html += '<tr>';
+    html += `<td class="parallels-rank">${i + 1}</td>`;
+    html += `<td><a href="https://www.ebl.lmu.de/fragmentarium/${encodeURIComponent(row.id)}" ` +
+            `target="_blank" rel="noopener noreferrer">${escapeHtml(row.id)}</a>`;
+    html += '</td>';
+    html += `<td class="parallels-score${channel === 'text' ? ' parallels-score-lead' : ''}">` +
+            `${text ? text.overlap.toFixed(3) : '—'}</td>`;
+    html += `<td class="parallels-score${channel === 'colophon' ? ' parallels-score-lead' : ''}">` +
+            `${colophon ? colophon.overlap.toFixed(3) : '—'}</td>`;
+    html += `<td class="parallels-shared">${row.scores[channel].shared}</td>`;
+    html += '<td>' + (inProject
+      ? '<span class="parallels-have">in project</span>'
+      : `<button class="parallels-add" data-museum="${escapeHtml(row.id)}">Add as source</button>`) +
+      '</td>';
+    html += '</tr>';
+  });
+
+  return html + '</tbody></table></div>';
+}
+
+function formatRetrieved(iso) {
+  if (!iso) return 'unknown date';
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? 'unknown date' : date.toLocaleDateString();
+}
+
+async function renderParallels() {
+  const panel = document.getElementById('parallels');
+  if (!panel) return;
+
+  const status = window.EblCorpus ? await EblCorpus.status() : { cached: false };
+  const { results, running, message } = parallelsState;
+
+  let html = '<div class="parallels-bar">';
+  html += '<div class="parallels-corpus">';
+  if (status.cached) {
+    html += `<span class="parallels-corpus-state">Corpus: ${Number(status.count).toLocaleString()} ` +
+            `fragments, downloaded ${escapeHtml(formatRetrieved(status.retrieved))}</span>`;
+    html += '<button id="parallels-refresh" class="parallels-link">Refresh</button>';
+  } else {
+    html += '<span class="parallels-corpus-state">Corpus not downloaded yet — about 6 MB, once.</span>';
+  }
+  html += '</div>';
+  html += `<button id="parallels-run" class="parallels-run"${running ? ' disabled' : ''}>` +
+          `${running ? 'Working…' : 'Find parallels'}</button>`;
+  html += '</div>';
+
+  // The knobs eBL's own matcher exposes, with the defaults that were measured
+  // rather than assumed. Changing one invalidates the results on screen, so the
+  // table is cleared until the sweep is run again.
+  const opts = parallelsState.options;
+  const disabled = running ? ' disabled' : '';
+  html += '<div class="parallels-options">';
+  html += `<label title="How many consecutive signs must agree. Longer is stricter: ` +
+          `at 3 some 26,000 fragments share something with this edition, at 5 only 7,000.">` +
+          `Sign run <select id="parallels-n"${disabled}>` +
+          [2, 3, 4, 5].map((n) => `<option value="${n}"${opts.n === n ? ' selected' : ''}>${n}</option>`).join('') +
+          '</select></label>';
+  html += `<label>Weighting <select id="parallels-weighting"${disabled}>` +
+          `<option value="plain"${opts.weighting === 'plain' ? ' selected' : ''}>Plain overlap</option>` +
+          `<option value="tfidf"${opts.weighting === 'tfidf' ? ' selected' : ''}>Rare sequences (TF-IDF)</option>` +
+          '</select></label>';
+  html += `<label>Ignore fragments under <select id="parallels-floor"${disabled}>` +
+          [0, 5, 10, 20, 40].map((v) => `<option value="${v}"${opts.minDocNgrams === v ? ' selected' : ''}>` +
+            `${v === 0 ? 'no limit' : v}</option>`).join('') +
+          '</select> sequences</label>';
+  html += '</div>';
+
+  if (message) html += `<div class="parallels-message">${escapeHtml(message)}</div>`;
+
+  if (results) {
+    const { dropped, settings, total } = results;
+    html += '<div class="parallels-summary">';
+    html += `Ranked ${results.scanned.toLocaleString()} fragments against ${results.sources} ` +
+            `source${results.sources === 1 ? '' : 's'}`;
+    html += results.withColophon
+      ? ` (${results.withColophon} with a colophon, scored separately)`
+      : ' (no colophons found, so only the text channel was scored)';
+    html += ` in ${(results.elapsed / 1000).toFixed(1)}s. `;
+    // Whatever the ranking did not consider is stated, not left implied.
+    html += `${total.toLocaleString()} scored; ${dropped.tooSmall.toLocaleString()} skipped for ` +
+            `having fewer than ${settings.minDocNgrams} trigrams, ` +
+            `${dropped.noOverlap.toLocaleString()} shared nothing.`;
+    html += '</div>';
+
+    if (results.excludedJoins && results.excludedJoins.length) {
+      const named = results.excludedJoins
+        .map((id) => `${escapeHtml(id)} <span class="parallels-join-owner">(${escapeHtml(
+          (results.joinedTo[id] || []).join(', '))})</span>`)
+        .join(', ');
+      html += `<div class="parallels-note">Left out of the ranking: ${named} — eBL already ` +
+              `records ${results.excludedJoins.length === 1 ? 'it' : 'these'} as joined to a ` +
+              `source here. Worth checking anyway, since a known join can still have ` +
+              `transliterated lines this edition does not carry.</div>`;
+    }
+
+    if (!results.results.length) {
+      html += '<div class="colophons-empty">Nothing in the corpus shares material with these sources.</div>';
+    } else {
+      // Ranked once per channel, never merged. A single order sorted on the
+      // better of the two scores puts every colophon match above every witness
+      // — on EAE 56 that buried BM.41031, the strongest textual hit in the
+      // corpus, under ten fragments that share only the scribe.
+      html += renderParallelsTable(
+        results.results, 'text',
+        'Same composition',
+        'Another witness to this text. Ranked by shared trigrams of transliteration.'
+      );
+      if (results.withColophon) {
+        html += renderParallelsTable(
+          results.results, 'colophon',
+          'Same scribe or library',
+          'Shares this project’s colophons rather than its text — where a join is likely to hide.'
+        );
+      }
+    }
+  } else if (!running && !message) {
+    html += '<div class="colophons-empty">Ranks every fragment in eBL against this project’s ' +
+            'sources. The corpus downloads once, then searches run offline.</div>';
+  }
+
+  panel.innerHTML = html;
+
+  const runBtn = document.getElementById('parallels-run');
+  if (runBtn) runBtn.addEventListener('click', runParallelSweep);
+  const refreshBtn = document.getElementById('parallels-refresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', refreshParallelsCorpus);
+
+  // A result table belongs to the settings that produced it, so changing one
+  // clears it rather than leaving figures on screen that no longer describe
+  // what the controls say.
+  const onOption = (id, apply) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      apply(el.value);
+      parallelsState.results = null;
+      parallelsState.message = 'Settings changed — run the search again.';
+      renderParallels();
+    });
+  };
+  onOption('parallels-n', (v) => { parallelsState.options.n = Number(v); });
+  onOption('parallels-weighting', (v) => { parallelsState.options.weighting = v; });
+  onOption('parallels-floor', (v) => { parallelsState.options.minDocNgrams = Number(v); });
+  panel.querySelectorAll('.parallels-add').forEach((btn) => {
+    btn.addEventListener('click', () => addParallelAsSource(btn.dataset.museum));
+  });
+}
+
 // Setup tab switching
 function setupTabs() {
   const tabs = document.querySelectorAll('.pane-tab');
@@ -1237,6 +2116,9 @@ function setupTabs() {
       }
       if (targetTab === 'images') {
         renderImages();
+      }
+      if (targetTab === 'parallels') {
+        renderParallels();
       }
       updateUploadButtonVisibility();
     });
@@ -1382,12 +2264,18 @@ async function saveScoreDataToFile() {
   // Only save if there's data
   const hasReconstructed = Object.keys(reconstructedLines).length > 0;
   const hasTranslations = Object.keys(translationLines).length > 0;
-  if (!hasReconstructed && !hasTranslations) return;
+  const hasNotes = Object.keys(noteLines).length > 0;
+  const hasParallels = Object.keys(parallelLines).length > 0;
+  const hasVariants = Object.keys(variantLines).length > 0;
+  if (!hasReconstructed && !hasTranslations && !hasNotes && !hasParallels && !hasVariants) return;
 
   try {
     const data = {
       reconstructed: reconstructedLines,
       translations: translationLines,
+      notes: noteLines,
+      parallels: parallelLines,
+      variants: variantLines,
       savedAt: new Date().toISOString()
     };
     await FileSystem.writeScoreData(dirHandle, data);
@@ -1412,6 +2300,10 @@ async function loadScoreData() {
       if (data.translations) {
         Object.assign(translationLines, data.translations);
       }
+      // Absent in files written before notes/parallels existed.
+      if (data.notes) Object.assign(noteLines, data.notes);
+      if (data.parallels) Object.assign(parallelLines, data.parallels);
+      if (data.variants) Object.assign(variantLines, data.variants);
       console.log('Loaded score-data.json');
     }
   } catch (err) {
@@ -3884,8 +4776,14 @@ async function pollForChanges() {
         // Clear and reload
         Object.keys(reconstructedLines).forEach(k => delete reconstructedLines[k]);
         Object.keys(translationLines).forEach(k => delete translationLines[k]);
+        Object.keys(noteLines).forEach(k => delete noteLines[k]);
+        Object.keys(parallelLines).forEach(k => delete parallelLines[k]);
+        Object.keys(variantLines).forEach(k => delete variantLines[k]);
         if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
         if (data.translations) Object.assign(translationLines, data.translations);
+        if (data.notes) Object.assign(noteLines, data.notes);
+        if (data.parallels) Object.assign(parallelLines, data.parallels);
+        if (data.variants) Object.assign(variantLines, data.variants);
         renderScore();
         hasChanges = true;
       }
@@ -4091,8 +4989,14 @@ try {
       if (data) {
         Object.keys(reconstructedLines).forEach(k => delete reconstructedLines[k]);
         Object.keys(translationLines).forEach(k => delete translationLines[k]);
+        Object.keys(noteLines).forEach(k => delete noteLines[k]);
+        Object.keys(parallelLines).forEach(k => delete parallelLines[k]);
+        Object.keys(variantLines).forEach(k => delete variantLines[k]);
         if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
         if (data.translations) Object.assign(translationLines, data.translations);
+        if (data.notes) Object.assign(noteLines, data.notes);
+        if (data.parallels) Object.assign(parallelLines, data.parallels);
+        if (data.variants) Object.assign(variantLines, data.variants);
         renderScore();
       }
     } else if (msg.type === 'annotations-saved' && msg.projectId === projectId) {
@@ -4315,6 +5219,9 @@ async function refreshReconArtifact() {
     scoreLines,
     reconstructedLines,
     translationLines,
+    noteLines,
+    parallelLines,
+    variantLines,
     manuscriptsMeta,
     eblSiglumByFile,
   });
@@ -4370,16 +5277,37 @@ async function syncReconEditsBack() {
   const diff = EblAtf.diffArtifact(reconLineMap, reconOriginalAtf, edited);
   const reconEdits = diff.reconstructionEdits;
   const translationEdits = diff.translationEdits;
+  const noteEdits = diff.noteEdits;
+  const parallelEdits = diff.parallelEdits;
   const witnessEdits = diff.witnessEdits;
 
-  // Apply reconstruction and translation edits to in-memory state +
-  // score-data.json. Emptying a translation row drops the translation; the
-  // next build simply omits the row.
+  // Apply reconstruction, translation, note and parallel edits to in-memory
+  // state + score-data.json. Emptying a row drops that piece; the next build
+  // simply omits it.
+  // Reading 0 lives in the primary maps, the rest in variantLines.
+  const readingSlot = (lineNum, variantIndex) => {
+    if (!variantIndex) return null;
+    const list = variantLines[lineNum];
+    return Array.isArray(list) ? list[variantIndex - 1] : null;
+  };
+
   for (const e of reconEdits) {
-    reconstructedLines[e.lineNum] = e.newContent;
+    const slot = readingSlot(e.lineNum, e.variantIndex);
+    if (slot) slot.text = e.newContent;
+    else reconstructedLines[e.lineNum] = e.newContent;
   }
   for (const e of translationEdits) {
     translationLines[e.lineNum] = e.newContent;
+  }
+  for (const e of noteEdits) {
+    const slot = readingSlot(e.lineNum, e.variantIndex);
+    if (slot) slot.note = e.newContent;
+    else noteLines[e.lineNum] = e.newContent;
+  }
+  for (const e of parallelEdits) {
+    const slot = readingSlot(e.lineNum, e.variantIndex);
+    const list = slot ? slot.parallels : parallelLines[e.lineNum];
+    if (Array.isArray(list) && e.index < list.length) list[e.index] = e.newContent;
   }
 
   // Group witness edits by manuscript and apply to each .txt
@@ -4407,12 +5335,15 @@ async function syncReconEditsBack() {
   }
 
   // Persist reconstructed text + redraw the score so the user sees the changes
-  if (reconEdits.length || translationEdits.length || touchedFiles.length) {
+  if (reconEdits.length || translationEdits.length || noteEdits.length
+      || parallelEdits.length || touchedFiles.length) {
     await saveScoreDataToFile();
     renderScore();
     const parts = [];
     if (reconEdits.length) parts.push(`${reconEdits.length} reconstruction edit${reconEdits.length === 1 ? '' : 's'}`);
     if (translationEdits.length) parts.push(`${translationEdits.length} translation edit${translationEdits.length === 1 ? '' : 's'}`);
+    if (noteEdits.length) parts.push(`${noteEdits.length} note edit${noteEdits.length === 1 ? '' : 's'}`);
+    if (parallelEdits.length) parts.push(`${parallelEdits.length} parallel edit${parallelEdits.length === 1 ? '' : 's'}`);
     if (touchedFiles.length) parts.push(`${touchedFiles.length} manuscript${touchedFiles.length === 1 ? '' : 's'} updated (${touchedFiles.join(', ')})`);
     setStatus('connected', 'Synced: ' + parts.join(', '));
     setTimeout(() => setStatus('connected', 'Ready'), 4000);

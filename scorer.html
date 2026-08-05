@@ -12,6 +12,10 @@
   <script src="ebl-client.js"></script>
   <script src="ebl-fetch.js"></script>
   <script src="ebl-atf.js"></script>
+  <!-- Parallel search: local corpus cache, n-gram scoring, ATF -> sign codes -->
+  <script src="ebl-corpus.js"></script>
+  <script src="ebl-ngram.js"></script>
+  <script src="ebl-atf-signs.js"></script>
   <!-- Ace Editor -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-searchbox.js"></script>
@@ -92,6 +96,7 @@
           <div class="pane-tabs">
             <button class="pane-tab active" data-tab="score">Score</button>
             <button class="pane-tab" data-tab="colophons">Colophons</button>
+            <button class="pane-tab" data-tab="parallels">Parallels</button>
             <button class="pane-tab" data-tab="images">Images</button>
           </div>
           <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
@@ -99,6 +104,7 @@
         <div id="type-legend" class="type-legend"></div>
         <div id="score" class="score tab-content active" data-tab="score"></div>
         <div id="colophons" class="score tab-content" data-tab="colophons"></div>
+        <div id="parallels" class="score tab-content" data-tab="parallels"></div>
         <div id="images-tab" class="tab-content" data-tab="images">
           <div id="images-grid" class="images-grid">
             <div class="images-empty">No images for this source.</div>
@@ -319,6 +325,29 @@
     <div id="recon-ace" class="recon-ace"></div>
     <div id="recon-status" class="recon-status hidden"></div>
   </div>
+
+  <!-- Add a line variant: the alternative reading + the witnesses that attest it -->
+  <dialog id="variant-dialog" class="dialog variant-dialog">
+    <form id="variant-form" method="dialog">
+      <h2 id="variant-dialog-title">Add a variant</h2>
+      <p class="field-hint">A second reading of this line, with its own witnesses.
+        Select part of the line first and it is prefilled here.</p>
+
+      <label class="field-label" for="variant-text">Variant reading</label>
+      <textarea id="variant-text" class="field-input variant-text" rows="2" spellcheck="false"></textarea>
+
+      <p class="field-label">Witnesses that attest it</p>
+      <p class="field-hint">Ticked sources move to the new variant — their
+        <code>§</code> marker gets its letter in the manuscript file.</p>
+      <div id="variant-witnesses" class="variant-witnesses"></div>
+
+      <div class="dialog-actions">
+        <span class="pull-spacer"></span>
+        <button type="button" id="variant-cancel">Cancel</button>
+        <button type="submit" id="variant-go" class="pull-apply-btn">Add variant</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Export modal -->
   <div id="export-modal" class="modal hidden">

@@ -15,6 +15,9 @@
   //   scoreLines:           { [lineNum]: witness[] } from parseManuscript/buildScore
   //   reconstructedLines:   { [lineNum]: string }
   //   translationLines:     { [lineNum]: string }
+  //   noteLines:            { [lineNum]: string }
+  //   parallelLines:        { [lineNum]: string[] }
+  //   variantLines:         { [lineNum]: [{ text, note, parallels }] }  (readings 1..n)
   //   manuscriptsMeta:      manuscripts.json contents (must include `manuscripts` array)
   //   eblSiglumByFile:      { [filename without .txt | "siglum"]: full eBL siglum string }
   //
@@ -26,6 +29,10 @@
   //   "blank"
   //   "translation"     { row, kind, lineNum, content, prefixed }
   //   "reconstruction"  { row, kind, lineNum, content }
+  //   "note"            { row, kind, lineNum, content, prefixed }
+  //   "parallel"        { row, kind, lineNum, index, content, prefixed }
+  // Every entry below the translation also carries `variantIndex` — which of
+  // the line's readings it belongs to (0 is the main one).
   //   "witness"         { row, kind, lineNum, eblSiglum, msKey, sourceLine, content }
   // Indent prefix on every witness row. Stripped before POST.
   const WITNESS_INDENT = '  ';
@@ -35,6 +42,8 @@
   // The app authors one translation per line and eBL's default language is
   // "en", so a plain string becomes an English translation line.
   const TRANSLATION_PREFIX = '#tr.en: ';
+  const NOTE_PREFIX = '#note: ';
+  const PARALLEL_PREFIX = '// ';
 
   // A translation is a single ATF row — the grammar's note_text stops at a
   // newline — so anything typed across several lines collapses to one.
@@ -42,7 +51,26 @@
     return String(text).replace(/\s+/g, ' ').trim();
   }
 
-  async function buildChapterAtf({ scoreLines, reconstructedLines, translationLines, manuscriptsMeta, eblSiglumByFile }) {
+  // A line's readings as one list. The main reading lives in the three primary
+  // maps and the rest in variantLines, so this flattens both into the uniform
+  // shape the emitter loops over.
+  function readingsFor(n, reconstructedLines, noteLines, parallelLines, variantLines) {
+    const readings = [{
+      text: (reconstructedLines && reconstructedLines[n]) || '',
+      note: noteLines && noteLines[n],
+      parallels: (parallelLines && parallelLines[n]) || [],
+    }];
+    for (const v of ((variantLines && variantLines[n]) || [])) {
+      readings.push({
+        text: (v && v.text) || '',
+        note: v ? v.note : undefined,
+        parallels: (v && v.parallels) || [],
+      });
+    }
+    return readings;
+  }
+
+  async function buildChapterAtf({ scoreLines, reconstructedLines, translationLines, noteLines, parallelLines, variantLines, manuscriptsMeta, eblSiglumByFile }) {
     const lineNums = Object.keys(scoreLines || {}).map(Number).sort((a, b) => a - b);
     const lines = [];
     const lineMap = [];
@@ -54,10 +82,12 @@
       if (key) idByKey.set(key, m.id || 9999);
     }
 
-    // The "$" directives in a section that belong to one manuscript.
-    function directivesFor(entries, siglum) {
+    // The "$" directives in a section that belong to one manuscript, under the
+    // reading it was assigned to.
+    function directivesFor(entries, siglum, variantIndex) {
       return (entries || []).filter(
         (e) => e.type !== 'line' && e.siglum === siglum
+               && (e.variant || 0) === variantIndex
       );
     }
 
@@ -105,65 +135,99 @@
         lines.push(prefixed ? TRANSLATION_PREFIX + translation : translation);
       }
 
-      // Reconstruction line (no indent — it's the §N header for the block)
-      const recon = (reconstructedLines && reconstructedLines[n]) || '';
-      lineMap.push({ row: lines.length, kind: 'reconstruction', lineNum: n, content: recon });
-      lines.push(`${n}. ${recon}`);
+      // One block per reading. Variants of a line are separated by a single
+      // newline and each repeats the line number — eBL keeps the first
+      // variant's number for the whole chapter line and discards the rest.
+      const readings = readingsFor(n, reconstructedLines, noteLines, parallelLines, variantLines);
+      const allWitnesses = (scoreLines[n] || []).filter((w) => w.type === 'line');
 
-      // Witness lines — ordered by eBL manuscript id
-      const witnesses = (scoreLines[n] || []).filter((w) => w.type === 'line');
-      const sorted = [...witnesses].sort(witnessSort);
-      for (const w of sorted) {
-        const eblSiglum = (eblSiglumByFile && eblSiglumByFile[w.siglum]) || w.siglum;
-        const content = w.content || '';
-        lineMap.push({
-          row: lines.length,
-          kind: 'witness',
-          lineNum: n,
-          eblSiglum,
-          msKey: w.siglum,
-          sourceLine: w.sourceLine,
-          content,
-        });
-        lines.push(formatWitness(eblSiglum, w.sourceLine, content));
+      for (let vi = 0; vi < readings.length; vi++) {
+        const reading = readings[vi];
 
-        if (Array.isArray(w.continuation) && w.continuation.length) {
-          for (const cont of w.continuation) {
-            lineMap.push({
-              row: lines.length,
-              kind: 'witness-continuation',
-              lineNum: n,
-              eblSiglum,
-              msKey: w.siglum,
-              sourceLine: w.sourceLine,
-              content: cont,
-            });
-            lines.push(formatContinuation(cont));
-          }
+        // Reconstruction line (no indent — it's the §N header for the block)
+        const recon = reading.text || '';
+        lineMap.push({ row: lines.length, kind: 'reconstruction', lineNum: n, variantIndex: vi, content: recon });
+        lines.push(`${n}. ${recon}`);
+
+        // Note, then parallels, then the witnesses — the order the grammar fixes:
+        //   reconstruction: text_line [_NEWLINE note_line] (_NEWLINE parallel_line)*
+        // Both belong to the reading above them, not to the chapter line.
+        const note = normalizeTranslation(reading.note || '');
+        if (note) {
+          const prefixed = !/^#note:/.test(note);
+          lineMap.push({ row: lines.length, kind: 'note', lineNum: n, variantIndex: vi, content: note, prefixed });
+          lines.push(prefixed ? NOTE_PREFIX + note : note);
         }
 
-        // Rulings assigned to this witness. The chapter grammar allows
-        // paratext after a manuscript line —
-        //   manuscript_line: ... manuscript_text paratext_line*
-        //   paratext_line:   _NEWLINE _WHITE_SPACE? paratext
-        //   paratext:        note_line | dollar_line
-        // so an indented $-line here is valid and survives the round trip.
-        for (const x of directivesFor(scoreLines[n], w.siglum)) {
-          const directive = x.content || ((x.rulingType || 'single') + ' ruling');
+        const parallels = reading.parallels || [];
+        for (let i = 0; i < parallels.length; i++) {
+          const parallel = normalizeTranslation(parallels[i]);
+          if (!parallel) continue;
+          const prefixed = !/^\/\//.test(parallel);
+          lineMap.push({ row: lines.length, kind: 'parallel', lineNum: n, variantIndex: vi, index: i, content: parallel, prefixed });
+          lines.push(prefixed ? PARALLEL_PREFIX + parallel : parallel);
+        }
+
+        // Witness lines for THIS reading — ordered by eBL manuscript id. A
+        // reading is tied to a variant by the letter on its § marker; readings
+        // with no letter belong to the first.
+        const witnesses = allWitnesses.filter((w) => (w.variant || 0) === vi);
+        const sorted = [...witnesses].sort(witnessSort);
+        for (const w of sorted) {
+          const eblSiglum = (eblSiglumByFile && eblSiglumByFile[w.siglum]) || w.siglum;
+          const content = w.content || '';
           lineMap.push({
             row: lines.length,
-            kind: 'witness-paratext',
+            kind: 'witness',
             lineNum: n,
+            variantIndex: vi,
             eblSiglum,
             msKey: w.siglum,
             sourceLine: w.sourceLine,
-            content: directive,
+            content,
           });
-          lines.push(formatContinuation('$ ' + directive));
-        }
-      }
+          lines.push(formatWitness(eblSiglum, w.sourceLine, content));
 
-      // Blank separator between blocks
+          if (Array.isArray(w.continuation) && w.continuation.length) {
+            for (const cont of w.continuation) {
+              lineMap.push({
+                row: lines.length,
+                kind: 'witness-continuation',
+                lineNum: n,
+                variantIndex: vi,
+                eblSiglum,
+                msKey: w.siglum,
+                sourceLine: w.sourceLine,
+                content: cont,
+              });
+              lines.push(formatContinuation(cont));
+            }
+          }
+
+          // Rulings assigned to this witness. The chapter grammar allows
+          // paratext after a manuscript line —
+          //   manuscript_line: ... manuscript_text paratext_line*
+          //   paratext_line:   _NEWLINE _WHITE_SPACE? paratext
+          //   paratext:        note_line | dollar_line
+          // so an indented $-line here is valid and survives the round trip.
+          for (const x of directivesFor(scoreLines[n], w.siglum, vi)) {
+            const directive = x.content || ((x.rulingType || 'single') + ' ruling');
+            lineMap.push({
+              row: lines.length,
+              kind: 'witness-paratext',
+              lineNum: n,
+              variantIndex: vi,
+              eblSiglum,
+              msKey: w.siglum,
+              sourceLine: w.sourceLine,
+              content: directive,
+            });
+            lines.push(formatContinuation('$ ' + directive));
+          }
+        }
+      } // end of readings loop — variants are separated by a single newline
+
+      // Blank separator between chapter lines
       lineMap.push({ row: lines.length, kind: 'blank', lineNum: n });
       lines.push('');
     }
@@ -205,8 +269,10 @@
   //
   // Returns:
   //   {
-  //     reconstructionEdits: [{ lineNum, oldContent, newContent }],
+  //     reconstructionEdits: [{ lineNum, variantIndex, oldContent, newContent }],
   //     translationEdits:    [{ lineNum, oldContent, newContent }],
+  //     noteEdits:           [{ lineNum, variantIndex, oldContent, newContent }],
+  //     parallelEdits:       [{ lineNum, variantIndex, index, oldContent, newContent }],
   //     witnessEdits:        [{ lineNum, msKey, sourceLine, oldContent, newContent }],
   //     unmatched:           [{ row, oldText, newText }]   // line count drift, etc.
   //   }
@@ -216,6 +282,8 @@
 
     const reconstructionEdits = [];
     const translationEdits = [];
+    const noteEdits = [];
+    const parallelEdits = [];
     const witnessEdits = [];
     const unmatched = [];
 
@@ -239,6 +307,7 @@
         if (parsed && parsed.lineNum === entry.lineNum) {
           reconstructionEdits.push({
             lineNum: entry.lineNum,
+            variantIndex: entry.variantIndex || 0,
             oldContent: entry.content,
             newContent: parsed.content,
           });
@@ -259,11 +328,37 @@
         } else {
           unmatched.push({ row: r, oldText: old, newText: nw });
         }
+      } else if (entry.kind === 'note') {
+        const parsed = parseNoteRow(nw);
+        if (parsed) {
+          noteEdits.push({
+            lineNum: entry.lineNum,
+            variantIndex: entry.variantIndex || 0,
+            oldContent: entry.content,
+            newContent: entry.prefixed ? parsed.content : nw.trim(),
+          });
+        } else {
+          unmatched.push({ row: r, oldText: old, newText: nw });
+        }
+      } else if (entry.kind === 'parallel') {
+        const parsed = parseParallelRow(nw);
+        if (parsed) {
+          parallelEdits.push({
+            lineNum: entry.lineNum,
+            variantIndex: entry.variantIndex || 0,
+            index: entry.index,
+            oldContent: entry.content,
+            newContent: entry.prefixed ? parsed.content : nw.trim(),
+          });
+        } else {
+          unmatched.push({ row: r, oldText: old, newText: nw });
+        }
       } else if (entry.kind === 'witness') {
         const parsed = parseWitnessRow(nw);
         if (parsed && parsed.eblSiglum === entry.eblSiglum && String(parsed.sourceLine) === String(entry.sourceLine)) {
           witnessEdits.push({
             lineNum: entry.lineNum,
+            variantIndex: entry.variantIndex || 0,
             msKey: entry.msKey,
             sourceLine: entry.sourceLine,
             oldContent: entry.content,
@@ -290,7 +385,7 @@
       }
     }
 
-    return { reconstructionEdits, translationEdits, witnessEdits, unmatched };
+    return { reconstructionEdits, translationEdits, noteEdits, parallelEdits, witnessEdits, unmatched };
   }
 
   // ---- Row parsers ----
@@ -310,6 +405,20 @@
   // so a hand-written "#tr.de.(2): ..." parses too.
   function parseTranslationRow(row) {
     const m = row.match(/^\s*(#tr(?:\.[a-z]{2})?(?:\.\([^)]*\))?:\s*)(.*)$/);
+    if (!m) return null;
+    return { prefix: m[1], content: m[2] };
+  }
+
+  // "#note: See @bib{Hunger2019@109}"  →  { prefix: "#note: ", content: "See @bib{...}" }
+  function parseNoteRow(row) {
+    const m = row.match(/^\s*(#note:\s*)(.*)$/);
+    if (!m) return null;
+    return { prefix: m[1], content: m[2] };
+  }
+
+  // "// (MUL.APIN II iv 2)"  →  { prefix: "// ", content: "(MUL.APIN II iv 2)" }
+  function parseParallelRow(row) {
+    const m = row.match(/^\s*(\/\/\s*)(.*)$/);
     if (!m) return null;
     return { prefix: m[1], content: m[2] };
   }
@@ -346,6 +455,26 @@
     return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  // Retarget one reading's § marker at a different variant of the same line:
+  // "§34 7'." <-> "§34b 7'.". The letter is positional (b = second reading),
+  // and an empty letter means the main one.
+  //
+  // Returns { ok: true, content } or { ok: false, reason }.
+  function setWitnessVariant(msContent, { lineNum, sourceLine, letter }) {
+    const lines = msContent.split('\n');
+    const pattern = new RegExp(
+      `^(\\s*§${lineNum})[a-z]?(\\s+${escapeRegex(String(sourceLine))}\\.)`
+    );
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(pattern);
+      if (m) {
+        lines[i] = m[1] + (letter || '') + lines[i].slice(m[0].length - m[2].length);
+        return { ok: true, content: lines.join('\n') };
+      }
+    }
+    return { ok: false, reason: `No line matching §${lineNum} ${sourceLine}. found` };
+  }
+
   // ---- Sigla helper ----
 
   // Resolve the per-manuscript eBL siglum from manuscripts.json + provenance list.
@@ -367,8 +496,11 @@
     diffArtifact,
     parseReconstructionRow,
     parseTranslationRow,
+    parseNoteRow,
+    parseParallelRow,
     parseWitnessRow,
     applyWitnessEditToManuscript,
+    setWitnessVariant,
     buildEblSiglumMap,
   };
 })();

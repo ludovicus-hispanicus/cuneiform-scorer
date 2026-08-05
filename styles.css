@@ -680,6 +680,150 @@ body {
   padding: 2rem;
 }
 
+/* Parallels panel */
+.parallels-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.parallels-corpus {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.parallels-corpus-state {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.parallels-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #8b6914;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.parallels-run {
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+}
+
+.parallels-run[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.parallels-message,
+.parallels-summary {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 0.4rem 0;
+  line-height: 1.5;
+}
+
+.parallels-section {
+  margin-bottom: 1.75rem;
+}
+
+.parallels-section-title {
+  margin: 0.5rem 0 0.15rem;
+  font-size: 0.95rem;
+  color: #8b6914;
+}
+
+.parallels-section-blurb {
+  margin: 0 0 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.parallels-score-lead {
+  font-weight: 600;
+}
+
+.parallels-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.parallels-table th {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.parallels-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.parallels-rank,
+.parallels-score,
+.parallels-shared {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.parallels-score {
+  font-family: "Consolas", "Monaco", monospace;
+}
+
+.parallels-options {
+  display: flex;
+  gap: 1.1rem;
+  flex-wrap: wrap;
+  align-items: center;
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.parallels-options select {
+  margin-left: 0.25rem;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.2rem;
+}
+
+.parallels-note {
+  padding: 0.5rem 0.7rem;
+  margin: 0.25rem 0 0.75rem;
+  border-left: 3px solid #d9c9a3;
+  background: #fdf6e3;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.parallels-join-owner {
+  color: #8b6914;
+}
+
+.parallels-have {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.parallels-add {
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
 .score-line {
   margin-bottom: 1.25rem;
 }
@@ -752,6 +896,229 @@ body {
 .reconstructed-text:focus {
   background: white;
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* "+" on the reading: adds a note or a parallel. Stays out of the way until
+   the line is hovered or something inside it has focus. */
+.recon-add-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.recon-add {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.score-line:hover .recon-add,
+.score-line:focus-within .recon-add {
+  opacity: 0.65;
+}
+
+.recon-add:hover,
+.recon-add:focus {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.recon-add-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  background: var(--bg-white);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+
+.recon-add-menu.hidden {
+  display: none;
+}
+
+.recon-add-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  border: 0;
+  background: transparent;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  color: var(--text-dark);
+  cursor: pointer;
+  text-align: left;
+}
+
+.recon-add-item em {
+  font-style: normal;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.recon-add-item:hover:not(:disabled) {
+  background: var(--accent-light);
+}
+
+.recon-add-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* A variant reading: same shape as the main one, tinted so the eye can tell
+   at a glance that the line has more than one reading. */
+.score-line-header.is-variant {
+  background: #f3eefb;
+  border-left: 3px solid #9b7fd4;
+  margin-top: 0.35rem;
+}
+
+.score-line-header.is-variant .line-label {
+  color: #6b4fa8;
+}
+
+.recon-add-item.danger {
+  color: #a11d13;
+}
+
+.recon-add-item.danger:hover:not(:disabled) {
+  background: #fdecea;
+}
+
+.variant-dialog {
+  min-width: 520px;
+  max-width: 720px;
+}
+
+.variant-text {
+  width: 100%;
+  font-family: "Consolas", "Monaco", monospace;
+  resize: vertical;
+}
+
+.variant-witnesses {
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.3rem;
+}
+
+.variant-witness {
+  display: grid;
+  grid-template-columns: auto 8.5rem 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.25rem 0.35rem;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.variant-witness:hover {
+  background: var(--accent-light);
+}
+
+.variant-witness-ref {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.dark-mode .score-line-header.is-variant {
+  background: #332b45;
+  border-left-color: #9b7fd4;
+}
+
+body.dark-mode .score-line-header.is-variant .line-label {
+  color: #c4aef0;
+}
+
+body.dark-mode .variant-witness:hover {
+  background: #3a4149;
+}
+
+/* Note and parallel rows sit under the reading they belong to. */
+.recon-extra {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.15rem 0.5rem 0.15rem 1.6rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.recon-extra-prefix {
+  flex-shrink: 0;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.75rem;
+  color: var(--accent);
+  opacity: 0.75;
+  user-select: none;
+}
+
+.recon-extra-text {
+  flex: 1;
+  outline: none;
+  min-height: 1.2em;
+  padding: 0.1rem 0.3rem;
+  border-radius: 2px;
+}
+
+.recon-extra-text:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.recon-extra-text:focus {
+  background: var(--bg-white);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.recon-note .recon-extra-text:empty::before {
+  content: "Note on this line…";
+  color: #bbb;
+}
+
+.recon-parallel .recon-extra-text:empty::before {
+  /* The category is a Roman numeral here, unlike the API path (D/1/4). */
+  content: "F K.3547 r 20'  ·  D I.4 SB \"55\" 12  ·  (SIT 6 24)";
+  color: #bbb;
+}
+
+body.dark-mode .recon-add-menu {
+  background: #2d333b;
+  border-color: #444c56;
+}
+
+body.dark-mode .recon-add-item {
+  color: #c9d1d9;
+}
+
+body.dark-mode .recon-add-item:hover:not(:disabled) {
+  background: #3a4149;
+}
+
+body.dark-mode .recon-extra-text:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+body.dark-mode .recon-extra-text:focus {
+  background: #1e1e1e;
 }
 
 
