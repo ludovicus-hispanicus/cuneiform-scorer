@@ -263,8 +263,35 @@
     });
   }
 
+  // POST /import APPENDS — eBL's own import UI says so ("The imported lines are
+  // added to the end of the chapter. Existing lines will not change."), and
+  // LinesUpdater builds `lines = (*existing, *imported)`. Emptying the chapter
+  // first is what turns this into a replace; see deleteAllLines.
   async function postImport(coords, atfText) {
     return authedRequest('POST', `${chapterPath(coords)}/import`, { atf: atfText });
+  }
+
+  // The structured lines endpoint. `deleted` holds 0-based positions in the
+  // chapter's current line list.
+  async function postLines(coords, { newLines = [], deleted = [], edited = [] } = {}) {
+    return authedRequest('POST', `${chapterPath(coords)}/lines`, {
+      new: newLines,
+      deleted,
+      edited,
+    });
+  }
+
+  // Empty a chapter so a following import replaces rather than appends.
+  // Lemmatization and alignment on the removed lines do not survive this: eBL
+  // carries those across only when old and new lines are paired inside one
+  // update, and after the delete there is nothing left to pair against. eBL
+  // does record the deletion in the chapter's changelog.
+  async function deleteAllLines(coords, lineCount) {
+    if (!lineCount) return 0;
+    await postLines(coords, {
+      deleted: Array.from({ length: lineCount }, (_, i) => i),
+    });
+    return lineCount;
   }
 
   // ---- Fragmentarium ----
@@ -432,6 +459,8 @@
     getChapter,
     postManuscripts,
     postImport,
+    postLines,
+    deleteAllLines,
 
     // fragmentarium
     getFragment,

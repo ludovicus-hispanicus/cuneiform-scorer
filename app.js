@@ -4226,6 +4226,14 @@ const exportMsSummaryEl = document.getElementById('export-ms-summary');
 const exportWarningsEl = document.getElementById('export-warnings');
 const exportProgressEl = document.getElementById('export-progress');
 const exportResultEl = document.getElementById('export-result');
+const exportPreflightEl = document.getElementById('export-preflight');
+const exportEffectEl = document.getElementById('export-effect');
+const exportOptManuscriptsEl = document.getElementById('export-opt-manuscripts');
+const exportOptSaveAtfEl = document.getElementById('export-opt-save-atf');
+
+// What the target chapter holds right now, from the preflight GET. null until
+// it resolves; { error } when the chapter could not be read.
+let exportPreflight = null;
 
 let reconAceEditor = null;
 let reconLineMap = null;        // [{ row, kind, lineNum, ... }] from EblAtf.buildChapterAtf
@@ -4455,6 +4463,120 @@ function hideReconStatus() {
 
 // ---- Export modal ----
 
+// How many chapter lines would be sent. Counted from the live editor buffer
+// rather than the last compiled lineMap, so hand-edits in the Recon view are
+// reflected. Reconstruction rows are the unindented "N. ..." ones; witness
+// rows carry a siglum first.
+function countArtifactLines() {
+  const atf = reconAceEditor ? reconAceEditor.getValue() : reconOriginalAtf;
+  if (!atf) return 0;
+  return EblAtf.stripFormatting(atf)
+    .split('\n')
+    .filter((row) => /^\d+['’]?\.\s/.test(row))
+    .length;
+}
+
+function selectedExportMode() {
+  const checked = document.querySelector('input[name="export-mode"]:checked');
+  return checked ? checked.value : 'validate';
+}
+
+// Read the target chapter so the dialog can say what is already there. This is
+// a public GET — it works without a token, and a chapter that does not exist
+// yet is a normal answer, not an error.
+async function loadExportPreflight(target) {
+  if (!target) {
+    exportPreflight = { error: 'No target chapter configured.' };
+    return;
+  }
+  try {
+    const chapter = await EblClient.getChapter(target);
+    const numbers = (chapter.lines || []).map((l) => l.number);
+    exportPreflight = {
+      lineCount: numbers.length,
+      first: numbers[0] || null,
+      last: numbers[numbers.length - 1] || null,
+      translated: (chapter.lines || []).filter((l) => (l.translation || []).length).length,
+    };
+  } catch (err) {
+    exportPreflight = {
+      error: err && err.status === 404
+        ? 'Chapter not found on eBL.'
+        : `Could not read the chapter (${err && err.message ? err.message : err}).`,
+    };
+  }
+}
+
+function renderExportPreflight() {
+  if (!exportPreflight) {
+    exportPreflightEl.textContent = 'checking…';
+    return;
+  }
+  if (exportPreflight.error) {
+    exportPreflightEl.textContent = exportPreflight.error;
+    return;
+  }
+  const { lineCount, first, last, translated } = exportPreflight;
+  if (!lineCount) {
+    exportPreflightEl.textContent = 'Empty — no lines yet.';
+    return;
+  }
+  const range = first && last ? ` (§${first}–${last})` : '';
+  const tr = translated ? `, ${translated} translated` : '';
+  exportPreflightEl.textContent = `${lineCount} line${lineCount === 1 ? '' : 's'}${range}${tr}`;
+}
+
+// Spell out the outcome before the button is pressed. This is the part that
+// makes append-vs-replace a decision rather than a guess.
+function renderExportEffect() {
+  const mode = selectedExportMode();
+  const sending = countArtifactLines();
+  const existing = exportPreflight && !exportPreflight.error ? exportPreflight.lineCount : null;
+
+  let html = '';
+  if (mode === 'validate') {
+    html = `Checks ${sending} chapter line${sending === 1 ? '' : 's'}. Nothing is written to eBL.`;
+  } else if (mode === 'append') {
+    html = existing == null
+      ? `Adds ${sending} line${sending === 1 ? '' : 's'} to the end of the chapter.`
+      : `Chapter goes from <strong>${existing}</strong> to <strong>${existing + sending}</strong> lines.`;
+    if (existing) {
+      html += ` The ${existing} existing line${existing === 1 ? '' : 's'} stay${existing === 1 ? 's' : ''} and your §numbers will repeat.`;
+    }
+  } else {
+    html = existing == null
+      ? `Deletes every existing line, then writes ${sending}.`
+      : `Deletes <strong>${existing}</strong> line${existing === 1 ? '' : 's'}, then writes <strong>${sending}</strong>.`;
+    if (exportPreflight && exportPreflight.translated) {
+      html += ` ${exportPreflight.translated} eBL translation${exportPreflight.translated === 1 ? '' : 's'} will be replaced by yours.`;
+    }
+  }
+  exportEffectEl.innerHTML = html;
+  exportEffectEl.classList.remove('hidden');
+  exportEffectEl.classList.toggle('destructive', mode === 'replace');
+
+  exportGoBtn.textContent = mode === 'validate' ? 'Validate'
+    : mode === 'append' ? 'Append to chapter'
+    : 'Replace all lines';
+}
+
+// Only the steps a mode actually runs are shown.
+function stepsForMode(mode) {
+  if (mode === 'validate') return ['validate'];
+  const steps = ['validate'];
+  if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) steps.push('manuscripts');
+  if (mode === 'replace') steps.push('backup', 'delete');
+  steps.push('import');
+  return steps;
+}
+
+function syncExportSteps() {
+  const active = stepsForMode(selectedExportMode());
+  exportProgressEl.querySelectorAll('.export-step').forEach((el) => {
+    el.classList.toggle('hidden', !active.includes(el.dataset.step));
+  });
+}
+
 function openExportModal() {
   updateReconTokenPill();
   const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
@@ -4501,15 +4623,79 @@ function openExportModal() {
     s.querySelector('.step-icon').textContent = '·';
   });
 
-  const canExport = target && ts.hasToken && !ts.expired && ts.hasWriteTexts;
+  // Always reopen on Validate. Replace deletes work that is already on eBL, so
+  // it has to be chosen deliberately each time rather than inherited from the
+  // last export. Reset before the button state is derived from the mode.
+  const validateRadio = document.querySelector('input[name="export-mode"][value="validate"]');
+  if (validateRadio) validateRadio.checked = true;
+
+  // Validate-only writes nothing, so it needs neither a token nor write scope.
+  const canExport = !!reconLineMap;
   exportGoBtn.disabled = !canExport;
-  exportGoBtn.title = canExport ? '' : 'Cannot export — fix token/target first';
+  exportGoBtn.title = canExport ? '' : 'Nothing compiled to validate yet';
+
+  exportPreflight = null;
+  renderExportPreflight();
+  renderExportEffect();
+  syncExportSteps();
 
   exportModal.classList.remove('hidden');
+
+  // Preflight after showing the dialog so it never blocks opening.
+  loadExportPreflight(target).then(() => {
+    if (exportModal.classList.contains('hidden')) return;
+    renderExportPreflight();
+    renderExportEffect();
+  });
 }
+
+// Re-render the consequences whenever the choice changes.
+document.querySelectorAll('input[name="export-mode"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    const ts = EblClient.tokenStatus();
+    const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+    const mode = selectedExportMode();
+    const canWrite = target && ts.hasToken && !ts.expired && ts.hasWriteTexts;
+    const ok = mode === 'validate' ? !!reconLineMap : !!canWrite;
+    exportGoBtn.disabled = !ok;
+    exportGoBtn.title = ok ? '' : 'Cannot write to eBL — fix token/target first';
+    renderExportEffect();
+    syncExportSteps();
+  });
+});
+exportOptManuscriptsEl && exportOptManuscriptsEl.addEventListener('change', syncExportSteps);
 
 function closeExportModal() {
   exportModal.classList.add('hidden');
+}
+
+// Thrown when the exporter stops before writing anything. Distinct from an
+// EblError so the catch below can say "nothing was sent" truthfully.
+class ExportAborted extends Error {
+  constructor(message, problems) {
+    super(message);
+    this.name = 'ExportAborted';
+    this.problems = problems || [];
+  }
+}
+
+// Run the ATF past the local validator. Returns [] when it is clean and also
+// when there is no validator to ask — browser mode cannot check, and refusing
+// to export on that basis would block the only mode that works there.
+async function validateAtfForExport(wireAtf) {
+  if (!localValidatorAvailable) return [];
+  try {
+    const res = await fetch('/api/validate-atf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ atf: wireAtf }),
+    });
+    if (!res.ok) return [];
+    const result = await res.json();
+    return result.valid ? [] : (result.errors || []);
+  } catch (_) {
+    return [];
+  }
 }
 
 async function runExport() {
@@ -4529,25 +4715,83 @@ async function runExport() {
     if (state === 'running') el.querySelector('.step-icon').textContent = '…';
   };
 
-  try {
-    // Step 1: POST /manuscripts
-    setStep('manuscripts', 'running');
-    const eblMss = EblClient.toEblManuscripts(manuscriptsMeta);
-    await EblClient.postManuscripts(target, eblMss, []);
-    setStep('manuscripts', 'done');
+  const mode = selectedExportMode();
+  const wireAtf = EblAtf.stripFormatting(atfText);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
-    // Step 2: POST /import — strip visual table-formatting before sending
+  // Declared out here so the catch can tell whether the chapter was already
+  // emptied when the failure hit, and point at the backup if so.
+  let backupName = null;
+  let deleted = 0;
+
+  try {
+    // Always validate first. On a replace this is the difference between a
+    // clean swap and a chapter emptied for an import that then fails.
+    setStep('validate', 'running');
+    const problems = await validateAtfForExport(wireAtf);
+    if (problems && problems.length) {
+      setStep('validate', 'error');
+      throw new ExportAborted(
+        `${problems.length} ATF error${problems.length === 1 ? '' : 's'} — nothing was sent.`,
+        problems
+      );
+    }
+    setStep('validate', 'done');
+
+    if (exportOptSaveAtfEl && exportOptSaveAtfEl.checked && dirHandle) {
+      await FileSystem.writeProjectFile(dirHandle, `export-${stamp}.atf`, wireAtf);
+    }
+
+    if (mode === 'validate') {
+      exportResultEl.classList.remove('hidden');
+      exportResultEl.classList.add('success');
+      exportResultEl.classList.remove('failure');
+      exportResultEl.innerHTML = localValidatorAvailable
+        ? `Valid. ${countArtifactLines()} chapter lines ready to send. Nothing was written to eBL.`
+        : 'No local validator in browser mode, so the ATF was not checked. Nothing was written to eBL.';
+      return;
+    }
+
+    if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) {
+      setStep('manuscripts', 'running');
+      const eblMss = EblClient.toEblManuscripts(manuscriptsMeta);
+      await EblClient.postManuscripts(target, eblMss, []);
+      setStep('manuscripts', 'done');
+    }
+
+    if (mode === 'replace') {
+      // Keep a local copy before removing anything. eBL keeps a changelog too,
+      // but restoring from it is manual.
+      setStep('backup', 'running');
+      const chapter = await EblClient.getChapter(target);
+      if (dirHandle) {
+        backupName = await FileSystem.writeProjectFile(
+          dirHandle,
+          `ebl-chapter-backup-${stamp}.json`,
+          JSON.stringify(chapter, null, 2)
+        );
+      }
+      setStep('backup', 'done');
+
+      setStep('delete', 'running');
+      deleted = await EblClient.deleteAllLines(target, (chapter.lines || []).length);
+      setStep('delete', 'done');
+    }
+
     setStep('import', 'running');
-    const wireAtf = EblAtf.stripFormatting(atfText);
     await EblClient.postImport(target, wireAtf);
     setStep('import', 'done');
 
     // Success
     const url = `https://www.ebl.lmu.de/corpus/${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`;
+    const summary = mode === 'replace'
+      ? `Replaced ${deleted} line${deleted === 1 ? '' : 's'} with ${countArtifactLines()}.`
+      : `Appended ${countArtifactLines()} line${countArtifactLines() === 1 ? '' : 's'}.`;
+    const backupNote = backupName ? ` Backup saved as <code>${escapeHtml(backupName)}</code>.` : '';
     exportResultEl.classList.remove('hidden');
     exportResultEl.classList.add('success');
     exportResultEl.classList.remove('failure');
-    exportResultEl.innerHTML = `Exported successfully. <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+    exportResultEl.innerHTML = `${summary}${backupNote} <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
   } catch (err) {
     // Figure out which step failed by looking for which step is currently running
     const running = exportProgressEl.querySelector('.export-step.running');
@@ -4557,7 +4801,26 @@ async function runExport() {
     exportResultEl.classList.remove('success');
     exportResultEl.classList.add('failure');
 
-    if (err instanceof EblClient.EblError) {
+    if (err instanceof ExportAborted) {
+      const shown = err.problems.slice(0, VALIDATE_MAX_ERRORS);
+      exportResultEl.innerHTML =
+        `<strong>${escapeHtml(err.message)}</strong><br>` +
+        shown.map((e) => escapeHtml(
+          (e.line != null ? `Line ${e.line}: ` : '') +
+          (e.column != null ? `col ${e.column}: ` : '') + e.message
+        )).join('<br>');
+      applyValidationErrorsToAce(err.problems);
+      showReconStatus({
+        title: 'ATF errors — export stopped before sending',
+        items: err.problems.map((e) => ({ line: e.line, message: e.message })),
+        onItemClick: (it) => {
+          if (it.line != null) {
+            reconAceEditor.gotoLine(it.line, 0, true);
+            reconAceEditor.focus();
+          }
+        },
+      });
+    } else if (err instanceof EblClient.EblError) {
       const validationErrors = err.validationErrors;
       const details = validationErrors
         ? validationErrors.map((e) => (e.line != null ? `Line ${e.line}: ${e.message}` : e.message)).join('<br>')
@@ -4583,6 +4846,17 @@ async function runExport() {
       }
     } else {
       exportResultEl.textContent = err.message || String(err);
+    }
+
+    // A replace that got past the delete leaves the chapter empty. Say so
+    // rather than letting the user discover it on eBL.
+    if (deleted && !(err instanceof ExportAborted)) {
+      exportResultEl.innerHTML +=
+        `<br><br><strong>The chapter is now empty on eBL.</strong> ${deleted} line` +
+        `${deleted === 1 ? ' was' : 's were'} deleted before this failed. ` +
+        (backupName
+          ? `Fix the ATF and export again, or restore from <code>${escapeHtml(backupName)}</code> in the project folder.`
+          : 'Fix the ATF and export again.');
     }
   } finally {
     exportGoBtn.disabled = false;

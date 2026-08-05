@@ -340,10 +340,48 @@
           <span class="export-label">Manuscripts</span>
           <span class="export-value" id="export-ms-summary">—</span>
         </div>
+        <div class="export-row">
+          <span class="export-label">On eBL now</span>
+          <span class="export-value" id="export-preflight">checking…</span>
+        </div>
+
+        <fieldset class="export-modes">
+          <legend>What to do</legend>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="validate" checked>
+            <span class="export-mode-name">Validate only</span>
+            <span class="export-mode-hint">Check the ATF. Nothing is sent to eBL.</span>
+          </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="append">
+            <span class="export-mode-name">Append</span>
+            <span class="export-mode-hint">Add these lines after the ones already in the chapter.</span>
+          </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="replace">
+            <span class="export-mode-name">Replace all lines</span>
+            <span class="export-mode-hint">Delete every existing line, then import these. Lemmatization and alignment on the old lines are lost.</span>
+          </label>
+          <div class="export-options">
+            <label><input type="checkbox" id="export-opt-manuscripts" checked> Register manuscripts first</label>
+            <label><input type="checkbox" id="export-opt-save-atf"> Save a copy of the ATF in the project folder</label>
+          </div>
+        </fieldset>
+
+        <div id="export-effect" class="export-effect hidden"></div>
         <div id="export-warnings" class="export-warnings hidden"></div>
         <div id="export-progress" class="export-progress hidden">
+          <div class="export-step" data-step="validate">
+            <span class="step-icon">·</span> Validate ATF
+          </div>
           <div class="export-step" data-step="manuscripts">
             <span class="step-icon">·</span> Register manuscripts
+          </div>
+          <div class="export-step" data-step="backup">
+            <span class="step-icon">·</span> Back up the chapter
+          </div>
+          <div class="export-step" data-step="delete">
+            <span class="step-icon">·</span> Delete existing lines
           </div>
           <div class="export-step" data-step="import">
             <span class="step-icon">·</span> Import lines

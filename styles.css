@@ -2166,8 +2166,74 @@ body.dark-mode .viewer-footer {
 
 .export-warnings.hidden,
 .export-progress.hidden,
+.export-effect.hidden,
+.export-step.hidden,
 .export-result.hidden {
   display: none;
+}
+
+.export-modes {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.6rem 0.75rem;
+  margin: 0;
+}
+
+.export-modes legend {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  padding: 0 0.35rem;
+}
+
+.export-mode {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 0.5rem;
+  align-items: baseline;
+  padding: 0.3rem 0;
+  cursor: pointer;
+}
+
+.export-mode-name {
+  font-size: 0.9rem;
+  color: var(--text-dark);
+}
+
+.export-mode-hint {
+  grid-column: 2;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.export-options {
+  border-top: 1px solid var(--border-color);
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.export-options label {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.export-effect {
+  border-radius: 4px;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.85rem;
+  background: var(--bg-light);
+  color: var(--text-dark);
+}
+
+/* A replace deletes work that is already on eBL, so it does not get to look
+   like the other two. */
+.export-effect.destructive {
+  background: #fdecea;
+  color: #a11d13;
+  border: 1px solid #f5b7b1;
 }
 
 .export-progress {

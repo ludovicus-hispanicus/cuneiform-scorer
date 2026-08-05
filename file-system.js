@@ -228,6 +228,17 @@ async function writeScoreData(dirHandle, data) {
   await writable.close();
 }
 
+// Write an arbitrary file into the project folder. Used by the exporter for
+// the pre-overwrite chapter backup and for "save a copy of the ATF", both of
+// which are named after the moment they were taken rather than fixed files.
+async function writeProjectFile(dirHandle, name, content) {
+  const fileHandle = await dirHandle.getFileHandle(name, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+  return name;
+}
+
 // Read manuscripts.json (eBL metadata per manuscript)
 async function readManuscriptsMeta(dirHandle) {
   try {
@@ -558,6 +569,7 @@ window.FileSystem = {
   writeScore,
   readScoreData,
   writeScoreData,
+  writeProjectFile,
   readAnnotations,
   writeAnnotations,
   readManuscriptsMeta,
