@@ -4306,6 +4306,7 @@ async function refreshReconArtifact() {
   const result = await EblAtf.buildChapterAtf({
     scoreLines,
     reconstructedLines,
+    translationLines,
     manuscriptsMeta,
     eblSiglumByFile,
   });
@@ -4360,11 +4361,17 @@ async function syncReconEditsBack() {
 
   const diff = EblAtf.diffArtifact(reconLineMap, reconOriginalAtf, edited);
   const reconEdits = diff.reconstructionEdits;
+  const translationEdits = diff.translationEdits;
   const witnessEdits = diff.witnessEdits;
 
-  // Apply reconstruction edits to in-memory state + score-data.json
+  // Apply reconstruction and translation edits to in-memory state +
+  // score-data.json. Emptying a translation row drops the translation; the
+  // next build simply omits the row.
   for (const e of reconEdits) {
     reconstructedLines[e.lineNum] = e.newContent;
+  }
+  for (const e of translationEdits) {
+    translationLines[e.lineNum] = e.newContent;
   }
 
   // Group witness edits by manuscript and apply to each .txt
@@ -4392,11 +4399,12 @@ async function syncReconEditsBack() {
   }
 
   // Persist reconstructed text + redraw the score so the user sees the changes
-  if (reconEdits.length || touchedFiles.length) {
+  if (reconEdits.length || translationEdits.length || touchedFiles.length) {
     await saveScoreDataToFile();
     renderScore();
     const parts = [];
     if (reconEdits.length) parts.push(`${reconEdits.length} reconstruction edit${reconEdits.length === 1 ? '' : 's'}`);
+    if (translationEdits.length) parts.push(`${translationEdits.length} translation edit${translationEdits.length === 1 ? '' : 's'}`);
     if (touchedFiles.length) parts.push(`${touchedFiles.length} manuscript${touchedFiles.length === 1 ? '' : 's'} updated (${touchedFiles.join(', ')})`);
     setStatus('connected', 'Synced: ' + parts.join(', '));
     setTimeout(() => setStatus('connected', 'Ready'), 4000);

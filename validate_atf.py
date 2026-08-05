@@ -77,11 +77,16 @@ def _get_parser():
     try:
         with open(GRAMMAR_FILE, "r", encoding="utf-8") as f:
             grammar = f.read()
+        # "translation_line" is a second start rule because the default one is
+        # too permissive for #tr rows: `control_line` matches anything opening
+        # with "#", so a malformed translation would parse here and only fail
+        # server-side on import. Starting at translation_line checks it for real.
         _PARSER = Lark(
             grammar,
             parser="earley",
             import_paths=[str(GRAMMAR_DIR)],
             propagate_positions=True,
+            start=["start", "translation_line"],
         )
     except Exception as exc:  # pragma: no cover
         _PARSER_INIT_ERROR = f"Parser init failed: {exc}"
@@ -92,14 +97,15 @@ def _get_parser():
 # know what to feed the Lark parser.
 RECON_RE = re.compile(r"^\s*\d+'?\.\s")
 WITNESS_RE = re.compile(r"^\s*([^\s]+)\s+(\d+'?)\.\s+(.*)$")
+TRANSLATION_RE = re.compile(r"^#tr\b")
 
 
-def _parse_with_lark(parser, fragment: str):
+def _parse_with_lark(parser, fragment: str, start: str = "start"):
     """Return (ok, message, column). column is 1-based or None."""
     if not fragment.strip():
         return True, None, None
     try:
-        parser.parse(fragment)
+        parser.parse(fragment, start=start)
         return True, None, None
     except UnexpectedCharacters as e:
         return False, f"Unexpected character '{e.char}'", e.column
@@ -177,6 +183,7 @@ def validate(atf_text: str):
         # - Anything else: try as-is and let Lark decide.
         col_offset = 0
         to_parse = stripped
+        start = "translation_line" if TRANSLATION_RE.match(stripped) else "start"
         witness_match = WITNESS_RE.match(raw)
         if witness_match and not RECON_RE.match(raw):
             siglum, ms_line, content = witness_match.groups()
@@ -188,7 +195,7 @@ def validate(atf_text: str):
                 col_offset = 0
 
         if parser:
-            ok, msg, col = _parse_with_lark(parser, to_parse)
+            ok, msg, col = _parse_with_lark(parser, to_parse, start)
             if not ok:
                 adjusted_col = (col + col_offset) if (col is not None) else None
                 errors.append({"line": i, "column": adjusted_col, "message": msg})

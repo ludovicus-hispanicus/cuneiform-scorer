@@ -14,6 +14,7 @@
   // Inputs:
   //   scoreLines:           { [lineNum]: witness[] } from parseManuscript/buildScore
   //   reconstructedLines:   { [lineNum]: string }
+  //   translationLines:     { [lineNum]: string }
   //   manuscriptsMeta:      manuscripts.json contents (must include `manuscripts` array)
   //   eblSiglumByFile:      { [filename without .txt | "siglum"]: full eBL siglum string }
   //
@@ -23,6 +24,7 @@
   // Each lineMap entry has { row, kind, lineNum, ...kind-specific fields }.
   // `row` is the 0-based row in the produced ATF buffer. kind ∈
   //   "blank"
+  //   "translation"     { row, kind, lineNum, content, prefixed }
   //   "reconstruction"  { row, kind, lineNum, content }
   //   "witness"         { row, kind, lineNum, eblSiglum, msKey, sourceLine, content }
   // Indent prefix on every witness row. Stripped before POST.
@@ -30,7 +32,17 @@
   const WITNESS_SIGLUM_MIN_WIDTH = 8;
   const WITNESS_LINENUM_MIN_WIDTH = 3;
 
-  async function buildChapterAtf({ scoreLines, reconstructedLines, manuscriptsMeta, eblSiglumByFile }) {
+  // The app authors one translation per line and eBL's default language is
+  // "en", so a plain string becomes an English translation line.
+  const TRANSLATION_PREFIX = '#tr.en: ';
+
+  // A translation is a single ATF row — the grammar's note_text stops at a
+  // newline — so anything typed across several lines collapses to one.
+  function normalizeTranslation(text) {
+    return String(text).replace(/\s+/g, ' ').trim();
+  }
+
+  async function buildChapterAtf({ scoreLines, reconstructedLines, translationLines, manuscriptsMeta, eblSiglumByFile }) {
     const lineNums = Object.keys(scoreLines || {}).map(Number).sort((a, b) => a - b);
     const lines = [];
     const lineMap = [];
@@ -80,6 +92,19 @@
     }
 
     for (const n of lineNums) {
+      // Translation belongs to the chapter line, not to one of its readings,
+      // and sits above all of them —
+      //   chapter_line: [chapter_translation] line_variant (_NEWLINE line_variant)*
+      // so it is emitted before the reconstruction.
+      const translation = normalizeTranslation((translationLines && translationLines[n]) || '');
+      if (translation) {
+        // A hand-written "#tr.de: ..." is passed through as typed; anything
+        // else is plain text and gets the default English prefix.
+        const prefixed = !/^#tr\b/.test(translation);
+        lineMap.push({ row: lines.length, kind: 'translation', lineNum: n, content: translation, prefixed });
+        lines.push(prefixed ? TRANSLATION_PREFIX + translation : translation);
+      }
+
       // Reconstruction line (no indent — it's the §N header for the block)
       const recon = (reconstructedLines && reconstructedLines[n]) || '';
       lineMap.push({ row: lines.length, kind: 'reconstruction', lineNum: n, content: recon });
@@ -181,6 +206,7 @@
   // Returns:
   //   {
   //     reconstructionEdits: [{ lineNum, oldContent, newContent }],
+  //     translationEdits:    [{ lineNum, oldContent, newContent }],
   //     witnessEdits:        [{ lineNum, msKey, sourceLine, oldContent, newContent }],
   //     unmatched:           [{ row, oldText, newText }]   // line count drift, etc.
   //   }
@@ -189,6 +215,7 @@
     const newRows = editedAtf.split('\n');
 
     const reconstructionEdits = [];
+    const translationEdits = [];
     const witnessEdits = [];
     const unmatched = [];
 
@@ -214,6 +241,20 @@
             lineNum: entry.lineNum,
             oldContent: entry.content,
             newContent: parsed.content,
+          });
+        } else {
+          unmatched.push({ row: r, oldText: old, newText: nw });
+        }
+      } else if (entry.kind === 'translation') {
+        const parsed = parseTranslationRow(nw);
+        if (parsed) {
+          translationEdits.push({
+            lineNum: entry.lineNum,
+            oldContent: entry.content,
+            // A row this builder prefixed goes back as plain text; one the
+            // user wrote as "#tr.de: ..." keeps its prefix so the next build
+            // passes it through unchanged.
+            newContent: entry.prefixed ? parsed.content : nw.trim(),
           });
         } else {
           unmatched.push({ row: r, oldText: old, newText: nw });
@@ -249,7 +290,7 @@
       }
     }
 
-    return { reconstructionEdits, witnessEdits, unmatched };
+    return { reconstructionEdits, translationEdits, witnessEdits, unmatched };
   }
 
   // ---- Row parsers ----
@@ -262,6 +303,15 @@
     const m = row.match(/^\s*(\d+)\.\s*(.*)$/);
     if (!m) return null;
     return { lineNum: parseInt(m[1], 10), content: m[2] };
+  }
+
+  // "#tr.en: If the Yoke is high"  →  { prefix: "#tr.en: ", content: "If the Yoke is high" }
+  // The language and the "(extent)" of a multi-line translation are optional,
+  // so a hand-written "#tr.de.(2): ..." parses too.
+  function parseTranslationRow(row) {
+    const m = row.match(/^\s*(#tr(?:\.[a-z]{2})?(?:\.\([^)]*\))?:\s*)(.*)$/);
+    if (!m) return null;
+    return { prefix: m[1], content: m[2] };
   }
 
   // "  NinNA1   5'.  content"  →  { eblSiglum: "NinNA1", sourceLine: "5'", content: "content" }
@@ -316,6 +366,7 @@
     stripFormatting,
     diffArtifact,
     parseReconstructionRow,
+    parseTranslationRow,
     parseWitnessRow,
     applyWitnessEditToManuscript,
     buildEblSiglumMap,
