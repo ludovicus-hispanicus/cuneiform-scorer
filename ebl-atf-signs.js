@@ -47,6 +47,60 @@
   const LANGUAGE_SHIFT = /(^|\s)%\w+(?=\s|$)/g;
   const COLUMN_SEPARATOR = /(^|\s)&+(?=\s|$)/g;
 
+  // Strip the apparatus from a text and keep a map back to it.
+  //
+  // Same rules as clean() below, and for the same reason: brackets, damage
+  // marks and erasures record how much is known, not what is written, so a
+  // reader looking for a sequence of signs should not have to type them. What
+  // this adds is `map` — for every character of the result, where it came from
+  // in the original — so a match found in the stripped text can be highlighted
+  // and edited in the text the user actually has.
+  //
+  // Runs of spaces collapse to one; newlines are left alone, so line numbers
+  // and "^" still mean what they mean in the original.
+  function stripApparatus(text) {
+    const src = String(text == null ? '' : text);
+    const DROP = 1;
+    const SPACE = 2;
+    const marks = new Uint8Array(src.length);
+
+    function mark(re, value) {
+      const rx = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+      let m;
+      while ((m = rx.exec(src)) !== null) {
+        if (m[0].length === 0) { rx.lastIndex++; continue; }
+        for (let i = m.index; i < m.index + m[0].length; i++) marks[i] = value;
+      }
+    }
+
+    mark(STRUCTURAL, DROP);
+    mark(FLAGS, DROP);
+    mark(OMITTED, DROP);
+    mark(LANGUAGE_SHIFT, SPACE);
+    mark(COLUMN_SEPARATOR, SPACE);
+    // The sign inside stays; only the bracket goes. "(x)" is a doubtful trace
+    // and "!(KIMIN)" the sign the scribe should have written — both are read.
+    mark(/[(){}]/g, SPACE);
+
+    const out = [];
+    const map = [];
+    let lastWasSpace = false;
+    for (let i = 0; i < src.length; i++) {
+      if (marks[i] === DROP) continue;
+      let ch = marks[i] === SPACE ? ' ' : src[i];
+      if (ch === ' ' || ch === '	') {
+        if (lastWasSpace) continue;
+        ch = ' ';
+        lastWasSpace = true;
+      } else {
+        lastWasSpace = false;
+      }
+      out.push(ch);
+      map.push(i);
+    }
+    return { text: out.join(''), map };
+  }
+
   function create(index) {
     if (!index || !index.readings || !index.signs) {
       throw new Error('EblAtfSigns.create needs the table from tools/build-sign-index.js');
@@ -292,5 +346,5 @@
     return { convertLine, convertAtf, lookup, decompose, readingsOf, clean };
   }
 
-  return { create, UNKNOWN, NUMBER_PLACEHOLDER };
+  return { create, stripApparatus, UNKNOWN, NUMBER_PLACEHOLDER };
 });

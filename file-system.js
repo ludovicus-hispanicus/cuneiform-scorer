@@ -239,6 +239,26 @@ async function writeProjectFile(dirHandle, name, content) {
   return name;
 }
 
+// Which parallel candidates someone has already been through.
+// A project-level file rather than browser storage: the point of it is that
+// the next person to open the project sees what has been checked.
+async function readParallelChecks(dirHandle) {
+  try {
+    const fileHandle = await dirHandle.getFileHandle('parallels-checked.json');
+    const file = await fileHandle.getFile();
+    return JSON.parse(await file.text());
+  } catch (e) {
+    return {};
+  }
+}
+
+async function writeParallelChecks(dirHandle, checks) {
+  const fileHandle = await dirHandle.getFileHandle('parallels-checked.json', { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(JSON.stringify(checks, null, 2));
+  await writable.close();
+}
+
 // Read manuscripts.json (eBL metadata per manuscript)
 async function readManuscriptsMeta(dirHandle) {
   try {
@@ -574,6 +594,8 @@ window.FileSystem = {
   writeAnnotations,
   readManuscriptsMeta,
   writeManuscriptsMeta,
+  readParallelChecks,
+  writeParallelChecks,
   listTxtFiles,
   scanForNewManuscripts,
   initializeProject,

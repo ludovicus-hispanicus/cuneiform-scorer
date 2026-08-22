@@ -1062,7 +1062,7 @@ function renderScore() {
 
     const translation = translationLines[lineNum] || '';
 
-    html += `<div class="score-line">`;
+    html += `<div class="score-line" data-line="${lineNum}">`;
     // Translation line — it belongs to the chapter line, so it stays above
     // every reading rather than under one of them.
     html += `<div class="translation-line"><span class="translation-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(translation)}</span></div>`;
@@ -1628,7 +1628,11 @@ const parallelsState = {
   // edition, 15,224 have a 4-run, 7,187 a 5-run. Since what is being hunted is
   // broken fragments preserving short stretches, 3 is the safe default and the
   // longer settings are there for when a list comes back too noisy.
-  options: { n: 3, weighting: 'tfidf', minDocNgrams: 20 },
+  // 'all' pools every source into one query; a manuscript id queries with
+  // that source alone. Pooling is the default because the union of the
+  // witnesses is what finds *missing* ones; the single-source query is for
+  // asking which fragment resembles this one tablet in particular.
+  options: { n: 3, weighting: 'tfidf', minDocNgrams: 20, source: 'all' },
 };
 
 let signIndexPromise = null;
@@ -1808,17 +1812,29 @@ async function runParallelSweep() {
     const exclude = new Set();
     let withColophon = 0;
 
-    for (const ms of Object.values(manuscripts)) {
+    // Which sources form the query. Every project source stays in `exclude`
+    // either way — a single-source search finding a sibling that is already
+    // in the project would report the known, not the new.
+    // A source deleted since the option was set falls back to the pool
+    // rather than querying with nothing.
+    const chosen = manuscripts[parallelsState.options.source]
+      ? parallelsState.options.source : 'all';
+    const queried = [];
+
+    for (const [id, ms] of Object.entries(manuscripts)) {
       // A source is excluded from its own results under the museum number it
       // is filed as; the siglum is that number in this app's convention.
       exclude.add(ms.siglum);
+      if (chosen !== 'all' && id !== chosen) continue;
       const split = sourceToSignLines(ms.content, parallelsState.converter);
-      if (split.text) textLines.push(split.text);
+      if (split.text) { textLines.push(split.text); queried.push(ms.siglum); }
       if (split.colophon) { colophonLines.push(split.colophon); withColophon++; }
     }
 
     if (!textLines.length) {
-      parallelsState.message = 'No sources with score assignments to search with yet.';
+      parallelsState.message = chosen === 'all'
+        ? 'No sources with score assignments to search with yet.'
+        : 'That source has no score-assigned lines to search with.';
       return;
     }
 
@@ -1856,6 +1872,7 @@ async function runParallelSweep() {
       elapsed: Date.now() - started,
       scanned: entries.length,
       sources: textLines.length,
+      queried,
       withColophon,
     };
     parallelsState.message = '';
@@ -1924,6 +1941,78 @@ async function addParallelAsSource(museum) {
 
 // One ranked table for one channel. `channel` decides both the order and which
 // score the "shared" count refers to, so a row means the same thing throughout.
+// Candidates someone has already been through, keyed by museum number.
+// Read from the project folder every time the tab is drawn, so a colleague's
+// marks show up without a reload — the lists run to hundreds of fragments and
+// nobody can hold in their head which ones they have already dismissed.
+let parallelChecks = {};
+
+async function loadParallelChecks() {
+  if (!dirHandle) { parallelChecks = {}; return; }
+  try {
+    parallelChecks = (await FileSystem.readParallelChecks(dirHandle)) || {};
+  } catch (err) {
+    console.error('Could not read parallels-checked.json:', err);
+    parallelChecks = {};
+  }
+}
+
+function checkedLabel(check) {
+  if (!check) return '';
+  return `checked by ${check.by || 'someone'}, ${formatRetrieved(check.at)}`;
+}
+
+// The name is what a colleague sees, so ask for it once rather than record
+// the generated "User-a1b2" against their work.
+function checkerName() {
+  if (!/^User-/.test(currentUser.name)) return currentUser.name;
+  const given = prompt('Your name, so colleagues can see who checked this:', '');
+  if (given && given.trim()) {
+    currentUser.name = given.trim();
+    localStorage.setItem('user_name', currentUser.name);
+  }
+  return currentUser.name;
+}
+
+async function toggleParallelCheck(museum, on) {
+  if (!museum) return;
+  if (on) parallelChecks[museum] = { by: checkerName(), at: new Date().toISOString() };
+  else delete parallelChecks[museum];
+
+  // A fragment can be listed in both tables; they have to agree, and the
+  // row is updated in place so the page does not jump back to the top.
+  const label = checkedLabel(parallelChecks[museum]);
+  document.querySelectorAll(`#parallels tr[data-museum="${CSS.escape(museum)}"]`).forEach((tr) => {
+    tr.classList.toggle('is-checked', on);
+    const box = tr.querySelector('.parallels-check-box');
+    if (box) {
+      box.checked = on;
+      box.title = on ? label : 'Mark as checked';
+    }
+    const by = tr.querySelector('.parallels-checked-by');
+    if (by) by.textContent = label;
+  });
+  updateParallelsProgress();
+
+  try {
+    await FileSystem.writeParallelChecks(dirHandle, parallelChecks);
+    setStatus('connected', on ? `Marked ${museum} as checked` : `Unmarked ${museum}`);
+  } catch (err) {
+    console.error('Failed to save parallels-checked.json:', err);
+    setStatus('error', 'Could not save the check');
+  }
+}
+
+function updateParallelsProgress() {
+  document.querySelectorAll('#parallels .parallels-section').forEach((section) => {
+    const rows = section.querySelectorAll('tbody tr');
+    const counter = section.querySelector('.parallels-progress');
+    if (!counter || !rows.length) return;
+    const done = [...rows].filter((tr) => tr.classList.contains('is-checked')).length;
+    counter.textContent = `${done} of ${rows.length} checked`;
+  });
+}
+
 function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
   const ranked = rows
     .filter((r) => r.scores[channel] && r.scores[channel].shared > 0)
@@ -1933,9 +2022,12 @@ function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
 
   if (!ranked.length) return '';
 
-  let html = `<div class="parallels-section"><h3 class="parallels-section-title">${escapeHtml(title)}</h3>`;
+  const done = ranked.filter((r) => parallelChecks[r.id]).length;
+  let html = `<div class="parallels-section"><h3 class="parallels-section-title">${escapeHtml(title)}` +
+             `<span class="parallels-progress">${done} of ${ranked.length} checked</span></h3>`;
   html += `<p class="parallels-section-blurb">${escapeHtml(blurb)}</p>`;
   html += '<table class="parallels-table"><thead><tr>';
+  html += '<th class="parallels-check" title="Someone has been through this one">&#10003;</th>';
   html += '<th>#</th><th>Fragment</th>';
   html += '<th title="Shared composition — another witness">Text</th>';
   html += '<th title="Shared scribe or library — a join candidate">Colophon</th>';
@@ -1946,7 +2038,11 @@ function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
     const text = row.scores.text;
     const colophon = row.scores.colophon;
     const inProject = !!manuscripts['ms-' + row.id.toLowerCase()];
-    html += '<tr>';
+    const check = parallelChecks[row.id];
+    html += `<tr data-museum="${escapeHtml(row.id)}"${check ? ' class="is-checked"' : ''}>`;
+    html += `<td class="parallels-check"><input type="checkbox" class="parallels-check-box" ` +
+            `data-museum="${escapeHtml(row.id)}"${check ? ' checked' : ''} ` +
+            `title="${check ? escapeHtml(checkedLabel(check)) : 'Mark as checked'}"></td>`;
     html += `<td class="parallels-rank">${i + 1}</td>`;
     html += `<td><a href="https://www.ebl.lmu.de/fragmentarium/${encodeURIComponent(row.id)}" ` +
             `target="_blank" rel="noopener noreferrer">${escapeHtml(row.id)}</a>`;
@@ -1956,9 +2052,11 @@ function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
     html += `<td class="parallels-score${channel === 'colophon' ? ' parallels-score-lead' : ''}">` +
             `${colophon ? colophon.overlap.toFixed(3) : '—'}</td>`;
     html += `<td class="parallels-shared">${row.scores[channel].shared}</td>`;
-    html += '<td>' + (inProject
-      ? '<span class="parallels-have">in project</span>'
-      : `<button class="parallels-add" data-museum="${escapeHtml(row.id)}">Add as source</button>`) +
+    html += '<td>' +
+      `<span class="parallels-checked-by">${escapeHtml(checkedLabel(check))}</span>` +
+      (inProject
+        ? '<span class="parallels-have">in project</span>'
+        : `<button class="parallels-add" data-museum="${escapeHtml(row.id)}">Add as source</button>`) +
       '</td>';
     html += '</tr>';
   });
@@ -1976,6 +2074,7 @@ async function renderParallels() {
   const panel = document.getElementById('parallels');
   if (!panel) return;
 
+  await loadParallelChecks();
   const status = window.EblCorpus ? await EblCorpus.status() : { cached: false };
   const { results, running, message } = parallelsState;
 
@@ -1999,6 +2098,18 @@ async function renderParallels() {
   const opts = parallelsState.options;
   const disabled = running ? ' disabled' : '';
   html += '<div class="parallels-options">';
+  {
+    const sorted = Object.entries(manuscripts)
+      .map(([id, ms]) => ({ id, siglum: ms.siglum }))
+      .sort((a, b) => a.siglum.localeCompare(b.siglum));
+    html += `<label title="Pool every source into one query, or ask with a single tablet.">` +
+            `Search with <select id="parallels-source"${disabled}>` +
+            `<option value="all"${opts.source === 'all' ? ' selected' : ''}>All sources</option>` +
+            sorted.map((m) =>
+              `<option value="${escapeHtml(m.id)}"${opts.source === m.id ? ' selected' : ''}>` +
+              `${escapeHtml(m.siglum)}</option>`).join('') +
+            '</select></label>';
+  }
   html += `<label title="How many consecutive signs must agree. Longer is stricter: ` +
           `at 3 some 26,000 fragments share something with this edition, at 5 only 7,000.">` +
           `Sign run <select id="parallels-n"${disabled}>` +
@@ -2019,8 +2130,10 @@ async function renderParallels() {
   if (results) {
     const { dropped, settings, total } = results;
     html += '<div class="parallels-summary">';
-    html += `Ranked ${results.scanned.toLocaleString()} fragments against ${results.sources} ` +
-            `source${results.sources === 1 ? '' : 's'}`;
+    html += `Ranked ${results.scanned.toLocaleString()} fragments against ` +
+            (results.queried && results.queried.length === 1
+              ? `${escapeHtml(results.queried[0])} alone`
+              : `${results.sources} source${results.sources === 1 ? '' : 's'}`);
     html += results.withColophon
       ? ` (${results.withColophon} with a colophon, scored separately)`
       : ' (no colophons found, so only the text channel was scored)';
@@ -2087,11 +2200,15 @@ async function renderParallels() {
       renderParallels();
     });
   };
+  onOption('parallels-source', (v) => { parallelsState.options.source = v; });
   onOption('parallels-n', (v) => { parallelsState.options.n = Number(v); });
   onOption('parallels-weighting', (v) => { parallelsState.options.weighting = v; });
   onOption('parallels-floor', (v) => { parallelsState.options.minDocNgrams = Number(v); });
   panel.querySelectorAll('.parallels-add').forEach((btn) => {
     btn.addEventListener('click', () => addParallelAsSource(btn.dataset.museum));
+  });
+  panel.querySelectorAll('.parallels-check-box').forEach((box) => {
+    box.addEventListener('change', () => toggleParallelCheck(box.dataset.museum, box.checked));
   });
 }
 
@@ -3082,6 +3199,7 @@ function setupSearchAll() {
   const replaceAllBtn = document.getElementById('replace-all-btn');
   const regexCheckbox = document.getElementById('search-regex');
   const caseCheckbox = document.getElementById('search-case');
+  const stripCheckbox = document.getElementById('search-strip');
   const resultsContainer = document.getElementById('search-results');
 
   // Track current search results and selected match
@@ -3168,60 +3286,177 @@ function setupSearchAll() {
     searchTimeout = setTimeout(() => performSearch(), 200);
   });
 
-  regexCheckbox.addEventListener('change', performSearch);
-  caseCheckbox.addEventListener('change', performSearch);
+  regexCheckbox.addEventListener('change', () => performSearch());
+  caseCheckbox.addEventListener('change', () => performSearch());
+  stripCheckbox.addEventListener('change', () => performSearch());
 
   // Update button states when search input changes
   function updateReplaceButtons() {
     const hasQuery = searchInput.value.length > 0;
     const hasResults = currentResults.length > 0;
-    replaceBtn.disabled = !hasQuery || !hasResults || selectedResultIndex < 0;
-    replaceAllBtn.disabled = !hasQuery || !hasResults;
+    // Replace is off while the apparatus is ignored. A match found in the
+    // stripped text spans the brackets that were dropped inside it, so writing
+    // over it would leave an unbalanced brace or bracket in the source.
+    const canReplace = hasQuery && hasResults && !stripping();
+    replaceBtn.disabled = !canReplace || selectedResultIndex < 0;
+    replaceAllBtn.disabled = !canReplace;
   }
 
   searchInput.addEventListener('input', updateReplaceButtons);
 
-  // Replace single match (the selected one)
+  // One regex for all three paths below, so the preview, Replace and Replace
+  // All can never disagree about what the pattern means. The "m" is the point:
+  // without it "^" anchors to the start of the whole file, which is why an
+  // anchored Replace All used to list matches and then change nothing.
+  function stripping() {
+    return stripCheckbox.checked && !!window.EblAtfSigns;
+  }
+
+  function buildRegex() {
+    const query = searchInput.value;
+    // A regex is left exactly as typed: stripping it would eat the brackets
+    // and quantifiers it is made of. It still runs against the stripped text,
+    // which is what ignoring the apparatus means for a pattern.
+    if (regexCheckbox.checked) {
+      return new RegExp(query, caseCheckbox.checked ? 'gm' : 'gmi');
+    }
+    // A plain search is stripped the way the text is, so that what the user
+    // typed and what they are looking at are compared on equal terms.
+    const plain = stripping()
+      ? EblAtfSigns.stripApparatus(query).text.trim()
+      : query;
+    if (!plain) return null;
+    return new RegExp(plain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      caseCheckbox.checked ? 'gm' : 'gmi');
+  }
+
+  // What String.replace would put in place of one match. Replace acts on a
+  // single occurrence addressed by offset, so the native expansion of "$1" and
+  // its relatives is not available to it and has to be done here.
+  function expandReplacement(tpl, m, offset, whole) {
+    return tpl.replace(/\$(\$|&|`|'|<[^>]*>|\d{1,2})/g, (token, what) => {
+      if (what === '$') return '$';
+      if (what === '&') return m[0];
+      if (what === '`') return whole.slice(0, offset);
+      if (what === "'") return whole.slice(offset + m[0].length);
+      if (what[0] === '<') {
+        const name = what.slice(1, -1);
+        return (m.groups && m.groups[name] !== undefined) ? m.groups[name] : '';
+      }
+      const n = parseInt(what, 10);
+      if (n >= 1 && n < m.length) return m[n] === undefined ? '' : m[n];
+      // "$12" against one group means group 1 followed by a literal "2".
+      if (what.length === 2) {
+        const first = parseInt(what[0], 10);
+        if (first >= 1 && first < m.length) {
+          return (m[first] === undefined ? '' : m[first]) + what[1];
+        }
+      }
+      return token;
+    });
+  }
+
+  // Where every line of a string starts, so a match offset can be turned into a
+  // line number without walking the text again for each match.
+  function lineStartsOf(text) {
+    const starts = [0];
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\n') starts.push(i + 1);
+    }
+    return starts;
+  }
+
+  function lineIndexOf(starts, offset) {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  // The match shown with the whole of every line it touches, so a hit that
+  // spans lines reads as what it is rather than as a fragment.
+  function excerptFor(content, starts, match) {
+    const from = starts[match.lineIndex];
+    const to = starts[match.endLineIndex + 1] !== undefined
+      ? starts[match.endLineIndex + 1] - 1
+      : content.length;
+    const text = content.slice(from, to);
+    const a = match.start - from;
+    const b = match.end - from;
+    const html = escapeHtml(text.slice(0, a))
+      + '<span class="search-match">' + escapeHtml(text.slice(a, b)) + '</span>'
+      + escapeHtml(text.slice(b));
+    return html.replace(/\n/g, '<br>');
+  }
+
+  // Both destinations close the dialog: neither is visible behind it.
+  function openSourceAt(id, line) {
+    modal.classList.add('hidden');
+    loadManuscript(id);
+    if (aceEditor && line) {
+      aceEditor.gotoLine(line, 0, true);
+      aceEditor.focus();
+    }
+  }
+
+  // The score is the synoptic view of every source, so a § can be shown
+  // without loading the manuscript the result came from.
+  function openScoreEntry(sec) {
+    modal.classList.add('hidden');
+    const tab = document.querySelector('.pane-tab[data-tab="score"]');
+    if (tab && !tab.classList.contains('active')) tab.click();
+    const el = document.querySelector(`.score-line[data-line="${sec}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('score-line-found');
+    setTimeout(() => el.classList.remove('score-line-found'), 1400);
+  }
+
+  function selectResultAt(index) {
+    const items = resultsContainer.querySelectorAll('.search-result-item');
+    if (items.length === 0) {
+      selectedResultIndex = -1;
+      updateReplaceButtons();
+      return;
+    }
+    const clamped = Math.max(0, Math.min(index, items.length - 1));
+    items.forEach((item) => item.classList.remove('selected'));
+    const el = items[clamped];
+    el.classList.add('selected');
+    el.scrollIntoView({ block: 'nearest' });
+    selectedResultIndex = clamped;
+    updateReplaceButtons();
+  }
+
+  // Replace the selected match. Addressed by offset rather than by line, so a
+  // pattern that spans lines is replaced the same as one that does not.
   replaceBtn.addEventListener('click', () => {
     if (selectedResultIndex < 0 || currentResults.length === 0) return;
 
-    const replacement = replaceInput.value;
-    const query = searchInput.value;
-    const useRegex = regexCheckbox.checked;
-    const caseSensitive = caseCheckbox.checked;
-
-    // Find the selected result
     let flatIndex = 0;
     for (const group of currentResults) {
       for (const match of group.matches) {
         if (flatIndex === selectedResultIndex) {
-          // Save undo state before replacing
           saveUndoState([group.id], `Replace in ${group.id}`);
 
-          // Replace in this manuscript
           const ms = manuscripts[group.id];
-          const lines = ms.content.split('\n');
+          const text = expandReplacement(
+            replaceInput.value, match.m, match.start, ms.content);
+          ms.content = ms.content.slice(0, match.start) + text
+            + ms.content.slice(match.end);
 
-          let regex;
-          if (useRegex) {
-            regex = new RegExp(query, caseSensitive ? '' : 'i');
-          } else {
-            const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            regex = new RegExp(escaped, caseSensitive ? '' : 'i');
-          }
+          if (group.id === activeManuscript) setEditorContent(ms.content);
 
-          lines[match.lineNum - 1] = lines[match.lineNum - 1].replace(regex, replacement);
-          ms.content = lines.join('\n');
-
-          // Update editor if this is the active manuscript
-          if (group.id === activeManuscript) {
-            setEditorContent(ms.content);
-          }
-
-          // Save and re-render
           saveToFile(group.id);
           renderScore();
-          performSearch(); // Refresh results
+          // Hold the place in the list. Every offset after this one has moved,
+          // so the slot that was selected now holds the next match — which is
+          // what a second click on Replace should act on.
+          performSearch(selectedResultIndex);
           return;
         }
         flatIndex++;
@@ -3235,31 +3470,30 @@ function setupSearchAll() {
 
     const replacement = replaceInput.value;
     const query = searchInput.value;
-    const useRegex = regexCheckbox.checked;
-    const caseSensitive = caseCheckbox.checked;
-
-    let regex;
-    if (useRegex) {
-      regex = new RegExp(query, caseSensitive ? 'g' : 'gi');
-    } else {
-      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      regex = new RegExp(escaped, caseSensitive ? 'g' : 'gi');
-    }
 
     // Save undo state for all affected manuscripts
-    const affectedIds = currentResults.map(g => g.id);
+    const affectedIds = currentResults.map((g) => g.id);
     saveUndoState(affectedIds, `Replace all: "${query}" → "${replacement}"`);
 
     let totalReplaced = 0;
 
-    // Replace in all manuscripts with matches
     for (const group of currentResults) {
       const ms = manuscripts[group.id];
       const before = ms.content;
-      ms.content = ms.content.replace(regex, replacement);
+      // Spliced from the listed matches rather than by re-running the regex,
+      // so this and the single Replace act on exactly what the list shows.
+      // Back to front, so the offsets ahead of each splice stay valid.
+      let text = before;
+      for (let i = group.matches.length - 1; i >= 0; i--) {
+        const mt = group.matches[i];
+        text = text.slice(0, mt.start)
+          + expandReplacement(replacement, mt.m, mt.start, before)
+          + text.slice(mt.end);
+      }
+      ms.content = text;
 
       if (ms.content !== before) {
-        totalReplaced += group.matches.length;
+        totalReplaced += group.matches.length;  // one entry per occurrence now
         saveToFile(group.id);
       }
     }
@@ -3275,7 +3509,12 @@ function setupSearchAll() {
     alert(`Replaced ${totalReplaced} occurrence(s)`);
   });
 
-  function performSearch() {
+  // preserveIndex holds the selection across a replace. Without it the
+  // selection reset to -1 and the Replace button greyed itself out after every
+  // single use. It is ignored unless it is a number, because the checkbox
+  // listeners call this with an event.
+  function performSearch(preserveIndex) {
+    const keep = typeof preserveIndex === 'number' ? preserveIndex : 0;
     const query = searchInput.value;
     if (!query) {
       currentResults = [];
@@ -3285,17 +3524,16 @@ function setupSearchAll() {
       return;
     }
 
-    const useRegex = regexCheckbox.checked;
-    const caseSensitive = caseCheckbox.checked;
-
     let regex;
     try {
-      if (useRegex) {
-        regex = new RegExp(query, caseSensitive ? 'g' : 'gi');
-      } else {
-        // Escape special regex chars for literal search
-        const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        regex = new RegExp(escaped, caseSensitive ? 'g' : 'gi');
+      regex = buildRegex();
+      if (!regex) {
+        currentResults = [];
+        selectedResultIndex = -1;
+        updateReplaceButtons();
+        resultsContainer.innerHTML =
+          '<div class="search-empty">Nothing left to search for once the apparatus is removed</div>';
+        return;
       }
     } catch (e) {
       currentResults = [];
@@ -3308,23 +3546,52 @@ function setupSearchAll() {
     const results = [];
     let totalMatches = 0;
 
-    // Search all manuscripts
+    // Matched against the whole source rather than line by line: a pattern may
+    // span lines, and "^" has to mean here what it means in Replace All.
+    const strip = stripping();
     for (const [id, ms] of Object.entries(manuscripts)) {
-      const lines = ms.content.split('\n');
+      const content = ms.content;
+      const starts = lineStartsOf(content);
+      // Searched with the apparatus removed, but every offset is mapped back,
+      // so what is listed, highlighted and replaced is the text as it stands.
+      const stripped = strip ? EblAtfSigns.stripApparatus(content) : null;
+      const subject = stripped ? stripped.text : content;
       const matches = [];
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        regex.lastIndex = 0; // Reset regex state
-        if (regex.test(line)) {
-          regex.lastIndex = 0;
-          matches.push({
-            lineNum: i + 1,
-            content: line,
-            highlighted: highlightMatches(line, regex)
-          });
-          totalMatches++;
-        }
+      regex.lastIndex = 0;
+      let m;
+      while ((m = regex.exec(subject)) !== null) {
+        // A zero-length match never advances lastIndex on its own.
+        if (m[0].length === 0) { regex.lastIndex++; continue; }
+
+        // The end is taken from the last matched character rather than the
+        // one after it, so apparatus sitting just past the match is not
+        // swallowed by a replacement.
+        const start = stripped ? stripped.map[m.index] : m.index;
+        const end = stripped
+          ? stripped.map[m.index + m[0].length - 1] + 1
+          : m.index + m[0].length;
+
+        const match = {
+          m,
+          start,
+          end,
+          lineIndex: lineIndexOf(starts, start),
+          endLineIndex: lineIndexOf(starts, end - 1),
+        };
+        match.lineNum = match.lineIndex + 1;
+        match.endLineNum = match.endLineIndex + 1;
+        match.highlighted = excerptFor(content, starts, match);
+        // The § this line is assigned to, so the result can link to the
+        // score as well as to the source. Read from the line itself rather
+        // than from the parse, which the search does not run.
+        const lineEnd = starts[match.lineIndex + 1] !== undefined
+          ? starts[match.lineIndex + 1] - 1
+          : content.length;
+        const sec = content.slice(starts[match.lineIndex], lineEnd).match(/^\s*§(\d+)/);
+        match.sec = sec ? sec[1] : null;
+        matches.push(match);
+        totalMatches++;
       }
 
       if (matches.length > 0) {
@@ -3347,7 +3614,10 @@ function setupSearchAll() {
       return;
     }
 
-    let html = `<div class="search-count">${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${results.length} manuscript${results.length !== 1 ? 's' : ''}</div>`;
+    const stripNote = strip
+      ? ' &middot; apparatus ignored &mdash; untick to replace'
+      : '';
+    let html = `<div class="search-count">${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${results.length} manuscript${results.length !== 1 ? 's' : ''}${stripNote}</div>`;
 
     let flatIndex = 0;
     for (const group of results) {
@@ -3355,8 +3625,15 @@ function setupSearchAll() {
       html += `<div class="search-result-header" data-id="${group.id}">${escapeHtml(group.siglum)} (${group.matches.length})</div>`;
 
       for (const match of group.matches) {
+        const label = match.endLineNum > match.lineNum
+          ? `${match.lineNum}-${match.endLineNum}`
+          : `${match.lineNum}`;
+        const where = `${escapeHtml(group.siglum)} line ${label}`;
         html += `<div class="search-result-item" data-id="${group.id}" data-line="${match.lineNum}" data-index="${flatIndex}">`;
-        html += `<span class="search-result-line">${match.lineNum}:</span>`;
+        html += `<a class="search-result-line" href="#" data-nav="source" title="Open ${where}">${label}</a>`;
+        html += match.sec
+          ? `<a class="search-result-sec" href="#" data-nav="score" data-sec="${match.sec}" title="Show § ${match.sec} in the score">§${match.sec}</a>`
+          : `<span class="search-result-sec search-result-sec-none"></span>`;
         html += match.highlighted;
         html += `</div>`;
         flatIndex++;
@@ -3366,47 +3643,29 @@ function setupSearchAll() {
     }
 
     resultsContainer.innerHTML = html;
-    updateReplaceButtons();
 
-    // Add click handlers for results
+    // A click on one of the row's links goes there; a click anywhere else
+    // in the row selects it, which is what Replace acts on.
     resultsContainer.querySelectorAll('.search-result-item').forEach(el => {
       el.addEventListener('click', (e) => {
-        // Update selection
-        resultsContainer.querySelectorAll('.search-result-item').forEach(item => {
-          item.classList.remove('selected');
-        });
-        el.classList.add('selected');
-        selectedResultIndex = parseInt(el.dataset.index);
-        updateReplaceButtons();
-
-        // If double-click or Ctrl+click, navigate to the result
-        if (e.ctrlKey || e.detail === 2) {
-          const id = el.dataset.id;
-          const line = parseInt(el.dataset.line) || 1;
-          loadManuscript(id);
-          aceEditor.gotoLine(line, 0, true);
-          aceEditor.focus();
-          modal.classList.add('hidden');
+        const link = e.target.closest('a[data-nav]');
+        if (link) {
+          e.preventDefault();
+          if (link.dataset.nav === 'score') openScoreEntry(link.dataset.sec);
+          else openSourceAt(el.dataset.id, parseInt(el.dataset.line, 10));
+          return;
         }
+        selectResultAt(parseInt(el.dataset.index, 10));
       });
     });
 
-    // Header click navigates to manuscript
+    // The siglum opens the source itself
     resultsContainer.querySelectorAll('.search-result-header').forEach(el => {
-      el.addEventListener('click', () => {
-        const id = el.dataset.id;
-        loadManuscript(id);
-        aceEditor.focus();
-        modal.classList.add('hidden');
-      });
+      el.addEventListener('click', () => openSourceAt(el.dataset.id, 0));
     });
-  }
 
-  function highlightMatches(text, regex) {
-    regex.lastIndex = 0;
-    return escapeHtml(text).replace(new RegExp(regex.source, regex.flags), match =>
-      `<span class="search-match">${match}</span>`
-    );
+    // Something is always current, so Replace is never a dead button.
+    selectResultAt(keep);
   }
 }
 

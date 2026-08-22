@@ -818,6 +818,39 @@ body {
   font-style: italic;
 }
 
+/* Already been through. The row stays legible — a dismissed candidate is
+   still evidence, and the next person may disagree with the dismissal. */
+.parallels-table tr.is-checked {
+  opacity: 0.55;
+}
+
+.parallels-table tr.is-checked:hover {
+  opacity: 1;
+}
+
+.parallels-check {
+  width: 1.8rem;
+  text-align: center;
+}
+
+.parallels-check-box {
+  cursor: pointer;
+}
+
+.parallels-checked-by {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: italic;
+  margin-right: 0.5rem;
+}
+
+.parallels-progress {
+  margin-left: 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
 .parallels-add {
   padding: 0.15rem 0.5rem;
   cursor: pointer;
@@ -826,6 +859,17 @@ body {
 
 .score-line {
   margin-bottom: 1.25rem;
+}
+
+/* Arrived at from a search result: says where you landed, then gets out of
+   the way. */
+.score-line-found {
+  animation: score-line-found 1.4s ease-out;
+}
+
+@keyframes score-line-found {
+  from { background: var(--accent-light); }
+  to { background: transparent; }
 }
 
 /* Translation line */
@@ -1443,10 +1487,33 @@ body.dark-mode .reconstructed-text:empty::before {
   border-left-color: var(--accent);
 }
 
-.search-result-line {
-  color: var(--text-muted);
+/* A result carries two links: the line in its source, and the § it is
+   assigned to in the score. */
+.search-result-line,
+.search-result-sec {
+  color: var(--accent);
+  text-decoration: none;
   font-size: 0.8rem;
   margin-right: 0.5rem;
+  flex-shrink: 0;
+}
+
+.search-result-line:hover,
+.search-result-sec:hover,
+.search-result-line:focus,
+.search-result-sec:focus {
+  text-decoration: underline;
+}
+
+/* Keeps the text of every row starting at the same column when a line has
+   no § of its own — a colophon line, a continuation. */
+.search-result-sec-none {
+  display: inline-block;
+  width: 2.5rem;
+}
+
+.search-result-header:hover {
+  text-decoration: underline;
 }
 
 .search-match {
