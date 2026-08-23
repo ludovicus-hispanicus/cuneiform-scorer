@@ -5,6 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Manuscript Scorer</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <!-- File System API -->
   <script src="file-system.js"></script>
@@ -37,6 +38,12 @@
   <header class="header">
     <div class="header-left">
       <a href="index.html" class="back-link">&larr;</a>
+      <svg class="app-mark" width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="7" fill="rgba(255,255,255,0.92)"/>
+        <text x="16" y="23.5" text-anchor="middle"
+              font-family="Georgia, 'Spectral', 'Times New Roman', serif"
+              font-size="24" font-weight="600" fill="#4a6fa5">§</text>
+      </svg>
       <h1 id="project-title">Manuscript Scorer</h1>
     </div>
     <div class="header-actions">
@@ -97,14 +104,15 @@
             <button class="pane-tab active" data-tab="score">Score</button>
             <button class="pane-tab" data-tab="colophons">Colophons</button>
             <button class="pane-tab" data-tab="parallels">Parallels</button>
+            <button class="pane-tab" data-tab="paradigms">Paradigms</button>
             <button class="pane-tab" data-tab="images">Images</button>
           </div>
           <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
         </div>
-        <div id="type-legend" class="type-legend"></div>
         <div id="score" class="score tab-content active" data-tab="score"></div>
         <div id="colophons" class="score tab-content" data-tab="colophons"></div>
         <div id="parallels" class="score tab-content" data-tab="parallels"></div>
+        <div id="paradigms-tab" class="score tab-content" data-tab="paradigms"></div>
         <div id="images-tab" class="tab-content" data-tab="images">
           <div id="images-grid" class="images-grid">
             <div class="images-empty">No images for this source.</div>
@@ -162,6 +170,7 @@
             </div>
           </div>
         </div>
+        <div id="tablet-view" class="score tab-content" data-tab="tablet"></div>
       </div>
     </section>
   </main>
@@ -175,6 +184,10 @@
       </div>
       <div class="search-input-row">
         <input type="text" id="search-input" placeholder="Search pattern..." autofocus>
+        <select id="search-scope" title="What to search: every source file, or the reconstructed composite text alone">
+          <option value="sources">All sources</option>
+          <option value="composite">Composite text</option>
+        </select>
         <label class="regex-toggle">
           <input type="checkbox" id="search-regex"> Regex
         </label>
@@ -184,6 +197,10 @@
         <label class="regex-toggle"
                title="Search the signs alone: brackets, half brackets, damage and collation marks, erasures, determinative and parenthesis braces are ignored on both sides">
           <input type="checkbox" id="search-strip" checked> Ignore [ ] # ?
+        </label>
+        <label class="regex-toggle"
+               title="Match by sign rather than by reading, as eBL does: dele-bat finds DIL.BAD, since both write the same signs">
+          <input type="checkbox" id="search-signs"> Signs
         </label>
       </div>
       <div class="replace-row">

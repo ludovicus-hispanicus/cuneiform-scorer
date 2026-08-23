@@ -77,6 +77,16 @@
     });
   }
 
+  async function idbDelete(store, key) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
   async function idbClear(store) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
@@ -185,7 +195,9 @@
   async function getAtf(museumNumber, { forceRefresh = false } = {}) {
     if (!forceRefresh) {
       const hit = await idbGet(STORE_ATF, museumNumber);
-      if (hit) return { ...hit, fromCache: true };
+      // Records cached before references/metadata were kept are refetched
+      // once; the field's presence is the version marker.
+      if (hit && hit.references !== undefined) return { ...hit, fromCache: true };
     }
     const res = await fetch(`${apiUrl()}/fragments/${encodeURIComponent(museumNumber)}`, {
       headers: { Accept: 'application/json' },
@@ -202,6 +214,15 @@
       genres: frag.genres || [],
       script: frag.script || null,
       joins: frag.joins || [],
+      museum: frag.museum || '',
+      collection: frag.collection || '',
+      accession: frag.accession || null,
+      length: frag.length || null,
+      width: frag.width || null,
+      thickness: frag.thickness || null,
+      archaeology: frag.archaeology || null,
+      notes: (frag.notes && frag.notes.text) || '',
+      references: frag.references || [],
       fetched: new Date().toISOString(),
     };
     await idbPut(STORE_ATF, museumNumber, record);
@@ -214,11 +235,25 @@
     await idbClear(STORE_ATF);
   }
 
+  // A generic per-key stash on the same database, for state that should
+  // survive a reload — sweep results and the like. Values go through
+  // structured clone, so Sets and Maps are fine.
+  async function stash(key, value) {
+    if (value === undefined) return idbDelete(STORE_META, 'stash:' + key);
+    return idbPut(STORE_META, 'stash:' + key, value);
+  }
+
+  async function unstash(key) {
+    return idbGet(STORE_META, 'stash:' + key);
+  }
+
   window.EblCorpus = {
     status,
     load,
     refresh,
     getAtf,
     clear,
+    stash,
+    unstash,
   };
 })();

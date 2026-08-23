@@ -771,7 +771,9 @@ const server = http.createServer((req, res) => {
         res.end('Server error');
       }
     } else {
-      res.writeHead(200, { 'Content-Type': contentType });
+      // no-cache: the browser revalidates on every load, so edits to the
+      // app's files show up on a plain refresh instead of only on Ctrl+F5.
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache' });
       res.end(content);
     }
   });

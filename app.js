@@ -887,6 +887,7 @@ function parseManuscript(siglum, text) {
     // Check for surface markers (with @ prefix)
     if (/^@(obverse|reverse|edge|left edge|right edge|top|bottom|colophon)/i.test(trimmed)) {
       currentSurface = trimmed.substring(1).toLowerCase();
+      lastEntry = null;   // a "//" just after a surface change belongs to nothing
       continue;
     }
 
@@ -986,6 +987,14 @@ function parseManuscript(siglum, text) {
 
     // Also support old format: §[target] [source]. with non-numeric source
     const oldMatch = trimmed.match(/^§(\d+)([a-z]?)\s+([^.]+)\.\s*(.*)$/);
+    if (!oldMatch && trimmed) {
+      // A line the parser does not know — most often a transliteration line
+      // with no § assignment yet. Whatever hangs under it ("//" parallels,
+      // continuations) belongs to it, not to the last assigned entry above,
+      // so the adjacency chain is broken here. Blank lines stay neutral.
+      lastEntry = null;
+      continue;
+    }
     if (oldMatch) {
       const targetLine = parseInt(oldMatch[1], 10);
       const sourceLine = oldMatch[3].trim();
@@ -1641,10 +1650,185 @@ const parallelsState = {
   // that source alone. Pooling is the default because the union of the
   // witnesses is what finds *missing* ones; the single-source query is for
   // asking which fragment resembles this one tablet in particular.
-  options: { n: 3, weighting: 'tfidf', minDocNgrams: 20, source: 'all' },
+  options: { n: 3, weighting: 'tfidf', minDocNgrams: 20, source: 'all', range: '' },
 };
 
 let signIndexPromise = null;
+
+// ana/a-na and ina/i-na are the same words under different writings — one
+// sign as a logogram, two written syllabically — and a search for either
+// should find both. Only these two: they are ubiquitous prepositions, and a
+// blanket rule would equate readings that genuinely differ. Boundaries are
+// word boundaries — the preposition is always a word of its own, and inside
+// a hyphenated word "i-na" is just the signs I and NA, not the preposition.
+function prepositionVariants(text) {
+  const B = '([\\s{}]|^)';
+  const A = '(?=[\\s{}]|$)';
+  const toLogogram = String(text)
+    .replace(new RegExp(B + 'a-na' + A, 'gi'), '$1ana')
+    .replace(new RegExp(B + 'i-na' + A, 'gi'), '$1ina');
+  const toSyllabic = String(text)
+    .replace(new RegExp(B + 'ana' + A, 'gi'), '$1a-na')
+    .replace(new RegExp(B + 'ina' + A, 'gi'), '$1i-na');
+  const out = [];
+  if (toLogogram !== text) out.push(toLogogram);
+  if (toSyllabic !== text) out.push(toSyllabic);
+  return out;
+}
+
+// The composite text as one searchable document: "§N reading" per line,
+// variant readings with their letters. Regenerated per search — it is the
+// live state of the score, not a file.
+function compositeSearchDoc() {
+  const nums = new Set(Object.keys(reconstructedLines).map(Number));
+  for (const key of Object.keys(variantLines || {})) nums.add(Number(key));
+  const sorted = [...nums].filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+  const lines = [];
+  for (const n of sorted) {
+    variantsFor(n).forEach((reading, vi) => {
+      if (reading.text && reading.text.trim()) {
+        lines.push('§' + n + (vi ? variantLetterOf(vi) : '') + ' ' + reading.text);
+      }
+    });
+  }
+  return lines.join('\n');
+}
+
+// The query range, in either coordinate system:
+//   "35-60", "§35–§60", "40"      -> a chapter-line range
+//   "o 59", "r 12'", "obv 3"      -> one tablet line (surface + number)
+//   "59'"                          -> one primed tablet line, any surface
+// Empty -> null (all lines). Anything else -> { error } — never a silent
+// "all": a range the parser cannot read must refuse, not pretend.
+function parseSecRange(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  const sec = raw.match(/^§?\s*(\d+)\s*(?:[-–—]\s*§?\s*(\d+))?$/);
+  if (sec) {
+    const from = parseInt(sec[1], 10);
+    const to = sec[2] ? parseInt(sec[2], 10) : from;
+    return { kind: 'sec', from: Math.min(from, to), to: Math.max(from, to) };
+  }
+
+  const SURFACES = {
+    o: 'o', obv: 'o', obverse: 'o', r: 'r', rev: 'r', reverse: 'r',
+    t: 't', top: 't', b: 'b', bottom: 'b', e: 'e', edge: 'e', col: 'col',
+  };
+  const tab = raw.match(/^([a-z.]+)?\s*(\d+['’]?[a-z]?)$/i);
+  if (tab) {
+    const surface = tab[1] ? SURFACES[tab[1].toLowerCase().replace(/\.$/, '')] : '';
+    if (tab[1] && !surface) return { error: raw };
+    // A primed number can only be a tablet line; an unprimed one without a
+    // surface was already taken as a § above.
+    if (surface || /['’]/.test(tab[2])) {
+      return { kind: 'tablet', surface: surface || '', num: tab[2].replace('’', "'") };
+    }
+  }
+  return { error: raw };
+}
+
+// A composite reading minus the editor's apparatus: "(var.: ...)" notes,
+// optional complements "(-ir)", and ellipses "(…)". They are commentary on
+// the text, not signs of it, and converting them splices phantom signs into
+// the query stream.
+function stripEditorialApparatus(text) {
+  return String(text || '')
+    .replace(/\(\s*var\.[^)]*\)/gi, ' ')
+    .replace(/\(\s*(?:…|\.\.\.)\s*\)/g, ' ')
+    .replace(/\(-[^)]*\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// The composite document as sign lines for the sweep, refs "§N" / "§Nb".
+function compositeToSignLines(converter, doc, range) {
+  const signs = [];
+  const refs = [];
+  const texts = [];
+  for (const line of String(doc).split('\n')) {
+    const m = line.match(/^(§\d+[a-z]?)\s+(.*)$/);
+    if (!m) continue;
+    if (range) {
+      const sec = parseInt(m[1].slice(1), 10);
+      if (sec < range.from || sec > range.to) continue;
+    }
+    const converted = converter.convertLine(stripEditorialApparatus(m[2]));
+    if (converted.codes.length) {
+      signs.push(converted.codes.join(' '));
+      refs.push(m[1]);
+      texts.push(m[2]);
+    }
+  }
+  return { signs: signs.join('\n'), refs, texts };
+}
+
+// What of the parallels workspace is remembered across reloads: the sweep's
+// results (they are minutes of ranking and a corpus pass), which lines views
+// stand open, and which tablets are open in tabs. Checked marks live in the
+// project folder already; this is the browser-side working state, per
+// project.
+const parallelsOpenLines = new Set();   // "channel|museum"
+
+function saveParallelsResults() {
+  if (!window.EblCorpus || !projectId) return;
+  EblCorpus.stash('parallels-results:' + projectId,
+    parallelsState.results || undefined).catch(() => {});
+}
+
+function saveParallelsUi() {
+  if (!window.EblCorpus || !projectId) return;
+  EblCorpus.stash('parallels-ui:' + projectId, {
+    options: { ...parallelsState.options },
+    openLines: [...parallelsOpenLines],
+    openTablets: [...openTablets.keys()],
+  }).catch(() => {});
+}
+
+let parallelsRestoreTried = false;
+async function restoreParallelsState() {
+  if (parallelsRestoreTried || !window.EblCorpus || !projectId) return false;
+  parallelsRestoreTried = true;
+  try {
+    const ui = await EblCorpus.unstash('parallels-ui:' + projectId);
+    if (ui) {
+      if (ui.options) Object.assign(parallelsState.options, ui.options);
+      for (const key of ui.openLines || []) parallelsOpenLines.add(key);
+      // Tabs come back quietly: fetched from the cache, not activated, so a
+      // reload does not steal the user away from the score.
+      for (const museum of ui.openTablets || []) {
+        EblCorpus.getAtf(museum)
+          .then((frag) => { openTablets.set(museum, frag); renderTabletTabs(); })
+          .catch(() => {});
+      }
+    }
+    const results = await EblCorpus.unstash('parallels-results:' + projectId);
+    if (results) {
+      parallelsState.results = results;
+      // The KWIC needs the converter; warm it so restored views highlight.
+      ensureAtfConverter().catch(() => {});
+      return true;
+    }
+  } catch (err) {
+    console.error('Could not restore the parallels state:', err);
+  }
+  return false;
+}
+
+// The ATF->signs converter, shared between the parallels sweep and the sign
+// search; whichever needs it first builds it, the other reuses it.
+let atfConverterPromise = null;
+function ensureAtfConverter() {
+  if (parallelsState.converter) return Promise.resolve(parallelsState.converter);
+  if (!atfConverterPromise) {
+    atfConverterPromise = loadSignIndex().then((index) => {
+      parallelsState.signIndex = index;
+      parallelsState.converter = EblAtfSigns.create(index);
+      return parallelsState.converter;
+    });
+  }
+  return atfConverterPromise;
+}
 
 // The sign table is 800 KB and only this feature needs it, so it is fetched on
 // first use rather than at page load.
@@ -1671,9 +1855,18 @@ function loadSignIndex() {
 // colophon boundary is exact because this file is where @colophon is written.
 // The cost is that conversion is ~94% line-accurate against eBL's own parser
 // rather than authoritative — which trigram overlap absorbs comfortably.
-function sourceToSignLines(content, converter) {
+function sourceToSignLines(content, converter, range) {
   const text = [];
   const colophon = [];
+  const textRefs = [];
+  const colophonRefs = [];
+  const textBodies = [];
+  const colophonBodies = [];
+  const SURFACE_ABBR = {
+    'obverse': 'o', 'reverse': 'r', 'edge': 'e', 'left edge': 'l.e.',
+    'right edge': 'r.e.', 'top': 't', 'bottom': 'b',
+  };
+  let surface = '';
   let inColophon = false;
 
   for (const raw of String(content || '').split('\n')) {
@@ -1681,21 +1874,53 @@ function sourceToSignLines(content, converter) {
     if (!line) continue;
 
     if (/^@colophon/i.test(line)) { inColophon = true; continue; }
+    const at = line.match(/^@(obverse|reverse|edge|left edge|right edge|top|bottom)/i);
+    if (at) { surface = SURFACE_ABBR[at[1].toLowerCase()] || ''; continue; }
     if (/^@/.test(line)) continue;              // another surface
     if (/^(\/\/|#|\$)/.test(line)) continue;    // parallel, note, directive
 
     // "§12 7. text" in the score, or a plain "7. text" inside a colophon.
-    const scored = line.match(/^§\d+\s+(.*)$/);
-    const body = scored ? scored[1] : line;
-    if (!/^\d+['’]?[a-z]?\.\s/.test(body)) continue;
+    const scored = line.match(/^§(\d+)([a-z]?)\s+(.*)$/);
+    const body = scored ? scored[3] : line;
+    const num = body.match(/^(\d+['’]?[a-z]?)\.\s/);
+    if (!num) continue;
+    // The range restricts the text channel only; colophon lines carry no §
+    // and answer a different question.
+    if (range && !inColophon && !range.error) {
+      if (range.kind === 'sec') {
+        if (!scored) continue;
+        const sec = parseInt(scored[1], 10);
+        if (sec < range.from || sec > range.to) continue;
+      } else if (range.kind === 'tablet') {
+        if (range.surface && surface !== range.surface) continue;
+        const lineNum = num[1].replace('’', "'").replace(/[a-z]$/, '');
+        const wanted = range.num.replace(/[a-z]$/, '');
+        if (lineNum !== wanted && num[1].replace('’', "'") !== range.num) continue;
+      }
+    }
 
     const converted = converter.convertLine(body);
     if (converted.codes.length) {
-      (inColophon ? colophon : text).push(converted.codes.join(' '));
+      // Named the way the tablet is cited, with the § it serves.
+      const ref = (surface ? surface + ' ' : '') + num[1]
+        + (scored ? ' (§' + scored[1] + scored[2] + ')' : '');
+      const bodyText = body.slice(num[0].length);
+      if (inColophon) {
+        colophon.push(converted.codes.join(' '));
+        colophonRefs.push(ref);
+        colophonBodies.push(bodyText);
+      } else {
+        text.push(converted.codes.join(' '));
+        textRefs.push(ref);
+        textBodies.push(bodyText);
+      }
     }
   }
 
-  return { text: text.join('\n'), colophon: colophon.join('\n') };
+  return {
+    text: text.join('\n'), colophon: colophon.join('\n'),
+    textRefs, colophonRefs, textBodies, colophonBodies,
+  };
 }
 
 // eBL records which fragments are physically joined, and a hit that is already
@@ -1800,9 +2025,7 @@ async function runParallelSweep() {
 
   try {
     say('Loading the sign table…');
-    if (!parallelsState.converter) {
-      parallelsState.converter = EblAtfSigns.create(await loadSignIndex());
-    }
+    if (!parallelsState.converter) await ensureAtfConverter();
 
     say('Loading the corpus…');
     const entries = await ensureParallelsCorpus((p) => {
@@ -1826,24 +2049,77 @@ async function runParallelSweep() {
     // in the project would report the known, not the new.
     // A source deleted since the option was set falls back to the pool
     // rather than querying with nothing.
-    const chosen = manuscripts[parallelsState.options.source]
-      ? parallelsState.options.source : 'all';
+    const secRange = parseSecRange(parallelsState.options.range);
+    if (secRange && secRange.error) {
+      parallelsState.message = `Could not read the line range "${secRange.error}" — ` +
+        'use chapter lines ("35-60") or a tablet line ("o 59", "r 12\u2019").';
+      return;
+    }
+    const chosen = parallelsState.options.source === 'composite'
+      ? 'composite'
+      : (manuscripts[parallelsState.options.source]
+        ? parallelsState.options.source : 'all');
     const queried = [];
+    const querySources = { text: [], colophon: [] };
 
     for (const [id, ms] of Object.entries(manuscripts)) {
       // A source is excluded from its own results under the museum number it
       // is filed as; the siglum is that number in this app's convention.
       exclude.add(ms.siglum);
       if (chosen !== 'all' && id !== chosen) continue;
-      const split = sourceToSignLines(ms.content, parallelsState.converter);
-      if (split.text) { textLines.push(split.text); queried.push(ms.siglum); }
-      if (split.colophon) { colophonLines.push(split.colophon); withColophon++; }
+      const split = sourceToSignLines(ms.content, parallelsState.converter, secRange);
+      if (split.text) {
+        textLines.push(split.text);
+        queried.push(ms.siglum);
+        querySources.text.push({ siglum: ms.siglum, signs: split.text, refs: split.textRefs, texts: split.textBodies });
+      }
+      if (split.colophon) {
+        colophonLines.push(split.colophon);
+        withColophon++;
+        querySources.colophon.push({ siglum: ms.siglum, signs: split.colophon, refs: split.colophonRefs, texts: split.colophonBodies });
+      }
+      // The profile also learns the other spelling of ana/ina for every line,
+      // so a candidate writing "a-na" where this project writes "ana" still
+      // shares the run. Profile only: the sources themselves stay as written.
+      for (const variant of prepositionVariants(ms.content)) {
+        const vSplit = sourceToSignLines(variant, parallelsState.converter, secRange);
+        if (vSplit.text && vSplit.text !== split.text) textLines.push(vSplit.text);
+        if (vSplit.colophon && vSplit.colophon !== split.colophon) colophonLines.push(vSplit.colophon);
+      }
+    }
+
+    if (chosen === 'composite' && secRange && secRange.kind === 'tablet') {
+      parallelsState.message = 'A tablet-line range ("o 59") needs a source — ' +
+        'the composite text has only chapter lines. Use "§35-60" instead.';
+      return;
+    }
+    if (chosen === 'composite') {
+      const doc = compositeSearchDoc();
+      const comp = compositeToSignLines(parallelsState.converter, doc, secRange);
+      if (comp.signs) {
+        textLines.push(comp.signs);
+        queried.push('the composite text');
+        querySources.text.push({
+          siglum: 'Composite text', signs: comp.signs, refs: comp.refs, texts: comp.texts,
+        });
+        // The same ana/ina spelling variants the sources get.
+        for (const variant of prepositionVariants(doc)) {
+          const v = compositeToSignLines(parallelsState.converter, variant, secRange);
+          if (v.signs && v.signs !== comp.signs) textLines.push(v.signs);
+        }
+      }
     }
 
     if (!textLines.length) {
-      parallelsState.message = chosen === 'all'
-        ? 'No sources with score assignments to search with yet.'
-        : 'That source has no score-assigned lines to search with.';
+      parallelsState.message = secRange
+        ? 'No lines match that range — nothing to search with. Check the ' +
+          'range against the source (primes and surface matter: "o 59" is ' +
+          'not "o 59\u2019").'
+        : (chosen === 'all'
+          ? 'No sources with score assignments to search with yet.'
+          : (chosen === 'composite'
+            ? 'The composite text has no readings yet — nothing to search with.'
+            : 'That source has no score-assigned lines to search with.'));
       return;
     }
 
@@ -1876,15 +2152,20 @@ async function runParallelSweep() {
 
     parallelsState.results = {
       ...outcome,
+      profiles,
+      querySources,
       joinedTo,
       excludedJoins,
       elapsed: Date.now() - started,
       scanned: entries.length,
       sources: textLines.length,
       queried,
+      range: secRange,
       withColophon,
     };
     parallelsState.message = '';
+    saveParallelsResults();
+    saveParallelsUi();
   } catch (err) {
     console.error('Parallel sweep failed:', err);
     parallelsState.message = `Could not run the search: ${err.message}`;
@@ -1910,6 +2191,9 @@ async function refreshParallelsCorpus() {
     parallelsState.corpus = loaded.entries;
     parallelsState.retrieved = loaded.retrieved;
     parallelsState.results = null;
+    parallelsOpenLines.clear();
+    saveParallelsResults();
+    saveParallelsUi();
     parallelsState.message = `Corpus refreshed — ${loaded.count.toLocaleString()} fragments.`;
   } catch (err) {
     parallelsState.message = `Refresh failed: ${err.message}`;
@@ -1920,6 +2204,898 @@ async function refreshParallelsCorpus() {
 }
 
 // Pull a candidate in as a source, reusing the same path as "+ Add > from eBL".
+// One line of transliteration with the shared stretch highlighted and,
+// optionally, the context clipped around it. The line's own words are
+// converted to codes right here rather than reconciled against eBL's stream:
+// eBL writes X for every break and our words skip them, so reconciliation
+// failed on exactly the damaged lines this exists for. Highlighting instead
+// trusts our converter's reading of the line, which the sign tests measure.
+function kwicHtml(text, gramSet, nValues, { clip = true } = {}) {
+  const conv = parallelsState.converter;
+  if (!conv || !text) return null;
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+
+  const codes = [];
+  const owner = [];
+  for (let wi = 0; wi < words.length; wi++) {
+    let converted;
+    try { converted = conv.convertLine(words[wi]).codes; } catch (_) { converted = []; }
+    for (const code of converted) { codes.push(code); owner.push(wi); }
+  }
+  if (!codes.length) return null;
+
+  const marked = new Array(codes.length).fill(false);
+  for (const n of nValues) {
+    for (let i = 0; i + n <= codes.length; i++) {
+      if (gramSet.has(codes.slice(i, i + n).join(' '))) {
+        for (let k = 0; k < n; k++) marked[i + k] = true;
+      }
+    }
+  }
+  if (!marked.includes(true)) return null;
+
+  const wordHit = new Array(words.length).fill(false);
+  for (let k = 0; k < codes.length; k++) if (marked[k]) wordHit[owner[k]] = true;
+
+  const render = (from, to) => words.slice(from, to + 1).map((w, off) =>
+    wordHit[from + off]
+      ? `<span class="parallels-kwic-hit">${escapeHtml(w)}</span>`
+      : escapeHtml(w)).join(' ');
+
+  if (!clip) return render(0, words.length - 1);
+
+  // Clip to a window around the hits, so long lines stay one glance wide.
+  let pos = 0;
+  const spans = words.map((w) => { const s = pos; pos += w.length + 1; return { s, e: s + w.length }; });
+  const len = pos - 1;
+  const first = wordHit.indexOf(true);
+  const last = wordHit.lastIndexOf(true);
+  let winS = Math.max(0, spans[first].s - 25);
+  let winE = Math.min(len, spans[last].e + 25);
+  if (winE - winS > 130) winE = Math.min(len, spans[first].e + 70);
+
+  const parts = [];
+  words.forEach((w, i) => {
+    if (spans[i].e < winS || spans[i].s > winE) return;
+    parts.push(wordHit[i]
+      ? `<span class="parallels-kwic-hit">${escapeHtml(w)}</span>`
+      : escapeHtml(w));
+  });
+  return (winS > 0 ? '… ' : '') + parts.join(' ') + (winE < len ? ' …' : '');
+}
+
+// Which lines carry the shared material, for one candidate. The pairing is
+// computed here rather than during the sweep: for 37,000 fragments it would
+// be waste, for the handful actually inspected it is instant. The candidate's
+// ATF is fetched once (and cached by EblCorpus) so its lines can be named as
+// the tablet names them; offline, the sign-line index is shown instead.
+async function showParallelLines(museum, channel, cell) {
+  const results = parallelsState.results;
+  if (!results || !results.profiles || !results.profiles[channel]) return;
+  const entry = (parallelsState.corpus || []).find((e) => e.id === museum);
+  if (!entry) { cell.textContent = 'The corpus has no sign record for this fragment.'; return; }
+
+  const profile = results.profiles[channel];
+  const nValues = profile.nValues;
+
+  // The candidate's lines that share anything with the query...
+  const candLines = EblNgram.locateInLines(entry.signs, profile.set, nValues);
+  if (!candLines.length) {
+    cell.textContent = 'Every shared sequence spans a line break — nothing to pin to one line.';
+    return;
+  }
+
+  // ...and, against exactly those grams, the query's lines.
+  const sharedSet = new Set();
+  for (const c of candLines) for (const g of c.grams) sharedSet.add(g);
+  const pairs = new Map();   // "q|c" -> one line pair with its common grams
+  for (const src of (results.querySources[channel] || [])) {
+    const qSignLines = src.signs.split('\n');
+    const qLines = EblNgram.locateInLines(src.signs, sharedSet, nValues);
+    for (const q of qLines) {
+      const qGrams = new Set(q.grams);
+      for (const c of candLines) {
+        const common = c.grams.filter((g) => qGrams.has(g));
+        if (!common.length) continue;
+        // Each (source, query line, candidate line) is visited exactly once.
+        pairs.set(src.siglum + '|' + q.line + '|' + c.line, {
+          siglum: src.siglum,
+          qRef: src.refs[q.line] || ('line ' + (q.line + 1)),
+          qText: (src.texts || [])[q.line] || '',
+          qCodes: qSignLines[q.line] || '',
+          cLine: c.line,
+          grams: common,
+          n: common.length,
+        });
+      }
+    }
+  }
+
+  const PAIR_LIMIT = 30;
+  const allPairs = [...pairs.values()].sort((a, b) => b.n - a.n);
+  const ranked = allPairs.slice(0, PAIR_LIMIT);
+  if (!ranked.length) { cell.textContent = 'No line pairs to show.'; return; }
+
+  // Account for the whole Shared figure, so the list never looks short of it:
+  // runs that span a line break cannot be pinned to one line, and one run
+  // repeated on several lines appears in several pairs.
+  const row = (results.results || []).find((r) => r.id === museum);
+  const sharedTotal = row && row.scores[channel] ? row.scores[channel].shared : null;
+  const spanning = sharedTotal != null ? sharedTotal - sharedSet.size : null;
+  const bits = [];
+  if (sharedTotal != null) {
+    bits.push(`${sharedTotal} shared run${sharedTotal === 1 ? '' : 's'}: ` +
+      `${sharedSet.size} sit inside single lines and are paired below`);
+    if (spanning > 0) bits.push(`${spanning} span a line break and cannot be pinned to one line`);
+  }
+  if (allPairs.length > ranked.length) {
+    bits.push(`strongest ${ranked.length} of ${allPairs.length} pairs shown`);
+  }
+  bits.push('a run on several lines appears in each of their pairs');
+  const summary = `<div class="parallels-lines-summary">${escapeHtml(bits.join(' · '))}</div>`;
+
+  // Name and quote the candidate's lines from its ATF, if it can be fetched.
+  cell.textContent = 'Fetching the transliteration from eBL…';
+  let candRefs = null;
+  let candTexts = null;
+  try {
+    const frag = await EblCorpus.getAtf(museum);
+    const SURFACE_ABBR = {
+      'obverse': 'o', 'reverse': 'r', 'edge': 'e', 'left edge': 'l.e.',
+      'right edge': 'r.e.', 'top': 't', 'bottom': 'b', 'colophon': 'col',
+    };
+    let surface = '';
+    const refs = [];
+    const texts = [];
+    for (const raw of String(frag.atf || '').split('\n')) {
+      const line = raw.trim();
+      const at = line.match(/^@(obverse|reverse|edge|left edge|right edge|top|bottom|colophon)/i);
+      if (at) { surface = SURFACE_ABBR[at[1].toLowerCase()] || ''; continue; }
+      const num = line.match(/^(\d+['’]?[a-z]?)\.\s*(.*)$/);
+      if (!num) continue;
+      refs.push((surface ? surface + ' ' : '') + num[1]);
+      texts.push(num[2]);
+    }
+    // One sign line per ATF text line is eBL's own rule; if the counts
+    // disagree the mapping cannot be trusted, so fall back to indices.
+    const signLineCount = String(entry.signs || '').split('\n').length;
+    if (refs.length === signLineCount) { candRefs = refs; candTexts = texts; }
+  } catch (_) { /* offline or 404: indices will do */ }
+
+  let html = summary + '<table class="parallels-lines-table">';
+  html += '<thead><tr><th></th><th>this project</th><th></th><th></th>' +
+          `<th>${escapeHtml(museum)}</th><th title="Shared sign runs on this pair of lines">runs</th></tr></thead><tbody>`;
+  for (const p of ranked) {
+    const gramSet = new Set(p.grams);
+    const cRef = candRefs ? candRefs[p.cLine] : ('sign line ' + (p.cLine + 1));
+    const cText = candTexts ? candTexts[p.cLine] : '';
+    const qKwic = kwicHtml(p.qText, gramSet, nValues)
+      || escapeHtml(String(p.qText || '').slice(0, 80));
+    const cKwic = kwicHtml(cText, gramSet, nValues)
+      || escapeHtml(String(cText || '').slice(0, 80));
+    const qSec = (p.qRef.match(/\(§(\d+[a-z]?)\)/) || [])[1]
+      || (p.qRef.match(/^§(\d+[a-z]?)$/) || [])[1] || '';
+    html += '<tr>' +
+      `<td class="parallels-lines-q"><a href="#" class="pl-goto-q" data-siglum="${escapeHtml(p.siglum)}" ` +
+      `data-sec="${escapeHtml(qSec)}" title="Open ${escapeHtml(p.siglum)} at this line">` +
+      `${escapeHtml(p.siglum)} ${escapeHtml(p.qRef)}</a></td>` +
+      `<td class="parallels-lines-text">${qKwic}</td>` +
+      '<td class="parallels-lines-arrow">&harr;</td>' +
+      `<td class="parallels-lines-c"><a href="#" class="pl-goto-c" data-line="${p.cLine}" ` +
+      `title="Open ${escapeHtml(museum)} at this line, in a tab beside Images">${escapeHtml(cRef || '')}</a></td>` +
+      `<td class="parallels-lines-text">${cKwic}</td>` +
+      `<td class="parallels-lines-n">${p.n}</td>` +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  if (!candRefs) {
+    html += '<div class="parallels-lines-note">Line numbers are positions in the sign record — ' +
+            'the transliteration could not be fetched to name them.</div>';
+  }
+  cell.innerHTML = html;
+
+  // The query side jumps the editor to that line; the candidate side opens
+  // the fragment read-only, scrolled to the paired line.
+  cell.querySelectorAll('.pl-goto-q').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      // The composite has no source file — its lines live in the score.
+      if (a.dataset.siglum === 'Composite text') revealScoreEntry(a.dataset.sec);
+      else revealSourceAnchor(a.dataset.siglum, a.dataset.sec);
+    });
+  });
+  cell.querySelectorAll('.pl-goto-c').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      openTabletView(museum, parseInt(a.dataset.line, 10));
+    });
+  });
+}
+
+// ---- Read-only tablet tabs -----------------------------------------------
+// Any eBL fragment opened as its own tab beside Images, without becoming a
+// source: for reading a candidate in full before deciding anything about it.
+const openTablets = new Map();   // museum -> { atf }
+let activeTablet = null;
+
+async function openTabletView(museum, focusLine) {
+  if (!openTablets.has(museum)) {
+    setStatus('syncing', `Fetching ${museum}…`);
+    try {
+      const frag = await EblCorpus.getAtf(museum);
+      // The whole record: the KWIC needs .signs, the About block the rest.
+      openTablets.set(museum, frag);
+      setStatus('connected', `Fetched ${museum}`);
+    } catch (err) {
+      setStatus('error', `Could not fetch ${museum}`);
+      alert(err.message);
+      return;
+    }
+  }
+  activeTablet = museum;
+  renderTabletTabs();
+  renderTabletView(focusLine);
+  saveParallelsUi();
+}
+
+function closeTabletView(museum) {
+  openTablets.delete(museum);
+  saveParallelsUi();
+  if (activeTablet === museum) {
+    activeTablet = openTablets.size ? [...openTablets.keys()].pop() : null;
+  }
+  renderTabletTabs();
+  if (activeTablet) {
+    renderTabletView();
+  } else {
+    // Nothing left to show: back to the score.
+    const scoreTab = document.querySelector('.pane-tab[data-tab="score"]');
+    if (scoreTab) scoreTab.click();
+  }
+}
+
+function renderTabletTabs() {
+  const bar = document.querySelector('.pane-tabs');
+  if (!bar) return;
+  bar.querySelectorAll('.pane-tab-tablet').forEach((b) => b.remove());
+  for (const museum of openTablets.keys()) {
+    const btn = document.createElement('button');
+    btn.className = 'pane-tab pane-tab-tablet' + (museum === activeTablet ? ' active' : '');
+    btn.dataset.tab = 'tablet';
+    btn.dataset.museum = museum;
+    btn.innerHTML = `${escapeHtml(museum)}<span class="tablet-tab-close" title="Close">&times;</span>`;
+    btn.addEventListener('click', (e) => {
+      if (e.target.closest('.tablet-tab-close')) { closeTabletView(museum); return; }
+      activeTablet = museum;
+      renderTabletTabs();
+      renderTabletView();
+    });
+    bar.appendChild(btn);
+  }
+  if (activeTablet) {
+    // Activate our tab and content by hand — the static handler only knows
+    // the tabs that existed at startup.
+    document.querySelectorAll('.pane-tab').forEach((t) =>
+      t.classList.toggle('active', t.dataset.museum === activeTablet));
+    document.querySelectorAll('.tab-content').forEach((c) =>
+      c.classList.toggle('active', c.dataset.tab === 'tablet'));
+  }
+}
+
+// "LAOS 15, 143-172" out of an eBL reference: series short title and number
+// when the document has them, author and year when not.
+function citeReference(ref) {
+  const doc = ref.document || {};
+  const series = doc['container-title-short']
+    ? (doc['container-title-short'] + (doc['collection-number'] ? ' ' + doc['collection-number'] : ''))
+    : null;
+  const year = doc.issued && doc.issued['date-parts'] && doc.issued['date-parts'][0]
+    ? doc.issued['date-parts'][0][0] : null;
+  const authors = (doc.author || []).map((a) => a.family).filter(Boolean).join(' & ');
+  const head = series || (authors ? (authors + (year ? ', ' + year : '')) : (doc['citation-label'] || ref.id));
+  return head + (ref.pages ? ', ' + ref.pages : '');
+}
+
+function tabletMetaHtml(record) {
+  const rows = [];
+  const add = (label, value) => { if (value) rows.push([label, value]); };
+
+  const museumName = String(record.museum || '').replace(/_/g, ' ').toLowerCase()
+    .replace(/(^|\s)\S/g, (c) => c.toUpperCase());
+  add('Museum', museumName + (record.collection ? ` (${record.collection} Collection)` : ''));
+  if (record.accession && (record.accession.prefix || record.accession.number)) {
+    add('Accession', [record.accession.prefix, record.accession.number, record.accession.suffix]
+      .filter(Boolean).join('.'));
+  }
+  const dims = ['length', 'width', 'thickness']
+    .map((k) => record[k] && record[k].value).filter(Boolean);
+  if (dims.length) add('Size', dims.join(' × ') + ' cm');
+  const arch = record.archaeology || {};
+  add('Provenance', arch.site);
+  if (arch.findspot) {
+    const f = arch.findspot;
+    add('Findspot', [f.site, f.sector, f.area, f.building].filter(Boolean).join(' > ')
+      + (f.notes ? ' — ' + f.notes : ''));
+  }
+  if (record.script && record.script.period) {
+    add('Script', record.script.period
+      + (record.script.periodModifier && record.script.periodModifier !== 'None'
+        ? ' (' + record.script.periodModifier + ')' : ''));
+  }
+  const genres = (record.genres || []).map((g) => (g.category || []).join(' > ')).filter(Boolean);
+  if (genres.length) add('Genre', genres.join('; '));
+  if (record.joins && record.joins.length) {
+    const pieces = [];
+    for (const group of record.joins) {
+      for (const piece of group) {
+        const mn = piece.museumNumber || {};
+        const num = [mn.prefix, mn.number, mn.suffix].filter(Boolean).join('.');
+        if (num && num !== record.museumNumber) pieces.push(num);
+      }
+    }
+    if (pieces.length) add('Joins', pieces.join(' + '));
+  }
+  add('Notes', record.notes);
+
+  // Editions only — the copies, discussions and archaeology are on the eBL
+  // page a click away; what a reader here wants is where the text is edited.
+  const editions = (record.references || []).filter((r) => r.type === 'EDITION');
+  if (editions.length) add('Edition', editions.map(citeReference).join(' · '));
+
+  if (!rows.length) return '';
+  let html = '<details class="tablet-meta"><summary>About this fragment</summary><table>';
+  for (const [label, value] of rows) {
+    html += `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`;
+  }
+  return html + '</table></details>';
+}
+
+function renderTabletView(focusLine) {
+  const panel = document.getElementById('tablet-view');
+  if (!panel || !activeTablet) return;
+  const record = openTablets.get(activeTablet);
+  if (!record) return;
+
+  // Everything this project shares with the tablet, as a per-line gram map —
+  // the whole view becomes a KWIC. Needs a sweep to have run; without one
+  // there is no profile to match against, and the text shows plain.
+  const profiles = parallelsState.results && parallelsState.results.profiles;
+  let hitsByLine = null;
+  let gramSet = null;
+  let nValues = [3];
+  if (profiles && window.EblNgram && record.signs) {
+    gramSet = new Set();
+    for (const key of Object.keys(profiles)) {
+      nValues = profiles[key].nValues;
+      for (const g of profiles[key].set) gramSet.add(g);
+    }
+    hitsByLine = new Map();
+    for (const found of EblNgram.locateInLines(record.signs, gramSet, nValues)) {
+      hitsByLine.set(found.line, new Set(found.grams));
+    }
+  }
+
+  let html = `<div class="tablet-view-header">` +
+    `<strong>${escapeHtml(activeTablet)}</strong>` +
+    `<a href="https://www.ebl.lmu.de/fragmentarium/${encodeURIComponent(activeTablet)}" ` +
+    `target="_blank" rel="noopener noreferrer">open in eBL &#8599;</a>` +
+    (hitsByLine
+      ? `<span class="tablet-view-note">${hitsByLine.size} line${hitsByLine.size === 1 ? '' : 's'} share material with this project (highlighted)</span>`
+      : `<span class="tablet-view-note">run the parallels search to highlight shared lines</span>`) +
+    `</div>` +
+    tabletMetaHtml(record) +
+    `<pre class="tablet-view-text">`;
+
+  // Sign-line indices count the numbered text lines, so both the focus and
+  // the KWIC map land on the right lines.
+  let textLineIndex = -1;
+  for (const raw of String(record.atf || '').split('\n')) {
+    const isText = /^\s*\d+['’]?[a-z]?\.\s/.test(raw);
+    if (isText) textLineIndex++;
+    const cls = (isText && textLineIndex === focusLine) ? ' class="tablet-line-hit"' : '';
+    let body = escapeHtml(raw);
+    if (isText && hitsByLine && hitsByLine.has(textLineIndex)) {
+      const marked = kwicHtml(raw, hitsByLine.get(textLineIndex), nValues, { clip: false });
+      if (marked) body = marked;
+    }
+    html += `<span${cls}>${body}</span>\n`;
+  }
+  html += '</pre>';
+  panel.innerHTML = html;
+
+  if (focusLine != null) {
+    const hit = panel.querySelector('.tablet-line-hit');
+    if (hit) hit.scrollIntoView({ block: 'center' });
+  }
+}
+
+// ---- Paradigms -----------------------------------------------------------
+// Template twins of one chapter line, across the whole corpus: lines that
+// agree with it for PARADIGM_K signs on both sides of a short middle that
+// differs. The distinct middles, decoded and ranked by how many contexts
+// attest them, are the paradigm of that slot — planets in a planet slot,
+// verbs in a verb slot.
+const PARADIGM_K = 3;
+const PARADIGM_MAX_MIDDLE = 6;
+
+let signNameByCode = null;
+function signName(code) {
+  if (!signNameByCode) {
+    signNameByCode = {};
+    const table = (parallelsState.signIndex && parallelsState.signIndex.signs) || {};
+    for (const [name, sign] of Object.entries(table)) {
+      if (sign.abz && !signNameByCode[sign.abz]) signNameByCode[sign.abz] = name;
+      if (sign.token && !signNameByCode[sign.token]) signNameByCode[sign.token] = name;
+    }
+  }
+  return signNameByCode[code] || code;
+}
+
+// The reading of §sec this project would query with: the composite line if
+// one is written, else the first witness's.
+function paradigmQueryText(sec) {
+  const recon = reconstructedLines[parseInt(sec, 10)];
+  if (recon && String(recon).trim()) return stripEditorialApparatus(recon);
+  const rx = new RegExp('^§' + sec + '[a-z]?\\s+(?:\\d+[\'\u2019]?[a-z]?\\.\\s*)?(.*)$');
+  for (const ms of Object.values(manuscripts)) {
+    for (const raw of String(ms.content || '').split('\n')) {
+      const m = raw.trim().match(rx);
+      if (m && m[1].trim()) return m[1].trim();
+    }
+  }
+  return '';
+}
+
+// Query damage is a wildcard — OUR break can stand for anything — but the
+// candidate's damage confirms nothing, so an X there never matches.
+function eqSign(q, t) {
+  return q === 'X' ? true : (q === t && t !== 'X');
+}
+
+// Align the whole query against T starting at anchor j0: alternating matched
+// runs and variant slots, at most maxV slots, each side of a slot at most
+// maxSpan signs and free of damage. Every query position outside a slot must
+// match — the omen defines the frame. Greedy with a two-sign resync, minimal
+// slot first. Returns the slots, or null.
+const PARADIGM_MIN_FRAME = 0.6;   // matched share of the query line
+
+function alignOmen(Q, T, j0, maxV, maxSpan, owners) {
+  let i = 0;
+  let j = j0;
+  const slots = [];
+  let spent = 0;
+  // a slot costs the number of query WORDS it touches — that is how a
+  // philologist counts variants; an insertion (no query span) costs one
+  const costOf = (qFrom, qLen) => {
+    if (!owners || !qLen) return 1;
+    return new Set(owners.slice(qFrom, qFrom + qLen)).size || 1;
+  };
+  for (;;) {
+    while (i < Q.length && j < T.length && eqSign(Q[i], T[j])) { i++; j++; }
+    if (i === Q.length) {
+      // The frame must dominate: a "match" whose slots swallow most of the
+      // line is two different omens pinned together at a coincidental sign.
+      const inSlots = slots.reduce((n, sl) => n + sl.qLen, 0);
+      if (Q.length - inSlots < Math.ceil(Q.length * PARADIGM_MIN_FRAME)) return null;
+      return slots;
+    }
+    if (spent >= maxV) return null;
+
+    let best = null;
+    for (let a = 0; a <= maxSpan; a++) {
+      for (let b = 0; b <= maxSpan; b++) {
+        if (a === 0 && b === 0) continue;
+        if (i + a > Q.length || j + b > T.length) continue;
+        const qSpan = Q.slice(i, i + a);
+        const tSpan = T.slice(j, j + b);
+        if (qSpan.includes('X') || tSpan.includes('X')) continue;
+        // resync: the next signs after the slot must match again. A slot in
+        // the FINAL position is allowed only when the candidate line ends
+        // there too — the line end anchors it; otherwise the filler's extent
+        // would be unknowable.
+        const left = Q.length - (i + a);
+        if (left === 0) {
+          if (j + b !== T.length) continue;
+        } else {
+          // One matched sign re-anchors: omen variants often sit either side
+          // of a single shared sign, and demanding two merged them into one
+          // mega-slot spanning words that match.
+          if (j + b >= T.length || !eqSign(Q[i + a], T[j + b])) continue;
+        }
+        const cost = a + b + Math.abs(a - b) * 0.25;
+        if (!best || cost < best.cost) best = { a, b, cost };
+      }
+    }
+    if (!best) return null;
+    spent += costOf(i, best.a);
+    if (spent > maxV) return null;
+    slots.push({ qFrom: i, qLen: best.a, cFrom: j, cLen: best.b, cost: costOf(i, best.a) });
+    i += best.a;
+    j += best.b;
+  }
+}
+
+// Whole-omen twins across the corpus: lines containing a stretch that aligns
+// with the full query under the variant budget. A cheap trigram screen keeps
+// the aligner off the 99% of lines that share nothing.
+function findOmenTwins(queryTokens, corpusEntries, maxV, maxSpan, owners) {
+  const qTrigrams = new Set();
+  for (let i = 0; i + 3 <= queryTokens.length; i++) {
+    const tri = queryTokens.slice(i, i + 3);
+    if (!tri.includes('X')) qTrigrams.add(tri.join(' '));
+  }
+  const minShared = Math.max(2, Math.floor((queryTokens.length - maxV * maxSpan) / 3));
+
+  // the first sound sign anchors the alignment
+  let a0 = 0;
+  while (a0 < queryTokens.length && queryTokens[a0] === 'X') a0++;
+  const anchor = queryTokens[a0];
+  const Q = queryTokens.slice(a0);
+  const ownersQ = owners ? owners.slice(a0) : null;
+  if (!anchor || Q.length < 4) return [];
+
+  const matches = [];
+  for (const entry of corpusEntries) {
+    const parts = String(entry.signs || '').split('\n');
+    for (let li = 0; li < parts.length; li++) {
+      const T = parts[li].trim().split(/\s+/).filter(Boolean);
+      if (T.length < Q.length - maxV * maxSpan) continue;
+
+      let shared = 0;
+      for (let i = 0; i + 3 <= T.length; i++) {
+        if (qTrigrams.has(T.slice(i, i + 3).join(' '))) shared++;
+      }
+      if (shared < minShared) continue;
+
+      let best = null;
+      for (let j0 = 0; j0 < T.length; j0++) {
+        if (!eqSign(anchor, T[j0])) continue;
+        const slots = alignOmen(Q, T, j0, maxV, maxSpan, ownersQ);
+        if (slots && (!best || slots.length < best.slots.length)) {
+          best = { slots, anchor: j0 };
+          if (slots.length === 0) break;
+        }
+      }
+      if (best) {
+        matches.push({ id: entry.id, line: li, tokens: T, slots: best.slots, shared });
+        if (matches.length >= 200) return matches;
+      }
+    }
+  }
+  return matches;
+}
+
+// Which § a project source's tablet line serves: "r 5" of K.6121 -> "84".
+// Matched against the source's own file, surface and number both.
+function secForTabletLine(content, surface, num) {
+  const SURFACE_ABBR = {
+    'obverse': 'o', 'reverse': 'r', 'edge': 'e', 'left edge': 'l.e.',
+    'right edge': 'r.e.', 'top': 't', 'bottom': 'b', 'colophon': 'col',
+  };
+  let current = '';
+  for (const raw of String(content || '').split('\n')) {
+    const line = raw.trim();
+    const at = line.match(/^@(obverse|reverse|edge|left edge|right edge|top|bottom|colophon)/i);
+    if (at) { current = SURFACE_ABBR[at[1].toLowerCase()] || ''; continue; }
+    const m = line.match(/^§(\d+[a-z]?)\s+(\d+['\u2019]?[a-z]?)\.\s/);
+    if (!m) continue;
+    if ((surface || '') !== current) continue;
+    if (m[2] === num || m[2].replace('\u2019', "'") === num.replace('\u2019', "'")) return m[1];
+  }
+  return null;
+}
+
+// The Paradigms tab: bar + results. The stored html brings the last run
+// back on every visit.
+function renderParadigmsTab() {
+  const panel = document.getElementById('paradigms-tab');
+  if (!panel) return;
+  panel.innerHTML =
+    `<div class="parallels-paradigms-bar">` +
+    `<label title="Find lines in the whole corpus that agree with this chapter line except in one slot — the swap check. The differing fillers are the slot's paradigm.">` +
+    `§ <input type="text" id="paradigms-sec" class="parallels-range-input" ` +
+    `value="${escapeHtml(parallelsState.paradigmsSec || '')}" placeholder="35"></label> ` +
+    `<label title="How many WORDS of the line may differ. A contiguous multi-word swap shows as one chip but costs one per word. The rest must match sign for sign.">` +
+    `variant words \u2264 <select id="paradigms-var">` +
+    [1, 2, 3, 4].map((v) => `<option value="${v}"${(parallelsState.paradigmsMaxVar || 2) === v ? ' selected' : ''}>${v}</option>`).join('') +
+    `</select></label> ` +
+    `<label title="Hide this project's witnesses and their recorded joins — corpus discoveries only.">` +
+    `<input type="checkbox" id="paradigms-exclude"${parallelsState.paradigmsExcludeMine ? ' checked' : ''}> ` +
+    `exclude project texts</label> ` +
+    `<button id="paradigms-run" class="parallels-run">Find twins</button>` +
+    `<span class="parallels-corpus-state">the whole line must match, except the budgeted slots</span></div>` +
+    `<div id="paradigms-results">${parallelsState.paradigmsHtml || ''}</div>`;
+  const btn = document.getElementById('paradigms-run');
+  btn.addEventListener('click', () => {
+    parallelsState.paradigmsMaxVar = Number(document.getElementById('paradigms-var').value);
+    parallelsState.paradigmsExcludeMine = document.getElementById('paradigms-exclude').checked;
+    runParadigms(document.getElementById('paradigms-sec').value);
+  });
+  document.getElementById('paradigms-sec').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); btn.click(); }
+  });
+  bindParadigmLinks(panel);
+  bindParadigmQueryDrag(panel);
+}
+
+// The query block is position:sticky; dragging its header changes the
+// offset it pins at, so the guide line can ride at any height while the
+// candidate blocks scroll underneath. The offset is kept for the session.
+function bindParadigmQueryDrag(container) {
+  const block = container.querySelector('.pg-query');
+  if (!block) return;
+  block.style.top = (parallelsState.paradigmsTop || 0) + 'px';
+  const head = block.querySelector('.pg-head');
+  if (!head) return;
+  head.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('a')) return;
+    e.preventDefault();
+    const pane = block.closest('.score') || block.parentElement;
+    const startY = e.clientY;
+    const startTop = parseFloat(block.style.top) || 0;
+    const move = (ev) => {
+      const max = Math.max(0, pane.clientHeight - block.offsetHeight - 8);
+      const top = Math.min(max, Math.max(0, startTop + ev.clientY - startY));
+      block.style.top = top + 'px';
+      parallelsState.paradigmsTop = top;
+    };
+    const up = () => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      block.classList.remove('pg-dragging');
+    };
+    block.classList.add('pg-dragging');
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+  });
+}
+
+function bindParadigmLinks(root) {
+  root.querySelectorAll('.paradigm-open').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      openTabletView(a.dataset.museum, parseInt(a.dataset.line, 10));
+    });
+  });
+  root.querySelectorAll('.pg-goto-sec').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      revealScoreEntry(a.dataset.sec);
+    });
+  });
+}
+
+// One line as an interlinear block: the words on top, each word's signs
+// beneath it, cell by cell — so two blocks align by eye and a substitution
+// is seen, not inferred. wordSigns[i] is the sign chunk under words[i];
+// highlight marks the substituted word range.
+function interlinearHtml(words, wordSigns, highlight) {
+  let html = '<div class="pg-row">';
+  for (let i = 0; i < words.length; i++) {
+    const hit = highlight && highlight.has && highlight.has(i);
+    html += `<span class="pg-cell${hit ? ' pg-cell-hit' : ''}">` +
+      `<span class="pg-word">${escapeHtml(words[i])}</span>` +
+      `<span class="pg-signs">${escapeHtml(wordSigns[i] || '')}</span></span>`;
+  }
+  return html + '</div>';
+}
+
+// Words + per-word sign chunks for a line of ATF, via the converter. When
+// the eBL sign line is given and reconciles in length, its codes are used
+// (they are the corpus's ground truth); otherwise our own conversion is.
+function interlinearData(text, eblSignLine) {
+  const conv = parallelsState.converter;
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  const counts = [];
+  const ours = [];
+  for (const word of words) {
+    let codes;
+    try { codes = conv.convertLine(word).codes; } catch (_) { codes = []; }
+    counts.push(codes.length);
+    ours.push(codes);
+  }
+  let source = ours;
+  if (eblSignLine) {
+    const ebl = String(eblSignLine).trim().split(/\s+/).filter(Boolean);
+    if (ebl.length === counts.reduce((a, b) => a + b, 0)) {
+      source = [];
+      let at = 0;
+      for (const c of counts) { source.push(ebl.slice(at, at + c)); at += c; }
+    }
+  }
+  return {
+    words,
+    counts,
+    wordSigns: source.map((codes) => codes.map(signName).join('.')),
+  };
+}
+
+// Map a token range of the sign line onto word indices.
+function tokenRangeToWords(counts, at, len) {
+  if (!len) return null;
+  let pos = 0;
+  let from = -1;
+  let to = -1;
+  for (let w = 0; w < counts.length; w++) {
+    const end = pos + counts[w];
+    if (from < 0 && at < end) from = w;
+    if (at + len - 1 < end) { to = w; break; }
+    pos = end;
+  }
+  return from >= 0 ? { from, to: to < 0 ? counts.length - 1 : to } : null;
+}
+
+async function runParadigms(secInput) {
+  const sec = String(secInput || '').trim().replace(/^§/, '');
+  const container = document.getElementById('paradigms-results');
+  if (!container || !/^\d+[a-z]?$/.test(sec)) return;
+
+  container.innerHTML = '<div class="parallels-message">Working&hellip;</div>';
+  try {
+    await ensureAtfConverter();
+    const entries = await ensureParallelsCorpus(() => {});
+    const text = paradigmQueryText(sec);
+    if (!text) {
+      container.innerHTML = `<div class="parallels-message">§${escapeHtml(sec)} has no reading to query with.</div>`;
+      return;
+    }
+    const queryTokens = parallelsState.converter.convertLine(text).codes;
+    // token -> word ownership, so the budget can count variant WORDS
+    let owners = null;
+    {
+      const d = interlinearData(text, null);
+      if (d.counts.reduce((a, b) => a + b, 0) === queryTokens.length) {
+        owners = [];
+        d.counts.forEach((c, wi) => { for (let k = 0; k < c; k++) owners.push(wi); });
+      }
+    }
+    if (queryTokens.length < 2 * PARADIGM_K + 1) {
+      container.innerHTML = '<div class="parallels-message">The line is too short for twin contexts.</div>';
+      return;
+    }
+
+    const projectSigla = new Set(Object.values(manuscripts).map((m) => m.siglum));
+    // A candidate eBL records as joined to a project source is half in the
+    // project already: the join is named, not passed off as an independent
+    // witness. Stored "// joins:" headers make this free for most projects.
+    let joinedTo = {};
+    try { joinedTo = await loadJoinMap(Object.values(manuscripts), () => {}); } catch (_) { /* offline */ }
+
+    const maxV = parallelsState.paradigmsMaxVar || 2;
+    const matches = findOmenTwins(queryTokens, entries, maxV, PARADIGM_MAX_MIDDLE, owners);
+    // Slot signs join with SPACES: a slot can span word boundaries, and the
+    // dot is the convention for signs inside one word \u2014 "BAD.ME\u0160.IG.ME\u0160"
+    // reads as a single impossible compound where "BAD ME\u0160 IG ME\u0160" reads as
+    // what it is, a run of four signs. (The interlinear rows keep the dot:
+    // there the signs really do belong to the one word above them.)
+    const decode = (codes) => codes.length ? codes.map(signName).join(' ') : '\u2205';
+
+    for (const match of matches) {
+      match.mine = projectSigla.has(match.id) || !!joinedTo[match.id];
+    }
+    const excludeMine = !!parallelsState.paradigmsExcludeMine;
+    const hiddenMine = excludeMine ? matches.filter((m) => m.mine).length : 0;
+    const kept = excludeMine ? matches.filter((m) => !m.mine) : matches;
+
+    if (!kept.length) {
+      container.innerHTML = `<div class="parallels-message">No line in the corpus matches the whole of ` +
+        `§${escapeHtml(sec)} with at most ${maxV} variant slot${maxV === 1 ? '' : 's'}` +
+        `${hiddenMine ? ` — apart from ${hiddenMine} project line${hiddenMine === 1 ? '' : 's'} excluded by the option` : ''}. ` +
+        'A looser budget may find more.</div>';
+      parallelsState.paradigmsHtml = container.innerHTML;
+      return;
+    }
+
+    // this project's witnesses (joins included) first, then the corpus;
+    // within each, fewest slots first
+    kept.sort((a, b) => (b.mine - a.mine) || (a.slots.length - b.slots.length) || (b.shared - a.shared));
+    const mineCount = kept.filter((m) => m.mine).length;
+    const candidates = kept.slice(0, 24);
+
+    const q = interlinearData(text, null);
+    let html = `<div class="pg-block pg-query"><div class="pg-head">§ ${escapeHtml(sec)} — this project` +
+      '<span class="pg-drag-hint" title="Drag to move the pinned line up or down">&#8597; drag</span></div>' +
+      interlinearHtml(q.words, q.wordSigns, null) + '</div>';
+    html += `<div class="parallels-section-blurb">${kept.length > candidates.length ? candidates.length + ' of ' : ''}` +
+      `${kept.length} corpus line${kept.length === 1 ? '' : 's'} match the whole line with at most ` +
+      `${maxV} variant word${maxV === 1 ? '' : 's'} (a slot \u2264 ${PARADIGM_MAX_MIDDLE} signs a side). ` +
+      `Substituted words highlighted; \u2205 = omitted; sign names, not readings.` +
+      `${hiddenMine ? ` \u00b7 ${hiddenMine} project line${hiddenMine === 1 ? '' : 's'} hidden by the exclude option.` : ''}</div>`;
+
+    container.innerHTML = html +
+      '<div class="parallels-message">Fetching the transliterations\u2026</div>';
+
+    const mineBlocks = [];
+    const corpusBlocks = [];
+    for (const cand of candidates) {
+      const blocks = cand.mine ? mineBlocks : corpusBlocks;
+      let block = '';
+      let ref = 'sign line ' + (cand.line + 1);
+      let lineText = null;
+      let signLine = null;
+      try {
+        const frag = await EblCorpus.getAtf(cand.id);
+        const SURF = { obverse: 'o', reverse: 'r', edge: 'e', 'left edge': 'l.e.',
+          'right edge': 'r.e.', top: 't', bottom: 'b', colophon: 'col' };
+        const texts = [];
+        let surface = '';
+        for (const raw of String(frag.atf || '').split('\n')) {
+          const line = raw.trim();
+          const at = line.match(/^@(obverse|reverse|edge|left edge|right edge|top|bottom|colophon)/i);
+          if (at) { surface = SURF[at[1].toLowerCase()] || ''; continue; }
+          const m = line.match(/^(\d+['\u2019]?[a-z]?)\.\s*(.*)$/);
+          if (m) texts.push({ ref: (surface ? surface + ' ' : '') + m[1], text: m[2] });
+        }
+        signLine = String(frag.signs || '').split('\n')[cand.line] || '';
+        if (texts.length === String(frag.signs || '').split('\n').length && texts[cand.line]) {
+          ref = texts[cand.line].ref;
+          lineText = texts[cand.line].text;
+        }
+      } catch (_) { /* offline: sign row only */ }
+
+      // an in-project twin names its § — the score is one click away
+      let secLink = '';
+      if (projectSigla.has(cand.id) && ref && !ref.startsWith('sign line')) {
+        const parts = ref.match(/^(?:(o|r|t|b|e|l\.e\.|r\.e\.|col)\s+)?(.+)$/);
+        const ms = Object.values(manuscripts).find((m) => m.siglum === cand.id);
+        const sec = ms && parts ? secForTabletLine(ms.content, parts[1] || '', parts[2]) : null;
+        if (sec) {
+          secLink = ` <a href="#" class="pg-goto-sec" data-sec="${escapeHtml(sec)}" ` +
+            `title="Show § ${escapeHtml(sec)} in the score">§ ${escapeHtml(sec)}</a>`;
+        }
+      }
+
+      const chips = cand.slots.length
+        ? cand.slots.map((sl) => {
+            const replaced = queryTokens.slice(sl.qFrom, sl.qFrom + sl.qLen);
+            const filler = cand.tokens.slice(sl.cFrom, sl.cFrom + sl.cLen);
+            return `<span class="pg-chip" title="${escapeHtml(replaced.join(' ') || 'nothing')} \u2192 ${escapeHtml(filler.join(' ') || 'nothing')}">` +
+              `[${escapeHtml(decode(replaced))}] \u2192 [${escapeHtml(decode(filler))}]</span>`;
+          }).join(' ')
+        : '<span class="pg-chip pg-chip-same">identical</span>';
+
+      block += `<div class="pg-block${cand.mine ? ' pg-mine' : ''}"><div class="pg-head">` +
+        `<a href="#" class="paradigm-open" data-museum="${escapeHtml(cand.id)}" data-line="${cand.line}">` +
+        `${escapeHtml(cand.id)}</a> ${escapeHtml(ref)}${secLink}` +
+        `${projectSigla.has(cand.id)
+          ? ' <span class="parallels-have">(in project)</span>'
+          : (joinedTo[cand.id]
+            ? ` <span class="parallels-have parallels-join-owner">(+) joins ${escapeHtml(joinedTo[cand.id].join(' + '))}</span>`
+            : '')} ${chips}</div>`;
+
+      if (lineText) {
+        const d = interlinearData(lineText, signLine);
+        const hitWords = new Set();
+        for (const sl of cand.slots) {
+          const range = tokenRangeToWords(d.counts, sl.cFrom, sl.cLen);
+          if (range) for (let w = range.from; w <= range.to; w++) hitWords.add(w);
+        }
+        block += interlinearHtml(d.words, d.wordSigns, hitWords);
+      } else {
+        block += `<div class="pg-row"><span class="pg-cell"><span class="pg-signs">` +
+          `${escapeHtml(String(signLine || '').split(/\s+/).map(signName).join(' '))}</span></span></div>`;
+      }
+      block += '</div>';
+      blocks.push(block);
+    }
+
+    const fold = (title, arr) => arr.length
+      ? `<details class="pg-group" open><summary class="pg-group-head">${title}</summary>${arr.join('')}</details>`
+      : '';
+    container.innerHTML = html +
+      fold(`In this project, joins included — ${mineCount}`, mineBlocks) +
+      fold(`Elsewhere in the corpus — ${kept.length - mineCount}`, corpusBlocks);
+    parallelsState.paradigmsHtml = container.innerHTML;
+    parallelsState.paradigmsSec = sec;
+    bindParadigmLinks(container);
+    bindParadigmQueryDrag(container);
+  } catch (err) {
+    console.error('Paradigms failed:', err);
+    container.innerHTML = `<div class="parallels-message">Could not run: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
 async function addParallelAsSource(museum) {
   const id = 'ms-' + museum.toLowerCase();
   if (manuscripts[id]) { alert(`"${museum}" is already in this project.`); return; }
@@ -2041,7 +3217,7 @@ function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
   html += '<th>#</th><th>Fragment</th>';
   html += '<th title="Shared composition — another witness">Text</th>';
   html += '<th title="Shared scribe or library — a join candidate">Colophon</th>';
-  html += '<th title="Shared trigrams on this channel">Shared</th><th></th>';
+  html += '<th title="Shared trigrams on this channel">Shared</th><th></th><th></th>';
   html += '</tr></thead><tbody>';
 
   ranked.forEach((row, i) => {
@@ -2062,8 +3238,11 @@ function renderParallelsTable(rows, channel, title, blurb, limit = 20) {
     html += `<td class="parallels-score${channel === 'colophon' ? ' parallels-score-lead' : ''}">` +
             `${colophon ? colophon.overlap.toFixed(3) : '—'}</td>`;
     html += `<td class="parallels-shared">${row.scores[channel].shared}</td>`;
+    html += `<td><button class="parallels-lines-btn" data-museum="${escapeHtml(row.id)}" ` +
+            `data-channel="${channel}" title="Which lines share the material">lines</button></td>`;
     html += '<td>' +
       `<span class="parallels-checked-by">${escapeHtml(checkedLabel(check))}</span>` +
+      `<button class="parallels-view" data-museum="${escapeHtml(row.id)}" title="Read the whole fragment in a tab beside Images">view</button>` +
       (inProject
         ? '<span class="parallels-have">in project</span>'
         : `<button class="parallels-add" data-museum="${escapeHtml(row.id)}">Add as source</button>`) +
@@ -2085,6 +3264,9 @@ async function renderParallels() {
   if (!panel) return;
 
   await loadParallelChecks();
+  if (!parallelsState.results && await restoreParallelsState()) {
+    // restored: fall through and render with the recovered results
+  }
   const status = window.EblCorpus ? await EblCorpus.status() : { cached: false };
   const { results, running, message } = parallelsState;
 
@@ -2112,9 +3294,10 @@ async function renderParallels() {
     const sorted = Object.entries(manuscripts)
       .map(([id, ms]) => ({ id, siglum: ms.siglum }))
       .sort((a, b) => a.siglum.localeCompare(b.siglum));
-    html += `<label title="Pool every source into one query, or ask with a single tablet.">` +
+    html += `<label title="Pool every source into one query, ask with a single tablet, or ask with the reconstructed composite text alone.">` +
             `Search with <select id="parallels-source"${disabled}>` +
             `<option value="all"${opts.source === 'all' ? ' selected' : ''}>All sources</option>` +
+            `<option value="composite"${opts.source === 'composite' ? ' selected' : ''}>Composite text</option>` +
             sorted.map((m) =>
               `<option value="${escapeHtml(m.id)}"${opts.source === m.id ? ' selected' : ''}>` +
               `${escapeHtml(m.siglum)}</option>`).join('') +
@@ -2133,6 +3316,9 @@ async function renderParallels() {
           [0, 5, 10, 20, 40].map((v) => `<option value="${v}"${opts.minDocNgrams === v ? ' selected' : ''}>` +
             `${v === 0 ? 'no limit' : v}</option>`).join('') +
           '</select> sequences</label>';
+  html += `<label title="Restrict the query: chapter lines (35-60, §40) or one tablet line of the chosen source (o 59, r 12\u2019). Empty = all lines. The colophon channel is not affected.">` +
+          `Lines § <input type="text" id="parallels-range" class="parallels-range-input"${disabled} ` +
+          `value="${escapeHtml(opts.range || '')}" placeholder="all"></label>`;
   html += '</div>';
 
   if (message) html += `<div class="parallels-message">${escapeHtml(message)}</div>`;
@@ -2144,6 +3330,12 @@ async function renderParallels() {
             (results.queried && results.queried.length === 1
               ? `${escapeHtml(results.queried[0])} alone`
               : `${results.sources} source${results.sources === 1 ? '' : 's'}`);
+    if (results.range && results.range.kind === 'sec') {
+      html += ` (lines §${results.range.from}${results.range.to !== results.range.from ? '–§' + results.range.to : ''})`;
+    } else if (results.range && results.range.kind === 'tablet') {
+      html += ` (tablet line ${escapeHtml((results.range.surface ? results.range.surface + ' ' : '') + results.range.num)})`;
+    }
+
     html += results.withColophon
       ? ` (${results.withColophon} with a colophon, scored separately)`
       : ' (no colophons found, so only the text channel was scored)';
@@ -2206,6 +3398,9 @@ async function renderParallels() {
     el.addEventListener('change', () => {
       apply(el.value);
       parallelsState.results = null;
+      parallelsOpenLines.clear();
+      saveParallelsResults();
+      saveParallelsUi();
       parallelsState.message = 'Settings changed — run the search again.';
       renderParallels();
     });
@@ -2214,11 +3409,53 @@ async function renderParallels() {
   onOption('parallels-n', (v) => { parallelsState.options.n = Number(v); });
   onOption('parallels-weighting', (v) => { parallelsState.options.weighting = v; });
   onOption('parallels-floor', (v) => { parallelsState.options.minDocNgrams = Number(v); });
+  const rangeEl = document.getElementById('parallels-range');
+  if (rangeEl) rangeEl.addEventListener('change', () => {
+    parallelsState.options.range = rangeEl.value.trim();
+    parallelsState.results = null;
+    parallelsOpenLines.clear();
+    saveParallelsResults();
+    saveParallelsUi();
+    parallelsState.message = 'Settings changed — run the search again.';
+    renderParallels();
+  });
   panel.querySelectorAll('.parallels-add').forEach((btn) => {
     btn.addEventListener('click', () => addParallelAsSource(btn.dataset.museum));
   });
   panel.querySelectorAll('.parallels-check-box').forEach((box) => {
     box.addEventListener('change', () => toggleParallelCheck(box.dataset.museum, box.checked));
+  });
+  panel.querySelectorAll('.parallels-view').forEach((btn) => {
+    btn.addEventListener('click', () => openTabletView(btn.dataset.museum));
+  });
+  const expandLinesRow = (btn) => {
+    const tr = btn.closest('tr');
+    if (tr.nextElementSibling && tr.nextElementSibling.classList.contains('parallels-lines-row')) return;
+    const detail = document.createElement('tr');
+    detail.className = 'parallels-lines-row';
+    const cell = document.createElement('td');
+    cell.colSpan = tr.children.length;
+    detail.appendChild(cell);
+    tr.after(detail);
+    showParallelLines(btn.dataset.museum, btn.dataset.channel, cell);
+  };
+  panel.querySelectorAll('.parallels-lines-btn').forEach((btn) => {
+    const key = btn.dataset.channel + '|' + btn.dataset.museum;
+    btn.addEventListener('click', () => {
+      const tr = btn.closest('tr');
+      const open = tr.nextElementSibling;
+      if (open && open.classList.contains('parallels-lines-row')) {
+        open.remove();                       // second click folds it back up
+        parallelsOpenLines.delete(key);
+        saveParallelsUi();
+        return;
+      }
+      expandLinesRow(btn);
+      parallelsOpenLines.add(key);
+      saveParallelsUi();
+    });
+    // A view left open stays open across re-renders and reloads alike.
+    if (parallelsOpenLines.has(key)) expandLinesRow(btn);
   });
 }
 
@@ -2232,7 +3469,8 @@ function setupTabs() {
       const targetTab = tab.dataset.tab;
 
       // Update active tab
-      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === targetTab));
+      document.querySelectorAll('.pane-tab')
+        .forEach(t => t.classList.toggle('active', t.dataset.tab === targetTab));
 
       // Update visible content
       contents.forEach(c => c.classList.toggle('active', c.dataset.tab === targetTab));
@@ -2246,6 +3484,9 @@ function setupTabs() {
       }
       if (targetTab === 'parallels') {
         renderParallels();
+      }
+      if (targetTab === 'paradigms') {
+        renderParadigmsTab();
       }
       updateUploadButtonVisibility();
     });
@@ -3317,6 +4558,8 @@ function setupSearchAll() {
   const regexCheckbox = document.getElementById('search-regex');
   const caseCheckbox = document.getElementById('search-case');
   const stripCheckbox = document.getElementById('search-strip');
+  const signsCheckbox = document.getElementById('search-signs');
+  const scopeSelect = document.getElementById('search-scope');
   const resultsContainer = document.getElementById('search-results');
 
   // Track current search results and selected match
@@ -3406,6 +4649,14 @@ function setupSearchAll() {
   regexCheckbox.addEventListener('change', () => performSearch());
   caseCheckbox.addEventListener('change', () => performSearch());
   stripCheckbox.addEventListener('change', () => performSearch());
+  scopeSelect.addEventListener('change', () => performSearch());
+  signsCheckbox.addEventListener('change', () => {
+    // Sign matching subsumes both: apparatus is stripped by the conversion
+    // itself, and a code sequence is not a regex.
+    regexCheckbox.disabled = signsCheckbox.checked;
+    stripCheckbox.disabled = signsCheckbox.checked;
+    performSearch();
+  });
 
   // Update button states when search input changes
   function updateReplaceButtons() {
@@ -3414,7 +4665,8 @@ function setupSearchAll() {
     // Replace is off while the apparatus is ignored. A match found in the
     // stripped text spans the brackets that were dropped inside it, so writing
     // over it would leave an unbalanced brace or bracket in the source.
-    const canReplace = hasQuery && hasResults && !stripping();
+    const canReplace = hasQuery && hasResults && !stripping() && !signsCheckbox.checked
+      && scopeSelect.value !== 'composite';
     replaceBtn.disabled = !canReplace || selectedResultIndex < 0;
     replaceAllBtn.disabled = !canReplace;
   }
@@ -3425,6 +4677,47 @@ function setupSearchAll() {
   // All can never disagree about what the pattern means. The "m" is the point:
   // without it "^" anchors to the start of the whole file, which is why an
   // anchored Replace All used to list matches and then change nothing.
+  // Occurrences of a sign-code run, as character spans over the original
+  // text. Per line, since a sign run should not silently cross a line break.
+  // Words are converted one by one and their code counts consumed off the
+  // stream, so a hit maps back to the exact words whose signs carry it.
+  function findSignSpans(content, needle) {
+    const conv = parallelsState.converter;
+    const spans = [];
+    let lineStart = 0;
+    for (const rawLine of String(content || '').split('\n')) {
+      const words = [];
+      const wordRe = /\S+/g;
+      let w;
+      while ((w = wordRe.exec(rawLine)) !== null) words.push({ t: w[0], s: w.index });
+
+      const codes = [];
+      const owner = [];               // owner[k] = index of the word code k came from
+      for (let wi = 0; wi < words.length; wi++) {
+        let converted;
+        try { converted = conv.convertLine(words[wi].t).codes; } catch (_) { converted = []; }
+        for (const code of converted) { codes.push(code); owner.push(wi); }
+      }
+
+      let lastKey = '';
+      for (let i = 0; i + needle.length <= codes.length; i++) {
+        let ok = true;
+        for (let k = 0; k < needle.length; k++) {
+          if (codes[i + k] !== needle[k]) { ok = false; break; }
+        }
+        if (!ok) continue;
+        const wa = words[owner[i]];
+        const wb = words[owner[i + needle.length - 1]];
+        const key = wa.s + '|' + wb.s;
+        if (key === lastKey) continue;   // several hits inside one word span
+        lastKey = key;
+        spans.push({ start: lineStart + wa.s, end: lineStart + wb.s + wb.t.length, m: null });
+      }
+      lineStart += rawLine.length + 1;
+    }
+    return spans;
+  }
+
   function stripping() {
     return stripCheckbox.checked && !!window.EblAtfSigns;
   }
@@ -3650,23 +4943,70 @@ function setupSearchAll() {
       return;
     }
 
-    let regex;
-    try {
-      regex = buildRegex();
-      if (!regex) {
+    const signMode = signsCheckbox.checked;
+    let regex = null;
+    let signNeedle = null;
+    let signNeedles = null;
+    let signNote = '';
+
+    if (signMode) {
+      if (!window.EblAtfSigns) {
+        resultsContainer.innerHTML = '<div class="search-empty">The sign modules are not loaded.</div>';
+        return;
+      }
+      // The sign table is fetched on first use; search again once it is here.
+      if (!parallelsState.converter) {
+        resultsContainer.innerHTML = '<div class="search-empty">Loading the sign table&hellip;</div>';
+        ensureAtfConverter().then(() => performSearch(preserveIndex))
+          .catch((err) => {
+            resultsContainer.innerHTML =
+              `<div class="search-empty">Could not load the sign table: ${escapeHtml(err.message)}</div>`;
+          });
+        return;
+      }
+      const converted = parallelsState.converter.convertLine(query);
+      signNeedle = converted.codes;
+      // The other spelling of ana/ina is a needle of its own.
+      signNeedles = [signNeedle];
+      for (const variant of prepositionVariants(query)) {
+        const codes = parallelsState.converter.convertLine(variant).codes;
+        const key = codes.join(' ');
+        if (codes.length && !signNeedles.some((nd) => nd.join(' ') === key)) {
+          signNeedles.push(codes);
+        }
+      }
+      if (!signNeedle.length) {
         currentResults = [];
         selectedResultIndex = -1;
         updateReplaceButtons();
         resultsContainer.innerHTML =
-          '<div class="search-empty">Nothing left to search for once the apparatus is removed</div>';
+          '<div class="search-empty">Nothing in the query resolves to a sign.</div>';
         return;
       }
-    } catch (e) {
-      currentResults = [];
-      selectedResultIndex = -1;
-      updateReplaceButtons();
-      resultsContainer.innerHTML = `<div class="search-empty">Invalid regex: ${escapeHtml(e.message)}</div>`;
-      return;
+      const names = (converted.tokens || []).map((t) => t.name || (t.codes && t.codes[0]) || '?');
+      signNote = names.length ? names.join(' ') : signNeedle.join(' ');
+      if (signNeedles.length > 1) signNote += ' (ana/ina matched in both spellings)';
+      if (converted.unresolved && converted.unresolved.length) {
+        signNote += ` &middot; unresolved: ${converted.unresolved.join(', ')}`;
+      }
+    } else {
+      try {
+        regex = buildRegex();
+        if (!regex) {
+          currentResults = [];
+          selectedResultIndex = -1;
+          updateReplaceButtons();
+          resultsContainer.innerHTML =
+            '<div class="search-empty">Nothing left to search for once the apparatus is removed</div>';
+          return;
+        }
+      } catch (e) {
+        currentResults = [];
+        selectedResultIndex = -1;
+        updateReplaceButtons();
+        resultsContainer.innerHTML = `<div class="search-empty">Invalid regex: ${escapeHtml(e.message)}</div>`;
+        return;
+      }
     }
 
     const results = [];
@@ -3695,36 +5035,60 @@ function setupSearchAll() {
     };
 
     const strip = stripping();
-    for (const [id, ms] of Object.entries(manuscripts)) {
+    // The composite scope searches one virtual document; hits land in the
+    // score rather than in a source file.
+    const compositeScope = scopeSelect.value === 'composite';
+    const searchTargets = compositeScope
+      ? [['__composite__', { siglum: 'Composite text', content: compositeSearchDoc() }]]
+      : Object.entries(manuscripts);
+    for (const [id, ms] of searchTargets) {
       const content = ms.content;
       const starts = lineStartsOf(content);
       const lineLabels = tabletLineLabels(content);
       // Searched with the apparatus removed, but every offset is mapped back,
       // so what is listed, highlighted and replaced is the text as it stands.
-      const stripped = strip ? EblAtfSigns.stripApparatus(content) : null;
+      const stripped = (!signMode && strip) ? EblAtfSigns.stripApparatus(content) : null;
       const subject = stripped ? stripped.text : content;
       const matches = [];
 
-      regex.lastIndex = 0;
-      let m;
-      while ((m = regex.exec(subject)) !== null) {
-        // A zero-length match never advances lastIndex on its own.
-        if (m[0].length === 0) { regex.lastIndex++; continue; }
+      let spans;
+      if (signMode) {
+        spans = [];
+        const seen = new Set();
+        for (const nd of signNeedles) {
+          for (const sp of findSignSpans(content, nd)) {
+            const key = sp.start + '|' + sp.end;
+            if (!seen.has(key)) { seen.add(key); spans.push(sp); }
+          }
+        }
+        spans.sort((a, b) => a.start - b.start);
+      } else {
+        spans = [];
+        regex.lastIndex = 0;
+        let m;
+        while ((m = regex.exec(subject)) !== null) {
+          // A zero-length match never advances lastIndex on its own.
+          if (m[0].length === 0) { regex.lastIndex++; continue; }
+          // The end is taken from the last matched character rather than the
+          // one after it, so apparatus sitting just past the match is not
+          // swallowed by a replacement.
+          spans.push({
+            m,
+            start: stripped ? stripped.map[m.index] : m.index,
+            end: stripped
+              ? stripped.map[m.index + m[0].length - 1] + 1
+              : m.index + m[0].length,
+          });
+        }
+      }
 
-        // The end is taken from the last matched character rather than the
-        // one after it, so apparatus sitting just past the match is not
-        // swallowed by a replacement.
-        const start = stripped ? stripped.map[m.index] : m.index;
-        const end = stripped
-          ? stripped.map[m.index + m[0].length - 1] + 1
-          : m.index + m[0].length;
-
+      for (const span of spans) {
         const match = {
-          m,
-          start,
-          end,
-          lineIndex: lineIndexOf(starts, start),
-          endLineIndex: lineIndexOf(starts, end - 1),
+          m: span.m,
+          start: span.start,
+          end: span.end,
+          lineIndex: lineIndexOf(starts, span.start),
+          endLineIndex: lineIndexOf(starts, span.end - 1),
         };
         match.lineNum = match.lineIndex + 1;
         match.endLineNum = match.endLineIndex + 1;
@@ -3759,13 +5123,15 @@ function setupSearchAll() {
     // Render results
     if (results.length === 0) {
       updateReplaceButtons();
-      resultsContainer.innerHTML = '<div class="search-empty">No matches found</div>';
+      resultsContainer.innerHTML = signMode
+        ? `<div class="search-empty">No matches found &mdash; searched by sign as: ${signNote}</div>`
+        : '<div class="search-empty">No matches found</div>';
       return;
     }
 
-    const stripNote = strip
-      ? ' &middot; apparatus ignored &mdash; untick to replace'
-      : '';
+    const stripNote = signMode
+      ? ` &middot; matched by sign: ${signNote} &mdash; untick Signs to replace`
+      : (strip ? ' &middot; apparatus ignored &mdash; untick to replace' : '');
     let html = `<div class="search-count">${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${results.length} manuscript${results.length !== 1 ? 's' : ''}${stripNote}</div>`;
 
     let flatIndex = 0;
@@ -3774,6 +5140,17 @@ function setupSearchAll() {
       html += `<div class="search-result-header" data-id="${group.id}">${escapeHtml(group.siglum)} (${group.matches.length})</div>`;
 
       for (const match of group.matches) {
+        if (group.id === '__composite__') {
+          const secLabel = match.sec ? `§${match.sec}` : `line ${match.lineNum}`;
+          html += `<div class="search-result-item" data-id="${group.id}" data-line="${match.lineNum}" data-index="${flatIndex}">`;
+          html += `<a class="search-result-line" href="#" data-nav="score" data-sec="${match.sec || ''}" ` +
+                  `title="Show ${secLabel} in the score">${secLabel}</a>`;
+          html += '<span class="search-result-sec search-result-sec-none"></span>';
+          html += `<span class="search-result-text">` + match.highlighted + `</span>`;
+          html += '</div>';
+          flatIndex++;
+          continue;
+        }
         // The tablet's line, not the file's. A match on a line with no
         // tablet number (the siglum header, a ruling) falls back to the
         // file line, said as such.
@@ -3820,7 +5197,15 @@ function setupSearchAll() {
 
     // The siglum opens the source itself
     resultsContainer.querySelectorAll('.search-result-header').forEach(el => {
-      el.addEventListener('click', () => openSourceAt(el.dataset.id, 0));
+      el.addEventListener('click', () => {
+        if (el.dataset.id === '__composite__') {
+          modal.classList.add('hidden');
+          const tab = document.querySelector('.pane-tab[data-tab="score"]');
+          if (tab && !tab.classList.contains('active')) tab.click();
+          return;
+        }
+        openSourceAt(el.dataset.id, 0);
+      });
     });
 
     // Something is always current, so Replace is never a dead button.

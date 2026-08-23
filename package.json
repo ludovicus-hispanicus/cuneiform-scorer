@@ -27,6 +27,7 @@
     },
     "files": [
       "index.html",
+      "favicon.svg",
       "scorer.html",
       "manage.html",
       "index.css",

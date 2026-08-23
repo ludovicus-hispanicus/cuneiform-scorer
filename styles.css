@@ -170,6 +170,11 @@ body {
   opacity: 1;
 }
 
+.app-mark {
+  flex-shrink: 0;
+  display: block;
+}
+
 .header h1 {
   font-size: 1.2rem;
   font-weight: 500;
@@ -799,6 +804,214 @@ body {
   padding: 0.1rem 0.2rem;
 }
 
+.parallels-range-input {
+  width: 4.5rem;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+  margin-left: 0.25rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-white);
+  color: var(--text-dark);
+}
+
+.parallels-paradigms-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.parallels-paradigms-title {
+  font-weight: 600;
+  color: #8b6914;
+}
+
+body.dark-mode .parallels-paradigms-title {
+  color: #d9a441;
+}
+
+.pg-block {
+  margin: 0.6rem 0 0.9rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  overflow-x: auto;
+}
+
+.pg-group {
+  margin: 0.9rem 0 0.2rem;
+}
+
+.pg-group-head {
+  cursor: pointer;
+  user-select: none;
+  margin: 0 0 0.2rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+/* A witness of this project (or a recorded join of one): green edge, so the
+   eye separates "my tablets varying" from "new material in the corpus". */
+.pg-mine {
+  border-left: 3px solid #1baf7a;
+  background: #f2faf6;
+}
+
+body.dark-mode .pg-mine {
+  background: #1c2b24;
+  border-left-color: #199e70;
+}
+
+.pg-query {
+  border-left: 3px solid var(--accent);
+  /* Its own tint, so the guide line never blends into the candidates. */
+  background: var(--accent-light);
+  /* The line being compared stays pinned while its twins scroll past — the
+     .score pane is the scrolling ancestor. Dragging the header adjusts the
+     inline top, so it can ride at any height. */
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+.pg-query .pg-head {
+  cursor: grab;
+  user-select: none;
+}
+
+.pg-query.pg-dragging {
+  opacity: 0.92;
+}
+
+.pg-query.pg-dragging .pg-head {
+  cursor: grabbing;
+}
+
+.pg-drag-hint {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.pg-head {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pg-head a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.pg-head a:hover {
+  text-decoration: underline;
+}
+
+.pg-chip-same {
+  color: #137c56;
+}
+
+body.dark-mode .pg-chip-same {
+  color: #39e0a6;
+}
+
+.pg-chip {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.72rem;
+  background: var(--bg-light);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.pg-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.pg-cell {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0.5rem;
+  border-left: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.pg-cell:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+
+.pg-word {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.9rem;
+}
+
+.pg-signs {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 0.1rem;
+}
+
+.pg-cell-hit {
+  background: #fff3cd;
+  border-radius: 3px;
+}
+
+.pg-cell-hit .pg-word {
+  font-weight: 700;
+}
+
+body.dark-mode .pg-cell-hit {
+  background: #4a3b1e;
+  box-shadow: inset 0 -2px 0 #f4ae25;
+}
+
+.paradigm-slot {
+  margin: 0.5rem 0 0.9rem;
+}
+
+.paradigm-slot-head {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  padding-bottom: 0.25rem;
+}
+
+.paradigm-slot-replaced {
+  background: #fff3cd;
+  color: #333;
+  border-radius: 2px;
+  padding: 0 3px;
+  font-weight: 600;
+}
+
+body.dark-mode .paradigm-slot-replaced {
+  background: #f4ae25;
+  color: #10151d;
+}
+
+.parallels-paradigm-filler {
+  font-family: "Consolas", "Monaco", monospace;
+}
+
 .parallels-note {
   padding: 0.5rem 0.7rem;
   margin: 0.25rem 0 0.75rem;
@@ -807,6 +1020,11 @@ body {
   color: var(--text-muted);
   font-size: 0.85rem;
   line-height: 1.55;
+}
+
+body.dark-mode .parallels-note {
+  background: #2c261a;
+  border-left-color: #6b5a2e;
 }
 
 .parallels-join-owner {
@@ -851,6 +1069,182 @@ body {
   font-weight: 400;
 }
 
+.pane-tab-tablet {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.8rem;
+}
+
+.tablet-tab-close {
+  margin-left: 0.4rem;
+  opacity: 0.55;
+}
+
+.tablet-tab-close:hover {
+  opacity: 1;
+}
+
+.tablet-view-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tablet-view-note {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.tablet-meta {
+  margin: 0 0 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.4rem 0.7rem;
+  background: var(--bg-light);
+}
+
+.tablet-meta summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.tablet-meta table {
+  margin-top: 0.4rem;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.tablet-meta th {
+  text-align: left;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 0.1rem 0.9rem 0.1rem 0;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.tablet-meta td {
+  padding: 0.1rem 0;
+}
+
+.tablet-view-text {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.tablet-line-hit {
+  background: #fff3cd;
+  border-radius: 2px;
+}
+
+body.dark-mode .tablet-line-hit {
+  background: #4a3b1e;
+  box-shadow: inset 3px 0 0 #f4ae25;
+}
+
+.pl-goto-q,
+.pl-goto-c {
+  color: inherit;
+  text-decoration: none;
+}
+
+.pl-goto-q:hover,
+.pl-goto-c:hover {
+  text-decoration: underline;
+  color: var(--accent);
+}
+
+.parallels-view {
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  margin-right: 0.35rem;
+}
+
+.parallels-lines-btn {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.parallels-lines-row > td {
+  padding: 0.3rem 0.5rem 0.6rem 2rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-light);
+}
+
+.parallels-lines-summary {
+  margin-bottom: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.parallels-lines-table {
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.parallels-lines-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding: 0 0.5rem 0.2rem 0;
+}
+
+.parallels-kwic-hit {
+  background: #fff3cd;
+  font-weight: 600;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+body.dark-mode .parallels-kwic-hit {
+  background: #f4ae25;
+  color: #10151d;
+}
+
+.parallels-lines-table td {
+  padding: 0.12rem 0.5rem 0.12rem 0;
+  border: 0;
+  white-space: nowrap;
+}
+
+.parallels-lines-q {
+  color: var(--text-muted);
+}
+
+.parallels-lines-c {
+  color: #8b6914;
+}
+
+.parallels-lines-n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.parallels-lines-text {
+  font-family: "Consolas", "Monaco", monospace;
+  color: var(--text-dark);
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.parallels-lines-note {
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
 .parallels-add {
   padding: 0.15rem 0.5rem;
   cursor: pointer;
@@ -869,6 +1263,15 @@ body {
 
 @keyframes score-line-found {
   from { background: var(--accent-light); }
+  to { background: transparent; }
+}
+
+body.dark-mode .score-line-found {
+  animation-name: score-line-found-dark;
+}
+
+@keyframes score-line-found-dark {
+  from { background: #3c5578; }
   to { background: transparent; }
 }
 
@@ -1390,6 +1793,16 @@ body.dark-mode .reconstructed-text:empty::before {
   box-shadow: 0 0 0 2px var(--accent-light);
 }
 
+.search-input-row select {
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-white);
+  color: var(--text-dark);
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+
 .regex-toggle {
   display: flex;
   align-items: center;
@@ -1555,6 +1968,11 @@ body.dark-mode .reconstructed-text:empty::before {
 .search-match {
   background: #fff3cd;
   font-weight: 600;
+}
+
+body.dark-mode .search-match {
+  background: #f4ae25;
+  color: #10151d;
 }
 
 .search-count {
@@ -3557,4 +3975,18 @@ body.dark-mode .viewer-footer {
 /* Leave room so a long siglum never runs under the button. */
 .manuscript-item a[data-ebl-link] {
   padding-right: 1.5rem;
+}
+
+body.dark-mode .colophon-header {
+  background: #2c261a;
+  color: #f4ae25;
+}
+
+/* Warm links (the parallels refresh, the candidate line refs) sit too dark on
+   the dark surface with the light ochre. */
+body.dark-mode .parallels-link,
+body.dark-mode .parallels-join-owner,
+body.dark-mode .parallels-section-title,
+body.dark-mode .parallels-lines-c {
+  color: #d9a441;
 }

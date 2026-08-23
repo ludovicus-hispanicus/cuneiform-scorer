@@ -156,6 +156,29 @@
     };
   }
 
+  // Which raw lines of a sign stream carry which of the given n-grams.
+  //
+  // Raw lines, deliberately: preprocess() drops lines that preserve
+  // nothing, but the caller wants indices that line up with the ATF's text
+  // lines, and eBL emits one sign line per ATF text line, blank or not.
+  // Only line-internal n-grams are located — one that spans a line break
+  // (it contains the separator token) contributes to the score but cannot
+  // sit on a single line, so it is left out here.
+  function locateInLines(signs, gramSet, nValues = DEFAULT_N_VALUES) {
+    const found = [];
+    const lines = String(signs || '').split('\n');
+    for (let index = 0; index < lines.length; index++) {
+      const tokens = lines[index].trim().split(/\s+/).filter(Boolean);
+      if (!tokens.length) continue;
+      const grams = [];
+      for (const gram of ngramSet(tokens, nValues)) {
+        if (gramSet.has(gram)) grams.push(gram);
+      }
+      if (grams.length) found.push({ line: index, grams });
+    }
+    return found;
+  }
+
   // Rank a corpus against one or two profiles.
   //
   // `entries` is anything iterable of { id, signs } — the corpus dump has that
@@ -214,11 +237,16 @@
       candidates.push({ id: entry.id, perChannel });
     }
 
-    // eBL weights a shared n-gram by how rare it is across the corpus:
+    // This weighting is this app's own, not eBL's. eBL's matcher offers
+    // plain overlap and an optional weighting by n-gram LENGTH (len² per
+    // gram, ebl_ngrams/metrics.py) — which does nothing here, where every
+    // gram is the same length. Instead a shared n-gram is weighted by how
+    // rare it is across the corpus:
     //   idf = log(N / (df + 1)) + 1
-    // Under plain overlap a formulaic opening counts as much as a distinctive
-    // phrase, which for a corpus of omens beginning "DIŠ {mul}" flatters the
-    // wrong fragments.
+    // because under plain overlap a formulaic opening counts as much as a
+    // distinctive phrase, which for a corpus of omens beginning "DIŠ {mul}"
+    // flatters the wrong fragments. Measured on EAE 56 it beat plain
+    // overlap at every n (summed ranks of the known pieces, 33 -> 21).
     const idf = new Map();
     if (weighting === 'tfidf') {
       const total = candidates.length + 1;
@@ -306,6 +334,7 @@
     DEFAULT_N_VALUES,
     preprocess,
     ngramSet,
+    locateInLines,
     splitColophon,
     buildProfile,
     score,
