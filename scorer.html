@@ -265,6 +265,8 @@
           <option value="resolved">Resolved</option>
           <option value="bug">Bugs</option>
           <option value="enhancement">Enhancements</option>
+          <option value="reference">References</option>
+          <option value="commentary">Commentary</option>
         </select>
         <button id="add-annotation-btn" class="btn-primary" title="Add annotation">+</button>
         <button id="close-annotations-btn" class="modal-close">&times;</button>
@@ -273,6 +275,8 @@
     <div id="annotation-form" class="annotation-form hidden">
       <div class="form-row">
         <select id="annotation-type">
+          <option value="commentary">Commentary</option>
+          <option value="reference">Reference</option>
           <option value="bug">Bug</option>
           <option value="enhancement">Enhancement</option>
         </select>
@@ -280,7 +284,9 @@
       </div>
       <textarea id="annotation-desc" placeholder="Description (optional)..." rows="2"></textarea>
       <div class="form-row">
-        <input type="text" id="annotation-location" placeholder="Location, e.g. ms name : line (optional)">
+        <select id="annotation-source" title="Which source this note is about (optional)"></select>
+        <input type="text" id="annotation-sec" class="annotation-sec" placeholder="§"
+               title="Chapter line the note is anchored to, e.g. 35 (optional)">
         <button id="save-annotation-btn" class="btn-primary">Save</button>
         <button id="cancel-annotation-btn">Cancel</button>
       </div>
@@ -349,6 +355,39 @@
         <span class="pull-spacer"></span>
         <button type="button" id="variant-cancel">Cancel</button>
         <button type="submit" id="variant-go" class="pull-apply-btn">Add variant</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Type and metadata for one newly added source -->
+  <dialog id="source-meta-dialog" class="dialog source-meta-dialog">
+    <form id="source-meta-form" method="dialog">
+      <h2 id="source-meta-title">Describe this source</h2>
+      <p id="source-meta-prefill" class="field-hint" hidden></p>
+
+      <label class="field-label" for="source-meta-type">Type</label>
+      <select id="source-meta-type" class="field-input"></select>
+      <p class="field-hint">Library, commentary, excerpt&hellip; &mdash; groups and colours the
+        source everywhere in the app, and becomes the eBL manuscript type on export.</p>
+
+      <label class="field-label" for="source-meta-provenance">Provenance</label>
+      <select id="source-meta-provenance" class="field-input"></select>
+
+      <div class="source-meta-row">
+        <div class="source-meta-col">
+          <label class="field-label" for="source-meta-period">Period</label>
+          <select id="source-meta-period" class="field-input"></select>
+        </div>
+        <div class="source-meta-col">
+          <label class="field-label" for="source-meta-modifier">Modifier</label>
+          <select id="source-meta-modifier" class="field-input"></select>
+        </div>
+      </div>
+
+      <div class="dialog-actions">
+        <span class="pull-spacer"></span>
+        <button type="button" id="source-meta-skip">Skip</button>
+        <button type="submit" id="source-meta-save" class="pull-apply-btn">Save</button>
       </div>
     </form>
   </dialog>

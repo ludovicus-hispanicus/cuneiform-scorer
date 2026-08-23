@@ -26,6 +26,21 @@
     return String(museum).split(/\s*\(\s*\+\s*\)\s*/)[0].trim();
   }
 
+  // "https://www.ebl.lmu.de/fragmentarium/K.2246" and "K.2246" mean the
+  // same thing to a user pasting from the browser, so both are accepted.
+  // Recognised paths are /fragmentarium/<id> and /library/<id>; the query
+  // string and hash are dropped.
+  function parseMuseumInput(raw) {
+    const s = String(raw || '').trim();
+    if (!/^https?:\/\//i.test(s) && !/^www\./i.test(s)) return s;
+    try {
+      const url = new URL(/^https?:/i.test(s) ? s : 'https://' + s);
+      const m = url.pathname.match(/\/(?:fragmentarium|library)\/([^/]+)/i);
+      if (m) return decodeURIComponent(m[1]).trim();
+    } catch (_) { /* not a URL after all; fall through */ }
+    return s;
+  }
+
   function fragmentUrl(museum) {
     const primary = primaryOf(museum);
     const base = (window.EblClient && window.EblClient.getApiUrl)
@@ -47,7 +62,7 @@
         '<input type="text" id="ebl-fetch-input" class="field-input" autocomplete="off"' +
               ' placeholder="K.2246" spellcheck="false">' +
         '<p class="field-hint">e.g. <code>K.2246</code>, <code>BM.34653</code>,' +
-          ' <code>1881,0727.62</code>, <code>Rm-II.548</code></p>' +
+          ' <code>1881,0727.62</code> &mdash; or paste the whole eBL URL</p>' +
         '<div class="url-preview">' +
           '<span class="url-preview-label">Will fetch</span>' +
           '<code id="ebl-fetch-url" class="url-preview-value">&mdash;</code>' +
@@ -77,7 +92,7 @@
       const form = document.getElementById('ebl-fetch-form');
 
       const refresh = () => {
-        const museum = input.value.trim();
+        const museum = parseMuseumInput(input.value);
         if (!museum) {
           urlEl.textContent = '—';
           noteEl.hidden = true;
@@ -88,6 +103,9 @@
         urlEl.textContent = info.url;
         const notes = [];
         let blocked = false;
+        if (museum !== input.value.trim()) {
+          notes.push('Read "' + museum + '" from the pasted URL.');
+        }
         if (info.primary !== museum) {
           notes.push('A join is filed under its first number, so eBL is asked for '
                      + info.primary + '.');
@@ -112,7 +130,7 @@
       const onCancel = (e) => { if (e) e.preventDefault(); cleanup(null); };
       const onSubmit = (e) => {
         e.preventDefault();
-        const museum = input.value.trim();
+        const museum = parseMuseumInput(input.value);
         if (museum && !goBtn.disabled) cleanup(museum);
       };
 
@@ -191,6 +209,16 @@
     const lineCount = atf.split('\n')
       .filter((l) => /^\s*\d+['’]?[ab]?\./.test(l)).length;
     const joins = joinsOf(frag, primary);
+    // What the record knows about itself, mapped to manuscripts.json
+    // fields (period, periodModifier, provenance). The type is a chapter
+    // question, not a fragment one, so eBL cannot supply it — the caller
+    // asks the user.
+    const fields = (window.EblClient && window.EblClient.fragmentToManuscriptFields)
+      ? window.EblClient.fragmentToManuscriptFields(frag)
+      : {};
+    const genres = (frag.genres || [])
+      .map((g) => (g.category || []).join(' > '))
+      .filter(Boolean);
     const header = joins.length
       ? museum + '\n' + JOINS_PREFIX + joins.join(JOINS_SEPARATOR) + '\n'
       : museum + '\n';
@@ -198,6 +226,8 @@
       primary,
       atf,
       joins,
+      fields,
+      genres,
       // the siglum line is this app's own convention; eBL's ATF follows it
       content: header + atf + '\n',
       lineCount,
@@ -205,7 +235,7 @@
   }
 
   window.EblFetch = {
-    primaryOf, fragmentUrl, ensureDialog, askMuseumNumber, fetchFragment, esc,
-    readStoredJoins, JOINS_PREFIX, JOINS_SEPARATOR,
+    primaryOf, parseMuseumInput, fragmentUrl, ensureDialog, askMuseumNumber,
+    fetchFragment, esc, readStoredJoins, JOINS_PREFIX, JOINS_SEPARATOR,
   };
 })();

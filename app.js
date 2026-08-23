@@ -1077,6 +1077,15 @@ function renderScore() {
       html += `<div class="score-line-header${vi ? ' is-variant' : ''}">`;
       html += `<span class="line-label">§ ${lineNum}${letter}</span> `;
       html += `<span class="reconstructed-text" contenteditable="true" data-line="${lineNum}" data-variant="${vi}">${renderAtf(reading.text)}</span>`;
+      // Notes anchored to this §, open ones only: resolved notes stop tugging
+      // at the eye but stay reachable through the panel.
+      if (vi === 0) {
+        const openNotes = annotations.filter((a) => parseInt(a.sec, 10) === lineNum && a.status === 'open').length;
+        if (openNotes) {
+          html += `<button type="button" class="score-note-dot" data-line="${lineNum}" ` +
+                  `title="${openNotes} open note${openNotes === 1 ? '' : 's'} on § ${lineNum}">${openNotes}</button>`;
+        }
+      }
       // One affordance, not three. The grammar allows a single note per reading,
       // so that entry disables itself once this reading has one.
       html += `<span class="recon-add-wrap">`;
@@ -1936,6 +1945,7 @@ async function addParallelAsSource(museum) {
   loadManuscript(id);
   markUnsaved();
   setStatus('connected', 'Added ' + res.primary);
+  await askSourceMeta(museum, { ...res.fields, genres: res.genres });
   renderParallels();
 }
 
@@ -2961,6 +2971,109 @@ function showAddManuscriptDialog() {
 // Add a source by downloading its transliteration from eBL. The ATF is
 // already in this app’s format, so it is stored as-is; what it cannot carry
 // is the § score assignments, which are this project’s own.
+// Ask what this one source is — type above all, provenance and period with
+// it — right when it enters the project, instead of leaving a blank row to
+// be filled in Settings later. Prefilled from the eBL record where the
+// record knows (period, provenance); the type is always the user's call.
+// Writes the same manuscripts.json the Settings page edits.
+async function askSourceMeta(siglum, prefill = {}) {
+  const dialog = document.getElementById('source-meta-dialog');
+  if (!dialog || !window.EblClient) return;
+
+  const fill = (el, names, current) => {
+    el.innerHTML = '<option value=""></option>' + names.map((name) =>
+      `<option value="${escapeHtml(name)}"${name === current ? ' selected' : ''}>` +
+      `${escapeHtml(name)}</option>`).join('');
+  };
+
+  let provenances = [];
+  try { provenances = await EblClient.getProvenances(); } catch (_) { /* fallback list */ }
+
+  const typeEl = document.getElementById('source-meta-type');
+  const provEl = document.getElementById('source-meta-provenance');
+  const periodEl = document.getElementById('source-meta-period');
+  const modEl = document.getElementById('source-meta-modifier');
+  const prefillEl = document.getElementById('source-meta-prefill');
+
+  document.getElementById('source-meta-title').textContent = `Describe ${siglum}`;
+
+  const typeNames = [...new Set(EblClient.MANUSCRIPT_TYPES.map(([name]) => name))];
+  const provNames = provenances.map(([name]) => name);
+  const periodNames = EblClient.PERIODS.map(([name]) => name).filter((n) => n !== 'None');
+
+  // Provenance prefill only counts when eBL's site name is in the eBL
+  // vocabulary; otherwise it is shown as a hint rather than silently dropped.
+  const provMatch = prefill.provenance
+    ? provNames.find((n) => n.toLowerCase() === String(prefill.provenance).toLowerCase())
+    : undefined;
+
+  fill(typeEl, typeNames, prefill.type || '');
+  fill(provEl, provNames, provMatch || '');
+  fill(periodEl, periodNames, prefill.period || '');
+  modEl.innerHTML = EblClient.PERIOD_MODIFIERS.map((name) =>
+    `<option value="${escapeHtml(name)}"${name === (prefill.periodModifier || 'None') ? ' selected' : ''}>` +
+    `${escapeHtml(name)}</option>`).join('');
+
+  const notes = [];
+  if (prefill.period || provMatch) {
+    notes.push('Prefilled from the eBL record — check and pick a type.');
+  }
+  if (prefill.provenance && !provMatch) {
+    notes.push(`eBL records the site as "${prefill.provenance}", which is not ` +
+      'in the provenance list — left blank.');
+  }
+  if (prefill.genres && prefill.genres.length) {
+    notes.push(`Genre: ${prefill.genres[0]}.`);
+  }
+  prefillEl.textContent = notes.join(' ');
+  prefillEl.hidden = notes.length === 0;
+
+  const saved = await new Promise((resolve) => {
+    const form = document.getElementById('source-meta-form');
+    const skipBtn = document.getElementById('source-meta-skip');
+    const cleanup = (value) => {
+      form.removeEventListener('submit', onSubmit);
+      skipBtn.removeEventListener('click', onSkip);
+      dialog.removeEventListener('cancel', onCancel);
+      dialog.close();
+      resolve(value);
+    };
+    const onSubmit = (e) => { e.preventDefault(); cleanup(true); };
+    const onSkip = () => cleanup(false);
+    const onCancel = (e) => { e.preventDefault(); cleanup(false); };
+    form.addEventListener('submit', onSubmit);
+    skipBtn.addEventListener('click', onSkip);
+    dialog.addEventListener('cancel', onCancel);
+    dialog.showModal();
+    typeEl.focus();
+  });
+  if (!saved) return;
+
+  // Upsert the manuscripts.json row this source will get anyway, now with
+  // the answers. Settings and export reconcile ids later, so the id only
+  // has to be unused.
+  if (!manuscriptsMeta) manuscriptsMeta = { version: 1, manuscripts: [] };
+  const file = siglum + '.txt';
+  let entry = manuscriptsMeta.manuscripts.find((m) => m.file === file);
+  if (!entry) {
+    entry = EblClient.defaultManuscriptEntry(file, manuscriptsMeta.manuscripts.length + 1);
+    manuscriptsMeta.manuscripts.push(entry);
+  }
+  entry.type = typeEl.value || entry.type || '';
+  if (provEl.value) entry.provenance = provEl.value;
+  if (periodEl.value) entry.period = periodEl.value;
+  if (modEl.value) entry.periodModifier = modEl.value;
+
+  try {
+    await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+    rebuildTypeMap();   // sidebar grouping and legend follow the type at once
+    setStatus('connected', `${siglum}: ${typeEl.value || 'no type'} saved`);
+  } catch (err) {
+    console.error('Could not save manuscripts.json:', err);
+    setStatus('error', 'Could not save the metadata');
+  }
+}
+
 async function fetchManuscriptFromEbl() {
   if (!window.EblFetch) { alert('The eBL fetch module is not loaded.'); return; }
 
@@ -2991,6 +3104,8 @@ async function fetchManuscriptFromEbl() {
   loadManuscript(id);
   markUnsaved();
   setStatus('connected', 'Fetched ' + res.primary);
+
+  await askSourceMeta(museum, { ...res.fields, genres: res.genres });
 
   showPullResult({
     title: museum + ' added from eBL',
@@ -3093,6 +3208,8 @@ async function createNewManuscript() {
 
   // Switch to it
   loadManuscript(id);
+
+  await askSourceMeta(siglum);
 }
 
 // Import manuscripts from local files
@@ -3772,11 +3889,17 @@ const annotationForm = document.getElementById('annotation-form');
 const annotationTitle = document.getElementById('annotation-title');
 const annotationDesc = document.getElementById('annotation-desc');
 const annotationType = document.getElementById('annotation-type');
-const annotationLocation = document.getElementById('annotation-location');
+const annotationSource = document.getElementById('annotation-source');
+const annotationSec = document.getElementById('annotation-sec');
 const saveAnnotationBtn = document.getElementById('save-annotation-btn');
 const cancelAnnotationBtn = document.getElementById('cancel-annotation-btn');
 const annotationsList = document.getElementById('annotations-list');
 const annotationsFilter = document.getElementById('annotations-filter');
+
+// A note being edited in the form, and a transient "notes on §N" narrowing
+// applied when a score-line dot is clicked.
+let editingAnnotationId = null;
+let annotationsSecFilter = null;
 
 // Toggle panel
 annotationsBtn.addEventListener('click', () => {
@@ -3785,28 +3908,99 @@ annotationsBtn.addEventListener('click', () => {
 
 closeAnnotationsBtn.addEventListener('click', () => {
   annotationsPanel.classList.add('hidden');
+  annotationsSecFilter = null;
 });
 
-// Show/hide form
-addAnnotationBtn.addEventListener('click', () => {
-  annotationForm.classList.toggle('hidden');
-  if (!annotationForm.classList.contains('hidden')) {
-    annotationTitle.focus();
-    // Pre-fill location with active manuscript if any
-    if (activeManuscript && manuscripts[activeManuscript]) {
-      annotationLocation.value = manuscripts[activeManuscript].siglum;
+// What the anchored line says right now, so a note can detect that the text
+// under it has changed since it was written. With a source, that source's
+// reading of the §; without one, the reconstructed line, falling back to the
+// first witness. Notes are references, not tethers — on a mismatch the card
+// flags it rather than guessing where the line went.
+function annotationSnapshot(siglum, sec) {
+  if (!sec) return '';
+  const rx = new RegExp('^§' + sec + '[a-z]?\\s+(.*)$');
+  const firstLine = (content) => {
+    for (const raw of String(content || '').split('\n')) {
+      const m = raw.trim().match(rx);
+      if (m) return m[1].trim().slice(0, 60);
     }
+    return '';
+  };
+  if (siglum) {
+    const ms = Object.values(manuscripts).find((m) => m.siglum === siglum);
+    return ms ? firstLine(ms.content) : '';
   }
-});
+  const recon = reconstructedLines[parseInt(sec, 10)];
+  if (recon) return String(recon).trim().slice(0, 60);
+  for (const ms of Object.values(manuscripts)) {
+    const hit = firstLine(ms.content);
+    if (hit) return hit;
+  }
+  return '';
+}
 
-cancelAnnotationBtn.addEventListener('click', () => {
+// Scroll the score to a §, flashing it — the annotations panel stays open,
+// unlike the search dialog, because it does not cover the score.
+function revealScoreEntry(sec) {
+  const tab = document.querySelector('.pane-tab[data-tab="score"]');
+  if (tab && !tab.classList.contains('active')) tab.click();
+  // "35b" anchors a variant reading; the score line is keyed by the number.
+  const el = document.querySelector(`.score-line[data-line="${parseInt(sec, 10)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('score-line-found');
+  setTimeout(() => el.classList.remove('score-line-found'), 1400);
+}
+
+// Open a source in the editor, at its §sec line when one is given.
+function revealSourceAnchor(siglum, sec) {
+  const found = Object.entries(manuscripts).find(([, ms]) => ms.siglum === siglum);
+  if (!found) { setStatus('error', `"${siglum}" is not in this project`); return; }
+  const [id, ms] = found;
+  loadManuscript(id);
+  if (sec && aceEditor) {
+    const rx = new RegExp('^\\s*§' + sec + '[a-z]?\\s');
+    const lines = String(ms.content || '').split('\n');
+    const at = lines.findIndex((l) => rx.test(l));
+    if (at >= 0) aceEditor.gotoLine(at + 1, 0, true);
+  }
+  if (aceEditor) aceEditor.focus();
+}
+
+function populateAnnotationSourceSelect(selected) {
+  const sigla = Object.values(manuscripts).map((ms) => ms.siglum)
+    .sort((a, b) => a.localeCompare(b));
+  annotationSource.innerHTML = '<option value="">— whole project —</option>' +
+    sigla.map((s) =>
+      `<option value="${escapeHtml(s)}"${s === selected ? ' selected' : ''}>${escapeHtml(s)}</option>`)
+      .join('');
+}
+
+function resetAnnotationForm() {
+  editingAnnotationId = null;
   annotationForm.classList.add('hidden');
   annotationTitle.value = '';
   annotationDesc.value = '';
-  annotationLocation.value = '';
+  annotationSec.value = '';
+  saveAnnotationBtn.textContent = 'Save';
+}
+
+// Show/hide form
+addAnnotationBtn.addEventListener('click', () => {
+  const opening = annotationForm.classList.contains('hidden');
+  if (!opening) { resetAnnotationForm(); return; }
+  editingAnnotationId = null;
+  saveAnnotationBtn.textContent = 'Save';
+  populateAnnotationSourceSelect(
+    activeManuscript && manuscripts[activeManuscript]
+      ? manuscripts[activeManuscript].siglum : '');
+  annotationForm.classList.remove('hidden');
+  annotationTitle.focus();
 });
 
-// Save annotation
+cancelAnnotationBtn.addEventListener('click', resetAnnotationForm);
+
+// Save annotation — a new one, or the one being edited
 saveAnnotationBtn.addEventListener('click', async () => {
   const title = annotationTitle.value.trim();
   if (!title) {
@@ -3814,29 +4008,47 @@ saveAnnotationBtn.addEventListener('click', async () => {
     return;
   }
 
-  const annotation = {
-    id: Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
-    type: annotationType.value,
-    title,
-    description: annotationDesc.value.trim(),
-    location: annotationLocation.value.trim(),
-    status: 'open',
-    created: new Date().toISOString()
-  };
+  const siglum = annotationSource.value;
+  const sec = annotationSec.value.trim().replace(/^§/, '');
 
-  annotations.unshift(annotation);
+  if (editingAnnotationId) {
+    const ann = annotations.find((a) => a.id === editingAnnotationId);
+    if (ann) {
+      ann.type = annotationType.value;
+      ann.title = title;
+      ann.description = annotationDesc.value.trim();
+      ann.siglum = siglum;
+      ann.sec = sec;
+      ann.snapshot = annotationSnapshot(siglum, sec);
+      delete ann.location;   // superseded by the structured anchor
+      ann.modified = new Date().toISOString();
+    }
+  } else {
+    annotations.unshift({
+      id: Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+      type: annotationType.value,
+      title,
+      description: annotationDesc.value.trim(),
+      siglum,
+      sec,
+      snapshot: annotationSnapshot(siglum, sec),
+      status: 'open',
+      created: new Date().toISOString()
+    });
+  }
+
   await saveAnnotations();
   renderAnnotations();
-
-  // Reset form
-  annotationForm.classList.add('hidden');
-  annotationTitle.value = '';
-  annotationDesc.value = '';
-  annotationLocation.value = '';
+  renderScore();          // the § dots follow the notes
+  resetAnnotationForm();
 });
 
 // Filter change
 annotationsFilter.addEventListener('change', renderAnnotations);
+
+const ANNOTATION_BADGE = {
+  bug: 'Bug', enhancement: 'Enh', reference: 'Ref', commentary: 'Com',
+};
 
 function renderAnnotations() {
   const filter = annotationsFilter.value;
@@ -3844,30 +4056,81 @@ function renderAnnotations() {
 
   if (filter === 'open') filtered = annotations.filter(a => a.status === 'open');
   else if (filter === 'resolved') filtered = annotations.filter(a => a.status === 'resolved');
-  else if (filter === 'bug') filtered = annotations.filter(a => a.type === 'bug');
-  else if (filter === 'enhancement') filtered = annotations.filter(a => a.type === 'enhancement');
+  else if (ANNOTATION_BADGE[filter]) filtered = annotations.filter(a => a.type === filter);
+
+  // Narrowed to one score line by its dot. On top of the dropdown filter, so
+  // "open notes on §35" is expressible.
+  let secBar = '';
+  if (annotationsSecFilter != null) {
+    filtered = filtered.filter((a) => parseInt(a.sec, 10) === parseInt(annotationsSecFilter, 10));
+    secBar = `<div class="annotations-sec-filter">Notes on § ${escapeHtml(String(annotationsSecFilter))}
+      <button id="clear-sec-filter" type="button">show all</button></div>`;
+  }
 
   if (filtered.length === 0) {
-    annotationsList.innerHTML = '<div class="annotations-empty">No annotations match this filter.</div>';
+    annotationsList.innerHTML = secBar +
+      '<div class="annotations-empty">No annotations match this filter.</div>';
+    bindSecFilterClear();
     return;
   }
 
-  annotationsList.innerHTML = filtered.map(a => `
+  annotationsList.innerHTML = secBar + filtered.map(a => {
+    const anchored = a.siglum || a.sec;
+    const stale = a.sec && a.snapshot && annotationSnapshot(a.siglum, a.sec) !== a.snapshot;
+    const anchor = anchored ? `
+      <div class="annotation-anchor">
+        ${a.siglum ? `<button type="button" class="annotation-anchor-chip" data-goto="source"
+            data-siglum="${escapeHtml(a.siglum)}" data-sec="${escapeHtml(a.sec || '')}"
+            title="Open ${escapeHtml(a.siglum)}${a.sec ? ' at §' + escapeHtml(a.sec) : ''}">${escapeHtml(a.siglum)}</button>` : ''}
+        ${a.sec ? `<button type="button" class="annotation-anchor-chip" data-goto="score"
+            data-sec="${escapeHtml(a.sec)}" title="Show § ${escapeHtml(a.sec)} in the score">§ ${escapeHtml(a.sec)}</button>` : ''}
+        ${stale ? `<span class="annotation-stale" title="The line no longer reads what it did when this note was written — it was: ${escapeHtml(a.snapshot)}">text changed</span>` : ''}
+      </div>` : '';
+    return `
     <div class="annotation-item ${a.status}" data-id="${a.id}">
       <div class="annotation-item-header">
-        <span class="annotation-badge ${a.type}">${a.type === 'bug' ? 'Bug' : 'Enh'}</span>
+        <span class="annotation-badge ${a.type}">${ANNOTATION_BADGE[a.type] || a.type}</span>
         <span class="annotation-title-text">${escapeHtml(a.title)}</span>
         <span class="annotation-status-badge ${a.status}">${a.status}</span>
       </div>
       ${a.description ? `<div class="annotation-desc-text">${escapeHtml(a.description)}</div>` : ''}
+      ${anchor}
       ${a.location ? `<div class="annotation-location-text">${escapeHtml(a.location)}</div>` : ''}
       <div class="annotation-actions">
-        <span class="annotation-date">${new Date(a.created).toLocaleDateString()}</span>
+        <span class="annotation-date">${new Date(a.created).toLocaleDateString()}${a.modified ? ' · edited ' + new Date(a.modified).toLocaleDateString() : ''}</span>
+        <button class="annotation-edit-btn" data-id="${a.id}">Edit</button>
         <button class="annotation-toggle-btn" data-id="${a.id}">${a.status === 'open' ? 'Resolve' : 'Reopen'}</button>
         <button class="annotation-delete-btn" data-id="${a.id}">Delete</button>
       </div>
     </div>
-  `).join('');
+  `; }).join('');
+
+  // Anchor chips navigate; the panel stays open.
+  annotationsList.querySelectorAll('.annotation-anchor-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.goto === 'score') revealScoreEntry(btn.dataset.sec);
+      else revealSourceAnchor(btn.dataset.siglum, btn.dataset.sec);
+    });
+  });
+
+  // Edit opens the form with the note in it; Save then updates in place.
+  annotationsList.querySelectorAll('.annotation-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ann = annotations.find(a => a.id === btn.dataset.id);
+      if (!ann) return;
+      editingAnnotationId = ann.id;
+      annotationType.value = ann.type;
+      annotationTitle.value = ann.title;
+      annotationDesc.value = ann.description || '';
+      populateAnnotationSourceSelect(ann.siglum || '');
+      annotationSec.value = ann.sec || '';
+      saveAnnotationBtn.textContent = 'Update';
+      annotationForm.classList.remove('hidden');
+      annotationTitle.focus();
+    });
+  });
+
+  bindSecFilterClear();
 
   // Bind action buttons
   annotationsList.querySelectorAll('.annotation-toggle-btn').forEach(btn => {
@@ -3877,6 +4140,7 @@ function renderAnnotations() {
         ann.status = ann.status === 'open' ? 'resolved' : 'open';
         await saveAnnotations();
         renderAnnotations();
+        renderScore();    // the dots count open notes only
       }
     });
   });
@@ -3887,9 +4151,27 @@ function renderAnnotations() {
       annotations = annotations.filter(a => a.id !== btn.dataset.id);
       await saveAnnotations();
       renderAnnotations();
+      renderScore();      // a dot may just have lost its last note
     });
   });
 }
+
+function bindSecFilterClear() {
+  const clear = document.getElementById('clear-sec-filter');
+  if (clear) clear.addEventListener('click', () => {
+    annotationsSecFilter = null;
+    renderAnnotations();
+  });
+}
+
+// A dot on a score line opens the panel narrowed to that line's notes.
+scorePanel.addEventListener('click', (e) => {
+  const dot = e.target.closest('.score-note-dot');
+  if (!dot) return;
+  annotationsSecFilter = dot.dataset.line;
+  annotationsPanel.classList.remove('hidden');
+  renderAnnotations();
+});
 
 async function loadAnnotations() {
   if (!dirHandle) return;

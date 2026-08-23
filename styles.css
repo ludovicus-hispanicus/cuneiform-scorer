@@ -1042,6 +1042,26 @@ body {
   background: #fdecea;
 }
 
+.source-meta-dialog {
+  min-width: 380px;
+  max-width: 460px;
+}
+
+.source-meta-dialog .field-input {
+  width: 100%;
+  margin-bottom: 0.35rem;
+}
+
+.source-meta-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.source-meta-col {
+  flex: 1;
+  min-width: 0;
+}
+
 .variant-dialog {
   min-width: 520px;
   max-width: 720px;
@@ -2014,6 +2034,127 @@ body.dark-mode .reconstructed-text:empty::before {
 }
 
 /* Dark mode overrides for annotations */
+.annotation-badge.reference {
+  background: #e3e8f0;
+  color: #3a5a8a;
+}
+
+.annotation-badge.commentary {
+  background: #ede6f7;
+  color: #6b4fa8;
+}
+
+.annotation-sec {
+  width: 3.6rem;
+  flex: 0 0 auto !important;
+}
+
+.annotation-anchor {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.3rem;
+}
+
+.annotation-anchor-chip {
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-light);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-family: "Consolas", "Monaco", monospace;
+  padding: 0.05rem 0.55rem;
+  cursor: pointer;
+}
+
+.annotation-anchor-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+.annotation-stale {
+  font-size: 0.7rem;
+  color: #9f6c00;
+  background: #faedd1;
+  border-radius: 3px;
+  padding: 0.1rem 0.4rem;
+  cursor: help;
+}
+
+.annotation-edit-btn {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-light);
+  cursor: pointer;
+  color: var(--text-dark);
+}
+
+.annotation-edit-btn:hover {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+/* Open notes anchored to this score line; click narrows the panel to them. */
+.score-note-dot {
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  line-height: 1;
+  padding: 0 0.3rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.score-note-dot:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.annotations-sec-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-light);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.annotations-sec-filter button {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.8rem;
+  text-decoration: underline;
+}
+
+body.dark-mode .annotation-badge.reference {
+  background: #263041;
+  color: #8fb0dd;
+}
+
+body.dark-mode .annotation-badge.commentary {
+  background: #332b45;
+  color: #c4aef0;
+}
+
+body.dark-mode .annotation-stale {
+  background: #3e2a10;
+  color: #f4ae25;
+}
+
 body.dark-mode .annotation-badge.bug {
   background: #4a1c1c;
   color: #ef9a9a;
