@@ -3501,9 +3501,18 @@ function setupSearchAll() {
     const to = starts[match.endLineIndex + 1] !== undefined
       ? starts[match.endLineIndex + 1] - 1
       : content.length;
-    const text = content.slice(from, to);
-    const a = match.start - from;
-    const b = match.end - from;
+    let text = content.slice(from, to);
+    let a = match.start - from;
+    let b = match.end - from;
+    // The row already names the line ("o 23a") and its § (the chip), so the
+    // excerpt drops that prefix — except when the match itself starts inside
+    // it, where cutting would hide part of what was found.
+    const pfx = text.match(/^\s*(?:\u00a7\d+[a-z]?\s+)?(?:\d+['\u2019]?[a-z]?\.\s+)?/)[0].length;
+    if (pfx > 0 && a >= pfx) {
+      text = text.slice(pfx);
+      a -= pfx;
+      b -= pfx;
+    }
     const html = escapeHtml(text.slice(0, a))
       + '<span class="search-match">' + escapeHtml(text.slice(a, b)) + '</span>'
       + escapeHtml(text.slice(b));
