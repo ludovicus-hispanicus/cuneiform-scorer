@@ -1495,6 +1495,15 @@ body.dark-mode .reconstructed-text:empty::before {
   border-left: 2px solid var(--border-color);
   margin-left: 0.5rem;
   cursor: pointer;
+  /* Three columns — tablet line, §, excerpt — so the excerpt starts at the
+     same place whether or not the row carries a §. */
+  display: flex;
+  align-items: baseline;
+}
+
+.search-result-text {
+  flex: 1;
+  min-width: 0;
 }
 
 .search-result-item:hover {
@@ -1515,7 +1524,16 @@ body.dark-mode .reconstructed-text:empty::before {
   text-decoration: none;
   font-size: 0.8rem;
   margin-right: 0.5rem;
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.search-result-line {
+  flex-basis: 4.2rem;
+}
+
+.search-result-sec {
+  flex-basis: 3rem;
 }
 
 .search-result-line:hover,
@@ -1525,11 +1543,9 @@ body.dark-mode .reconstructed-text:empty::before {
   text-decoration: underline;
 }
 
-/* Keeps the text of every row starting at the same column when a line has
-   no § of its own — a colophon line, a continuation. */
+/* The empty slot when a line has no § of its own — same column, no link. */
 .search-result-sec-none {
-  display: inline-block;
-  width: 2.5rem;
+  display: block;
 }
 
 .search-result-header:hover {

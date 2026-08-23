@@ -3793,7 +3793,7 @@ function setupSearchAll() {
         html += match.sec
           ? `<a class="search-result-sec" href="#" data-nav="score" data-sec="${match.sec}" title="Show § ${match.sec} in the score">§${match.sec}</a>`
           : `<span class="search-result-sec search-result-sec-none"></span>`;
-        html += match.highlighted;
+        html += `<span class="search-result-text">` + match.highlighted + `</span>`;
         html += `</div>`;
         flatIndex++;
       }
