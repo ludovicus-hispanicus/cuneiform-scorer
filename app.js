@@ -3665,10 +3665,31 @@ function setupSearchAll() {
 
     // Matched against the whole source rather than line by line: a pattern may
     // span lines, and "^" has to mean here what it means in Replace All.
+    // The tablet's own line for each file line: "o 23a" rather than the
+    // file's line count, which includes the siglum header, surface markers
+    // and blank lines and means nothing on the tablet. Lines that are not
+    // transliteration (headers, rulings, markers) get null.
+    const tabletLineLabels = (content) => {
+      const SURFACE_ABBR = {
+        'obverse': 'o', 'reverse': 'r', 'edge': 'e', 'left edge': 'l.e.',
+        'right edge': 'r.e.', 'top': 't', 'bottom': 'b', 'colophon': 'col',
+      };
+      let surface = '';
+      return String(content || '').split('\n').map((raw) => {
+        const line = raw.trim();
+        const at = line.match(/^@(obverse|reverse|edge|left edge|right edge|top|bottom|colophon)/i);
+        if (at) { surface = SURFACE_ABBR[at[1].toLowerCase()] || at[1]; return null; }
+        const num = line.match(/^(?:\u00a7\d+[a-z]?\s+)?(\d+['\u2019]?[a-z]?)\.\s/);
+        if (!num) return null;
+        return (surface ? surface + ' ' : '') + num[1];
+      });
+    };
+
     const strip = stripping();
     for (const [id, ms] of Object.entries(manuscripts)) {
       const content = ms.content;
       const starts = lineStartsOf(content);
+      const lineLabels = tabletLineLabels(content);
       // Searched with the apparatus removed, but every offset is mapped back,
       // so what is listed, highlighted and replaced is the text as it stands.
       const stripped = strip ? EblAtfSigns.stripApparatus(content) : null;
@@ -3707,6 +3728,8 @@ function setupSearchAll() {
           : content.length;
         const sec = content.slice(starts[match.lineIndex], lineEnd).match(/^\s*§(\d+)/);
         match.sec = sec ? sec[1] : null;
+        match.lineLabel = lineLabels[match.lineIndex] || null;
+        match.endLineLabel = lineLabels[match.endLineIndex] || null;
         matches.push(match);
         totalMatches++;
       }
@@ -3742,10 +3765,20 @@ function setupSearchAll() {
       html += `<div class="search-result-header" data-id="${group.id}">${escapeHtml(group.siglum)} (${group.matches.length})</div>`;
 
       for (const match of group.matches) {
-        const label = match.endLineNum > match.lineNum
-          ? `${match.lineNum}-${match.endLineNum}`
-          : `${match.lineNum}`;
-        const where = `${escapeHtml(group.siglum)} line ${label}`;
+        // The tablet's line, not the file's. A match on a line with no
+        // tablet number (the siglum header, a ruling) falls back to the
+        // file line, said as such.
+        let label;
+        if (match.lineLabel) {
+          label = match.endLineIndex > match.lineIndex
+            ? `${match.lineLabel}\u2013${match.endLineLabel || "line " + match.endLineNum}`
+            : match.lineLabel;
+        } else {
+          label = match.endLineNum > match.lineNum
+            ? `line ${match.lineNum}-${match.endLineNum}`
+            : `line ${match.lineNum}`;
+        }
+        const where = `${escapeHtml(group.siglum)} ${label}`;
         html += `<div class="search-result-item" data-id="${group.id}" data-line="${match.lineNum}" data-index="${flatIndex}">`;
         html += `<a class="search-result-line" href="#" data-nav="source" title="Open ${where}">${label}</a>`;
         html += match.sec
