@@ -627,6 +627,7 @@
       <div class="actions">
         <button id="ebl-ms-check-btn" class="btn btn-secondary" type="button">Compare with eBL</button>
         <button id="ebl-ms-adopt-btn" class="btn btn-secondary" type="button" hidden>Take eBL&#39;s numbering</button>
+        <button id="ebl-ms-siglum-btn" class="btn btn-secondary" type="button" hidden>Give the clashing tablets a free number</button>
         <button id="ebl-ms-send-btn" class="btn" type="button" disabled>Register manuscripts</button>
       </div>
       <div id="ebl-ms-report" class="ebl-hint" style="margin-top: 0.6rem;"></div>
@@ -1034,6 +1035,7 @@
       document.getElementById('ebl-ms-check-btn').addEventListener('click', checkManuscriptsAgainstEbl);
       document.getElementById('ebl-ms-send-btn').addEventListener('click', registerManuscriptsWithEbl);
       document.getElementById('ebl-ms-adopt-btn').addEventListener('click', adoptEblNumbering);
+      document.getElementById('ebl-ms-siglum-btn').addEventListener('click', resolveSiglumClashes);
       document.getElementById('ebl-sync-meta-btn').addEventListener('click', syncMetadataFromEbl);
 
       renderEblStatus();
@@ -1080,6 +1082,9 @@
     // the whole chapter, and without saying so. That case disables the button
     // rather than warning about it.
     let msPlan = null;
+    let msProblems = [];
+    let msKept = [];
+    let msClashes = [];
 
     function eblTargetFromForm() {
       return {
@@ -1091,7 +1096,23 @@
       };
     }
 
-    function renderManuscriptPlan(plan) {
+    // What eBL actually said. A 422 means it read the list and refused it, and
+    // the reason is in the body — the message alone is only the status line.
+    function eblErrorDetail(err) {
+      if (!err) return '';
+      const body = err.parsedBody;
+      const bits = [];
+      if (body && typeof body === 'object') {
+        if (body.description) bits.push(String(body.description));
+        else if (body.title) bits.push(String(body.title));
+        else if (body.message) bits.push(String(body.message));
+        else if (body.errors) bits.push(JSON.stringify(body.errors));
+      }
+      if (!bits.length && err.rawBody) bits.push(String(err.rawBody).slice(0, 400));
+      return bits.join(' ');
+    }
+
+    function renderManuscriptPlan(plan, problems) {
       const el = document.getElementById('ebl-ms-report');
       const send = document.getElementById('ebl-ms-send-btn');
       const line = (t) => '<div>' + t + '</div>';
@@ -1115,11 +1136,51 @@
           + ' point at them. Take eBL&#39;s numbering to bring this project into line.'));
       }
       document.getElementById('ebl-ms-adopt-btn').hidden = !plan.moved.length;
-      if (!plan.added.length && !plan.dropped.length && !plan.moved.length) {
+      // eBL checks every manuscript in the list, not only the new ones, and
+      // refuses the whole POST if any is incomplete. A tablet just added to the
+      // folder has no provenance, period or type at all, which is the usual
+      // reason a register comes back 422.
+      const bad = problems || [];
+      if (bad.length) {
+        out.push(line('<b style="color:#a33">' + bad.length + ' manuscript'
+          + (bad.length === 1 ? '' : 's') + ' eBL will not accept</b> — fill these in'
+          + ' in the table below, then compare again:'));
+        for (const b of bad.slice(0, 10)) {
+          out.push(line('&nbsp;&nbsp;<b>' + escapeHtml(b.file || '?') + '</b> — '
+            + escapeHtml(b.errors.join('; '))));
+        }
+        if (bad.length > 10) out.push(line('&nbsp;&nbsp;and ' + (bad.length - 10) + ' more'));
+      }
+      // eBL names a manuscript by what it is — provenance, period, type and a
+      // disambiguator — and refuses two with the same name. It reports this as
+      // "Duplicate sigla" followed by one provenance record, which does not say
+      // which tablets clashed.
+      document.getElementById('ebl-ms-siglum-btn').hidden = !msClashes.length;
+      if (msClashes.length) {
+        out.push(line('<b style="color:#a33">' + msClashes.length + ' siglum clash'
+          + (msClashes.length === 1 ? '' : 'es') + '</b> — eBL refuses two manuscripts'
+          + ' with the same name:'));
+        for (const c of msClashes.slice(0, 8)) {
+          out.push(line('&nbsp;&nbsp;<b>' + escapeHtml([c.provenance, c.period, c.type].join(' ')
+            + ' ' + c.disambiguator) + '</b> &mdash; ' + escapeHtml(c.files.join(', '))));
+        }
+        if (msClashes.length > 8) out.push(line('&nbsp;&nbsp;and ' + (msClashes.length - 8) + ' more'));
+        out.push(line('Only the number is free to vary. Give the clashing tablets a free'
+          + ' one, or change a provenance, period or type that is wrong.'));
+      }
+      if (msKept.length) {
+        const tally = {};
+        for (const k of msKept) for (const f of k.fields) tally[f] = (tally[f] || 0) + 1;
+        out.push(line('Kept, not overwritten: '
+          + Object.keys(tally).map((f) => '<b>' + tally[f] + '</b> ' + f).join(', ')
+          + '. eBL holds these and this project does not, so they are sent back as they are.'));
+      }
+      if (!plan.added.length && !plan.dropped.length && !plan.moved.length && !bad.length) {
         out.push(line('Nothing to change.'));
       }
       el.innerHTML = out.join('');
-      send.disabled = !!plan.moved.length || (!plan.added.length && !plan.dropped.length);
+      send.disabled = !!plan.moved.length || !!bad.length || !!msClashes.length
+        || (!plan.added.length && !plan.dropped.length);
     }
 
     async function checkManuscriptsAgainstEbl() {
@@ -1134,7 +1195,10 @@
         const chapter = await EblClient.getChapter(target);
         const sending = EblClient.toEblManuscripts(manuscriptsMeta);
         msPlan = EblClient.compareManuscripts(chapter.manuscripts || [], sending);
-        renderManuscriptPlan(msPlan);
+        msProblems = EblClient.validateManuscripts(manuscriptsMeta);
+        msKept = EblClient.wouldErase(sending, chapter.manuscripts || []);
+        msClashes = EblClient.duplicateSigla(manuscriptsMeta);
+        renderManuscriptPlan(msPlan, msProblems);
       } catch (err) {
         el.textContent = 'Could not read the chapter: ' + (err && err.message || err);
       } finally {
@@ -1147,6 +1211,8 @@
       const btn = document.getElementById('ebl-ms-send-btn');
       if (!msPlan) { await checkManuscriptsAgainstEbl(); }
       if (!msPlan || msPlan.moved.length) return;
+      if (msProblems && msProblems.length) return;
+      if (msClashes && msClashes.length) return;
       const dropping = msPlan.dropped.length
         ? String.fromCharCode(10) + 'This also removes from eBL: '
           + msPlan.dropped.map((x) => x.museumNumber).join(', ')
@@ -1155,12 +1221,24 @@
       btn.disabled = true;
       el.textContent = 'Registering...';
       try {
-        await EblClient.postManuscripts(eblTargetFromForm(),
-          EblClient.toEblManuscripts(manuscriptsMeta), []);
+        // Read the chapter again at the moment of sending, and keep whatever it
+        // holds that this project does not: a blank colophon here means nothing
+        // to say, not make it empty.
+        const target = eblTargetFromForm();
+        const chapter = await EblClient.getChapter(target);
+        const sending = EblClient.preserveFromChapter(
+          EblClient.toEblManuscripts(manuscriptsMeta), chapter.manuscripts || []);
+        await EblClient.postManuscripts(target, sending, []);
         el.textContent = 'Registered. Reload the chapter page on eBL to see it.';
         msPlan = null;
       } catch (err) {
-        el.textContent = 'eBL refused it: ' + (err && err.message || err);
+        const detail = eblErrorDetail(err);
+        el.innerHTML = '<div><b>eBL refused it</b> &mdash; '
+          + escapeHtml(String((err && err.message) || err)) + '</div>'
+          + (detail ? '<div>' + escapeHtml(detail) + '</div>' : '')
+          + '<div>A 422 means the list was read and rejected. eBL checks every'
+          + ' manuscript in it, not only the new ones, so one incomplete entry'
+          + ' anywhere refuses the whole send. Compare again to see which.</div>';
         btn.disabled = false;
       }
     }
@@ -1177,6 +1255,23 @@
         await checkManuscriptsAgainstEbl();
       } catch (err) {
         el.textContent = 'Could not take the numbering: ' + (err && err.message || err);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Give every clashing tablet a number nothing else in its group is using.
+    async function resolveSiglumClashes() {
+      const el = document.getElementById('ebl-ms-report');
+      const btn = document.getElementById('ebl-ms-siglum-btn');
+      btn.disabled = true;
+      try {
+        manuscriptsMeta = EblClient.resolveSiglumClashes(manuscriptsMeta);
+        await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+        renderMappingTable();
+        await checkManuscriptsAgainstEbl();
+      } catch (err) {
+        el.textContent = 'Could not renumber: ' + (err && err.message || err);
       } finally {
         btn.disabled = false;
       }

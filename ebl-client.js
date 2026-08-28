@@ -530,6 +530,128 @@
     }));
   }
 
+  // Manuscripts that would carry the same siglum.
+  //
+  // eBL names a manuscript by what it is, not by its id: provenance, period,
+  // type and a disambiguator, so Nineveh + Neo-Assyrian + Library + 2 is
+  // NinNALibrary2 and no two may be the same. Only the disambiguator is free to
+  // vary, and a tablet added here starts with its id — which collides the
+  // moment the ids and the disambiguators have drifted apart.
+  //
+  // This is the check eBL actually enforces, and the one refusal that says
+  // nothing useful when it comes back: "Duplicate sigla" followed by the whole
+  // provenance record of one of them.
+  function siglumGroupKey(m) {
+    return [m.provenance || '', m.periodModifier || 'None', m.period || '', m.type || ''].join('|');
+  }
+
+  function duplicateSigla(meta) {
+    const groups = new Map();
+    for (const m of (meta && meta.manuscripts) || []) {
+      const key = siglumGroupKey(m) + '|' + String(m.siglumDisambiguator || '');
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(m);
+    }
+    const out = [];
+    for (const [, rows] of groups) {
+      if (rows.length < 2) continue;
+      out.push({
+        provenance: rows[0].provenance || '(no provenance)',
+        period: rows[0].period || '(no period)',
+        type: rows[0].type || '(no type)',
+        disambiguator: String(rows[0].siglumDisambiguator || ''),
+        files: rows.map((m) => m.file || String(m.id)),
+      });
+    }
+    return out;
+  }
+
+  // Give each clashing manuscript a disambiguator no other in its group is
+  // using. The first of a group keeps what it has — it is usually the one eBL
+  // already knows under that name — and the rest move up.
+  function resolveSiglumClashes(meta) {
+    const taken = new Map();   // group -> Set of disambiguators
+    const rows = (meta && meta.manuscripts) || [];
+    for (const m of rows) {
+      const g = siglumGroupKey(m);
+      if (!taken.has(g)) taken.set(g, new Set());
+    }
+    const seen = new Map();
+    const out = rows.map((m) => {
+      const g = siglumGroupKey(m);
+      const used = taken.get(g);
+      let d = String(m.siglumDisambiguator || '').trim();
+      if (!seen.has(g)) seen.set(g, new Set());
+      const here = seen.get(g);
+      if (!d || here.has(d)) {
+        // The lowest whole number nothing in this group is using.
+        let n = 1;
+        while (here.has(String(n))) n++;
+        d = String(n);
+      }
+      here.add(d);
+      used.add(d);
+      return Object.assign({}, m, { siglumDisambiguator: d });
+    });
+    return { version: 1, manuscripts: out };
+  }
+
+  // Keep what the chapter holds and this project does not.
+  //
+  // POST /manuscripts replaces the whole list, so every field goes as written —
+  // and manuscripts.json carries a colophon only if someone has pulled the
+  // metadata down first. Registering a new tablet would otherwise send
+  // colophon: "" for all the others and erase what eBL has: on EAE 56 that is
+  // seven colophons and twenty-four reference lists, gone, for adding one file.
+  //
+  // An empty field here means "nothing to say", not "make it empty". Changing
+  // one is still possible — sync it down, edit it, send it back.
+  const KEEP_IF_BLANK = ['colophon', 'notes', 'unplacedLines'];
+  function preserveFromChapter(sending, held) {
+    const theirs = new Map();
+    for (const m of (held || [])) {
+      const k = museumNumberOf(m);
+      if (k) theirs.set(k, m);
+    }
+    return (sending || []).map((m) => {
+      const was = theirs.get(museumNumberOf(m));
+      if (!was) return m;
+      const out = Object.assign({}, m);
+      for (const field of KEEP_IF_BLANK) {
+        if (!String(out[field] || '').trim() && was[field]) out[field] = was[field];
+      }
+      for (const field of ['references', 'oldSigla']) {
+        if ((!out[field] || !out[field].length) && was[field] && was[field].length) {
+          out[field] = was[field];
+        }
+      }
+      return out;
+    });
+  }
+
+  // What sending this list would erase, for the editor to see before it goes.
+  function wouldErase(sending, held) {
+    const theirs = new Map();
+    for (const m of (held || [])) {
+      const k = museumNumberOf(m);
+      if (k) theirs.set(k, m);
+    }
+    const out = [];
+    for (const m of (sending || [])) {
+      const was = theirs.get(museumNumberOf(m));
+      if (!was) continue;
+      const lost = [];
+      for (const field of KEEP_IF_BLANK) {
+        if (!String(m[field] || '').trim() && String(was[field] || '').trim()) lost.push(field);
+      }
+      for (const field of ['references', 'oldSigla']) {
+        if ((!m[field] || !m[field].length) && was[field] && was[field].length) lost.push(field);
+      }
+      if (lost.length) out.push({ museumNumber: museumNumberOf(m), fields: lost });
+    }
+    return out;
+  }
+
   // Validate manuscripts.json entries against eBL's cross-field rules.
   // Returns [{ file, errors: string[] }] for entries with problems.
   function validateManuscripts(meta) {
@@ -551,9 +673,12 @@
         errs.push('either museumNumber or accession is required');
       }
 
-      if (!m.provenance) {
-        errs.push('provenance required');
-      } else if (m.provenance === 'Standard Text') {
+      // Every missing field at once. While the period and type checks sat
+      // behind a filled-in provenance, a newly added tablet reported only
+      // "provenance required" — and the next send failed on the period, and the
+      // one after that on the type. Three refusals for one incomplete row.
+      if (!m.provenance) errs.push('provenance required');
+      if (m.provenance === 'Standard Text') {
         if (m.period && m.period !== 'None') errs.push('Standard Text requires period = None');
         if (m.type && m.type !== 'None') errs.push('Standard Text requires type = None');
       } else {
@@ -609,6 +734,10 @@
     museumNumberOf,
     compareManuscripts,
     adoptChapterIds,
+    preserveFromChapter,
+    wouldErase,
+    duplicateSigla,
+    resolveSiglumClashes,
     validateManuscripts,
 
     EblError,

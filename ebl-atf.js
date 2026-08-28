@@ -357,6 +357,42 @@
     return { ok: false, reason: `No line matching §${lineNum} ${sourceLine}. found` };
   }
 
+  // Move a manuscript's "$" directives to the reading its lines have moved to.
+  //
+  // A ruling belongs to the tablet, under the line it follows. When a witness
+  // moves to a variant its reading is rewritten but its directives are not,
+  // because a directive is written "§18 $ single ruling" — no line number, so
+  // nothing matches the pattern that moves a reading. The ruling stayed under
+  // §18 while the line it follows had gone to §18b.
+  //
+  // Only moved once nothing of this manuscript is left in the old reading: a
+  // manuscript with lines in both still needs its ruling where its other lines
+  // are, and a split that moves half a witness must not take the ruling too.
+  function setDirectiveVariant(msContent, { lineNum, fromLetter, letter }) {
+    const from = fromLetter || '';
+    const lines = msContent.split('\n');
+
+    // A reading of this manuscript still sitting in the reading being left.
+    const stillThere = new RegExp('^\\s*§' + lineNum + (from || '') + '(?![a-z])\\s+\\S+\\.');
+    for (const line of lines) {
+      if (stillThere.test(line)) return { ok: false, reason: 'lines remain in the old reading' };
+    }
+
+    const directive = new RegExp(
+      '^(\\s*§' + lineNum + ')' + (from ? from : '(?![a-z])')
+      + '((?:\\s+[^\\s$]+)?\\s*\\$.*)$'
+    );
+    let moved = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(directive);
+      if (!m) continue;
+      lines[i] = m[1] + (letter || '') + m[2];
+      moved++;
+    }
+    if (!moved) return { ok: false, reason: 'no directives to move' };
+    return { ok: true, content: lines.join('\n'), moved };
+  }
+
   // ---- Sigla helper ----
 
   // Resolve the per-manuscript eBL siglum from manuscripts.json + provenance list.
@@ -579,6 +615,7 @@
     normaliseAtfText,
     oddCharacters,
     setWitnessVariant,
+    setDirectiveVariant,
     buildEblSiglumMap,
   };
 })();
