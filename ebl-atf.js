@@ -45,6 +45,38 @@
   const NOTE_PREFIX = '#note: ';
   const PARALLEL_PREFIX = '// ';
 
+  // Whitespace a browser produces that an ATF parser does not accept.
+  //
+  // A contenteditable inserts a non-breaking space when you type a space in
+  // certain positions, and it looks exactly like a space on screen. eBL then
+  // refuses the line with "No terminal matches ' '" pointing at a column that
+  // appears to hold an ordinary space. Zero-width characters do the same
+  // without even occupying a column.
+  const ODD_SPACE = /[   -   　]/g;
+  const INVISIBLE = /[​-‍⁠﻿]/g;
+  function normaliseAtfText(text) {
+    return String(text == null ? '' : text)
+      .replace(ODD_SPACE, ' ')
+      .replace(INVISIBLE, '')
+      .replace(/[ 	]+/g, ' ')
+      .trim();
+  }
+
+  // Anything a parser will not accept, named with where it sits. Reported
+  // before a send, so a refusal does not have to come back from a server.
+  function oddCharacters(text) {
+    const found = [];
+    const s = String(text == null ? '' : text);
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      const odd = (c < 32 && c !== 10 && c !== 9) || c === 0xa0 || c === 0xfeff
+        || (c >= 0x200b && c <= 0x200d) || c === 0x2060
+        || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f || c === 0x3000;
+      if (odd) found.push({ at: i, code: 'U+' + c.toString(16).toUpperCase().padStart(4, '0') });
+    }
+    return found;
+  }
+
   // A translation is a single ATF row — the grammar's note_text stops at a
   // newline — so anything typed across several lines collapses to one.
   function normalizeTranslation(text) {
@@ -145,7 +177,7 @@
         const reading = readings[vi];
 
         // Reconstruction line (no indent — it's the §N header for the block)
-        const recon = reading.text || '';
+        const recon = normaliseAtfText(reading.text || '');
         lineMap.push({ row: lines.length, kind: 'reconstruction', lineNum: n, variantIndex: vi, content: recon });
         lines.push(`${n}. ${recon}`);
 
@@ -175,7 +207,7 @@
         const sorted = [...witnesses].sort(witnessSort);
         for (const w of sorted) {
           const eblSiglum = (eblSiglumByFile && eblSiglumByFile[w.siglum]) || w.siglum;
-          const content = w.content || '';
+          const content = normaliseAtfText(w.content || '');
           lineMap.push({
             row: lines.length,
             kind: 'witness',
@@ -202,6 +234,28 @@
               });
               lines.push(formatContinuation(cont));
             }
+          }
+
+          // Notes on this manuscript line. Same paratext slot as the "$"
+          // directives below, so a note here reads as a remark on this
+          // witness rather than on the chapter line — the way eBL's own
+          // editions use it (EAE 55 §2, where VAT.7830 carries one).
+          for (const note of (Array.isArray(w.notes) ? w.notes : [])) {
+            const text = normalizeTranslation(note);
+            if (!text) continue;
+            const prefixed = !/^#note:/.test(text);
+            lineMap.push({
+              row: lines.length,
+              kind: 'witness-note',
+              lineNum: n,
+              variantIndex: vi,
+              eblSiglum,
+              msKey: w.siglum,
+              sourceLine: w.sourceLine,
+              content: text,
+              prefixed,
+            });
+            lines.push(formatContinuation(prefixed ? NOTE_PREFIX + text : text));
           }
 
           // Rulings assigned to this witness. The chapter grammar allows
@@ -276,181 +330,9 @@
   //     witnessEdits:        [{ lineNum, msKey, sourceLine, oldContent, newContent }],
   //     unmatched:           [{ row, oldText, newText }]   // line count drift, etc.
   //   }
-  function diffArtifact(originalLineMap, originalAtf, editedAtf) {
-    const oldRows = originalAtf.split('\n');
-    const newRows = editedAtf.split('\n');
-
-    const reconstructionEdits = [];
-    const translationEdits = [];
-    const noteEdits = [];
-    const parallelEdits = [];
-    const witnessEdits = [];
-    const unmatched = [];
-
-    // If row count changed, we can't safely positional-diff structural inserts/deletes.
-    // Walk what we can and mark drift.
-    const minLen = Math.min(oldRows.length, newRows.length);
-
-    for (let r = 0; r < minLen; r++) {
-      const old = oldRows[r];
-      const nw = newRows[r];
-      if (old === nw) continue;
-
-      const entry = originalLineMap[r];
-      if (!entry) {
-        unmatched.push({ row: r, oldText: old, newText: nw });
-        continue;
-      }
-
-      if (entry.kind === 'reconstruction') {
-        const parsed = parseReconstructionRow(nw);
-        if (parsed && parsed.lineNum === entry.lineNum) {
-          reconstructionEdits.push({
-            lineNum: entry.lineNum,
-            variantIndex: entry.variantIndex || 0,
-            oldContent: entry.content,
-            newContent: parsed.content,
-          });
-        } else {
-          unmatched.push({ row: r, oldText: old, newText: nw });
-        }
-      } else if (entry.kind === 'translation') {
-        const parsed = parseTranslationRow(nw);
-        if (parsed) {
-          translationEdits.push({
-            lineNum: entry.lineNum,
-            oldContent: entry.content,
-            // A row this builder prefixed goes back as plain text; one the
-            // user wrote as "#tr.de: ..." keeps its prefix so the next build
-            // passes it through unchanged.
-            newContent: entry.prefixed ? parsed.content : nw.trim(),
-          });
-        } else {
-          unmatched.push({ row: r, oldText: old, newText: nw });
-        }
-      } else if (entry.kind === 'note') {
-        const parsed = parseNoteRow(nw);
-        if (parsed) {
-          noteEdits.push({
-            lineNum: entry.lineNum,
-            variantIndex: entry.variantIndex || 0,
-            oldContent: entry.content,
-            newContent: entry.prefixed ? parsed.content : nw.trim(),
-          });
-        } else {
-          unmatched.push({ row: r, oldText: old, newText: nw });
-        }
-      } else if (entry.kind === 'parallel') {
-        const parsed = parseParallelRow(nw);
-        if (parsed) {
-          parallelEdits.push({
-            lineNum: entry.lineNum,
-            variantIndex: entry.variantIndex || 0,
-            index: entry.index,
-            oldContent: entry.content,
-            newContent: entry.prefixed ? parsed.content : nw.trim(),
-          });
-        } else {
-          unmatched.push({ row: r, oldText: old, newText: nw });
-        }
-      } else if (entry.kind === 'witness') {
-        const parsed = parseWitnessRow(nw);
-        if (parsed && parsed.eblSiglum === entry.eblSiglum && String(parsed.sourceLine) === String(entry.sourceLine)) {
-          witnessEdits.push({
-            lineNum: entry.lineNum,
-            variantIndex: entry.variantIndex || 0,
-            msKey: entry.msKey,
-            sourceLine: entry.sourceLine,
-            oldContent: entry.content,
-            newContent: parsed.content,
-          });
-        } else {
-          unmatched.push({ row: r, oldText: old, newText: nw });
-        }
-      } else {
-        // continuation / blank / etc — treat edits as unmatched for v1
-        unmatched.push({ row: r, oldText: old, newText: nw });
-      }
-    }
-
-    if (oldRows.length !== newRows.length) {
-      // Report the tail rows that have no positional counterpart
-      const longer = newRows.length > oldRows.length ? newRows : oldRows;
-      for (let r = minLen; r < longer.length; r++) {
-        unmatched.push({
-          row: r,
-          oldText: oldRows[r] || '',
-          newText: newRows[r] || '',
-        });
-      }
-    }
-
-    return { reconstructionEdits, translationEdits, noteEdits, parallelEdits, witnessEdits, unmatched };
-  }
-
-  // ---- Row parsers ----
-
-  // Both row parsers tolerate leading whitespace (the artifact buffer pads
-  // witness rows for visual alignment) and any amount of inter-column padding.
-
-  // "12. some reconstruction text"   →  { lineNum: 12, content: "some reconstruction text" }
-  function parseReconstructionRow(row) {
-    const m = row.match(/^\s*(\d+)\.\s*(.*)$/);
-    if (!m) return null;
-    return { lineNum: parseInt(m[1], 10), content: m[2] };
-  }
-
-  // "#tr.en: If the Yoke is high"  →  { prefix: "#tr.en: ", content: "If the Yoke is high" }
-  // The language and the "(extent)" of a multi-line translation are optional,
-  // so a hand-written "#tr.de.(2): ..." parses too.
-  function parseTranslationRow(row) {
-    const m = row.match(/^\s*(#tr(?:\.[a-z]{2})?(?:\.\([^)]*\))?:\s*)(.*)$/);
-    if (!m) return null;
-    return { prefix: m[1], content: m[2] };
-  }
-
-  // "#note: See @bib{Hunger2019@109}"  →  { prefix: "#note: ", content: "See @bib{...}" }
-  function parseNoteRow(row) {
-    const m = row.match(/^\s*(#note:\s*)(.*)$/);
-    if (!m) return null;
-    return { prefix: m[1], content: m[2] };
-  }
-
-  // "// (MUL.APIN II iv 2)"  →  { prefix: "// ", content: "(MUL.APIN II iv 2)" }
-  function parseParallelRow(row) {
-    const m = row.match(/^\s*(\/\/\s*)(.*)$/);
-    if (!m) return null;
-    return { prefix: m[1], content: m[2] };
-  }
-
-  // "  NinNA1   5'.  content"  →  { eblSiglum: "NinNA1", sourceLine: "5'", content: "content" }
-  function parseWitnessRow(row) {
-    const m = row.match(/^\s*([^\s]+)\s+([0-9]+'?)\.\s+(.*)$/);
-    if (!m) return null;
-    return { eblSiglum: m[1], sourceLine: m[2], content: m[3] };
-  }
-
-  // ---- Apply edits ----
-
-  // Apply a witness edit to a manuscript's raw .txt content. Looks for the
-  // line `§<lineNum> <sourceLine>. <oldContent>` and replaces only the
-  // content portion, preserving the prefix and any leading whitespace.
-  //
-  // Returns { ok: true, content: <new content> } or { ok: false, reason }.
-  function applyWitnessEditToManuscript(msContent, { lineNum, sourceLine, newContent }) {
-    const lines = msContent.split('\n');
-    // Allow either "§N M. ..." or older "§N M ." variants
-    const pattern = new RegExp(`^(\\s*§${lineNum}\\s+${escapeRegex(String(sourceLine))}\\.\\s*)(.*)$`);
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(pattern);
-      if (m) {
-        lines[i] = m[1] + newContent;
-        return { ok: true, content: lines.join('\n') };
-      }
-    }
-    return { ok: false, reason: `No line matching §${lineNum} ${sourceLine}. found` };
-  }
-
+  // Used by setWitnessVariant below. It lived beside the artifact-diff code
+  // and went out with it; the caller survived, referring to a helper that no
+  // longer existed, and failed only when a variant was actually moved.
   function escapeRegex(s) {
     return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
@@ -489,17 +371,213 @@
     return out;
   }
 
+  // ---- One chapter line, in the shape POST /lines wants -------------------
+  //
+  // eBL's own chapter editor sends plain ATF strings — no reconstructionTokens,
+  // no atfTokens — so a whole line with its variants and witnesses is under
+  // 2 KB and can be assembled from exactly what buildChapterAtf already holds.
+  // The server does the tokenizing.
+  //
+  // Two fields have no counterpart in the ATF form: the numeric manuscriptId,
+  // and omittedWords. The first is passed in; the second cannot be authored
+  // here at all, which is why `existing` matters.
+  //
+  // A POST replaces the WHOLE line object, so anything this app cannot express
+  // is carried across from `existing` — the line as eBL currently holds it —
+  // rather than silently reset. Without that, saving one line would wipe every
+  // "‡" an editor had set in eBL's own UI, along with the section flags. A
+  // witness whose omissions could not be carried is reported in `warnings`
+  // instead of being quietly zeroed.
+
+  // The grammar's surface_label tokens. Not the same as the app's own
+  // abbreviations — eBL writes the edges with dots ("l.e.", not "le").
+  const EBL_SURFACE_LABEL = {
+    obverse: 'o',
+    reverse: 'r',
+    bottom: 'b.e.',
+    edge: 'e.',
+    'left edge': 'l.e.',
+    'right edge': 'r.e.',
+    top: 't.e.',
+  };
+
+  function prefixed(text, prefix, re) {
+    const t = normalizeTranslation(text);
+    if (!t) return null;
+    return re.test(t) ? t : prefix + t;
+  }
+
+  // manuscriptId + surface + line number: what identifies one witness row
+  // across a round trip. If any of the three was edited here the row is new as
+  // far as eBL is concerned, and its omittedWords cannot follow.
+  function witnessKey(manuscriptId, labels, number) {
+    return [manuscriptId, (labels || []).join(' '), String(number)].join('|');
+  }
+
+  function buildChapterLine({
+    lineNum,
+    scoreLines,
+    reconstructedLines,
+    translationLines,
+    noteLines,
+    parallelLines,
+    variantLines,
+    manuscriptIdByFile,
+    existing,
+    omittedByKey,
+  }) {
+    const warnings = [];
+
+    // What eBL holds now, indexed so each witness can find its own omissions.
+    // The word count comes along because omittedWords are positions in THAT
+    // reconstruction's word list: move the witness to another variant, or
+    // insert a word, and the same indices point at different words.
+    const carried = new Map();
+    for (const v of ((existing && existing.variants) || [])) {
+      const words = String(v.reconstruction || '').split('\n')[0].split(/\s+/).filter(Boolean).length;
+      for (const m of (v.manuscripts || [])) {
+        carried.set(witnessKey(m.manuscriptId, m.labels, m.number),
+          { omittedWords: m.omittedWords || [], words });
+      }
+    }
+
+    const entries = scoreLines[lineNum] || [];
+    const readings = readingsFor(lineNum, reconstructedLines, noteLines, parallelLines, variantLines);
+    const variants = [];
+
+    for (let vi = 0; vi < readings.length; vi++) {
+      const reading = readings[vi];
+
+      // The reconstruction is the whole block as one string: the reading, then
+      // its note, then its parallels, newline-separated — the same rows
+      // buildChapterAtf emits, just not laid out.
+      const rows = [normaliseAtfText(reading.text || '')];
+      const note = prefixed(reading.note || '', NOTE_PREFIX, /^#note:/);
+      if (note) rows.push(note);
+      for (const p of (reading.parallels || [])) {
+        const parallel = prefixed(p, PARALLEL_PREFIX, /^\/\//);
+        if (parallel) rows.push(parallel);
+      }
+
+      // Word positions omittedWords would index into, for the check below.
+      const words = String(reading.text || '').split(/\s+/).filter(Boolean).length;
+
+      const manuscripts = [];
+      for (const w of entries) {
+        if (w.type !== 'line' || (w.variant || 0) !== vi) continue;
+
+        // Both forms, for the same reason the map holds both.
+        const manuscriptId = manuscriptIdByFile
+          ? (manuscriptIdByFile[w.siglum] != null
+             ? manuscriptIdByFile[w.siglum]
+             : manuscriptIdByFile[String(w.siglum).replace(/\.txt$/, '')])
+          : undefined;
+        if (manuscriptId == null) {
+          // Sending the line without it would drop the witness from the
+          // chapter, so refuse the row and say which one.
+          warnings.push(`${w.siglum} is not registered in this eBL chapter — its ${w.sourceLine} was left out.`);
+          continue;
+        }
+
+        const label = EBL_SURFACE_LABEL[w.surface];
+        const labels = label ? [label] : [];
+        if (w.surface && !label) {
+          warnings.push(`${w.siglum}: "${w.surface}" is not an eBL surface label, so ${w.sourceLine} was sent without one.`);
+        }
+
+        // Everything the witness carries, as one ATF string. eBL's own data
+        // does the same: a note or a ruling follows its reading on its own row.
+        const atfRows = [normaliseAtfText(w.content || '')];
+        for (const cont of (w.continuation || [])) atfRows.push(cont);
+        for (const n of (w.notes || [])) {
+          const witnessNote = prefixed(n, NOTE_PREFIX, /^#note:/);
+          if (witnessNote) atfRows.push(witnessNote);
+        }
+        for (const d of entries) {
+          if (d.type === 'line' || d.siglum !== w.siglum || (d.variant || 0) !== vi) continue;
+          atfRows.push('$ ' + (d.content || ((d.rulingType || 'single') + ' ruling')));
+        }
+
+        const number = String(w.sourceLine == null ? '' : w.sourceLine);
+        const key = witnessKey(manuscriptId, labels, number);
+
+        // An alignment made here is the better answer: it was measured against
+        // THIS reading, where the carried-over one was measured against whatever
+        // eBL held before. Without this the app could show a witness omitting
+        // three words and still send eBL an empty list.
+        const local = omittedByKey && omittedByKey[w.siglum + '|' + number];
+        if (local) {
+          manuscripts.push({
+            manuscriptId, labels, number,
+            atf: atfRows.join('\n'),
+            omittedWords: local.slice(),
+          });
+          continue;
+        }
+
+        const was = carried.get(key);
+        let omittedWords = [];
+        if (was === undefined) {
+          if (carried.size) {
+            warnings.push(`${w.siglum} ${number}: no matching row in eBL, so any omitted words it had are not carried over.`);
+          }
+        } else if (!was.omittedWords.length) {
+          omittedWords = [];
+        } else if (was.words === words) {
+          omittedWords = was.omittedWords;
+        } else {
+          // Same witness, different reconstruction length — the indices no
+          // longer name the same words, and a wrong ‡ is worse than none.
+          warnings.push(
+            `${w.siglum} ${number}: the reading it sits under changed length ` +
+            `(${was.words} words to ${words}), so its ${was.omittedWords.length} omitted ` +
+            'word(s) were dropped rather than pointed at the wrong ones. Re-mark them in eBL.');
+        }
+
+        manuscripts.push({
+          manuscriptId,
+          labels,
+          number,
+          atf: atfRows.join('\n'),
+          omittedWords,
+        });
+      }
+
+      variants.push({
+        reconstruction: rows.join('\n'),
+        // eBL returns intertext as an array but takes "" on write.
+        intertext: (existing && existing.variants && existing.variants[vi]
+          && typeof existing.variants[vi].intertext === 'string')
+          ? existing.variants[vi].intertext : '',
+        manuscripts,
+      });
+    }
+
+    const translation = prefixed(
+      normaliseAtfText((translationLines && translationLines[lineNum]) || ''),
+      TRANSLATION_PREFIX, /^#tr\b/);
+
+    return {
+      line: {
+        number: String(lineNum),
+        variants,
+        // Not authored here — whatever eBL has stays.
+        isSecondLineOfParallelism: !!(existing && existing.isSecondLineOfParallelism),
+        isBeginningOfSection: !!(existing && existing.isBeginningOfSection),
+        translation: translation || '',
+        oldLineNumbers: (existing && existing.oldLineNumbers) || [],
+      },
+      warnings,
+    };
+  }
+
   // ---- Export ----
   window.EblAtf = {
     buildChapterAtf,
+    buildChapterLine,
     stripFormatting,
-    diffArtifact,
-    parseReconstructionRow,
-    parseTranslationRow,
-    parseNoteRow,
-    parseParallelRow,
-    parseWitnessRow,
-    applyWitnessEditToManuscript,
+    normaliseAtfText,
+    oddCharacters,
     setWitnessVariant,
     buildEblSiglumMap,
   };

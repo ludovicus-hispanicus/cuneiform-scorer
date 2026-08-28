@@ -281,6 +281,29 @@
     });
   }
 
+  // Token alignment: which word of a witness answers to which word of the
+  // reconstruction, and what it reads if it reads something else. This is what
+  // drives eBL's hover, and POST /lines cannot carry it — that sends plain ATF,
+  // so eBL re-parses and keeps alignment only where a token happens to pair.
+  //
+  // The payload is the WHOLE chapter, nested line -> variant -> manuscript, so
+  // it replaces every line's alignment. Anything not being changed has to be
+  // sent back as it stands.
+  async function postAlignment(coords, alignment) {
+    return authedRequest('POST', `${chapterPath(coords)}/alignment`, { alignment });
+  }
+
+  // Lemmas for a whole chapter, shaped exactly as eBL's own editor sends them:
+  //   { lemmatization: [ perLine [ perVariant
+  //       { reconstruction: [token], manuscripts: [ [token] ] } ] ] }
+  // where a token is { value } or { value, uniqueLemma: [id] }.
+  //
+  // Like alignment, this replaces the whole chapter, so every line has to be
+  // sent — including the ones carrying no lemma at all.
+  async function postLemmatization(coords, lemmatization) {
+    return authedRequest('POST', `${chapterPath(coords)}/lemmatization`, { lemmatization });
+  }
+
   // Empty a chapter so a following import replaces rather than appends.
   // Lemmatization and alignment on the removed lines do not survive this: eBL
   // carries those across only when old and new lines are paired inside one
@@ -352,15 +375,44 @@
   // Reconcile manuscripts.json against the actual files in manuscripts/ on disk.
   // - Adds default entries for new files
   // - Removes entries whose file is gone
-  // - Renumbers ids to be contiguous 1..N (eBL requires unique ids >= 1)
+  // - KEEPS the id each manuscript already has, and gives a new file the next
+  //   free one (eBL requires unique ids >= 1, not contiguous ones)
   // - Heals stale museumNumber values that still carry join notation
   //   like "K.14874 (+) BM.41031" — replaces them with the primary segment.
   function reconcileManuscripts(existing, filesOnDisk) {
     const byFile = new Map((existing?.manuscripts || []).map((m) => [m.file, m]));
     const sortedFiles = [...filesOnDisk].sort((a, b) => a.localeCompare(b));
-    const reconciled = sortedFiles.map((file, i) => {
-      const id = i + 1;
+
+    // An id is a manuscript's name on eBL: every line there points at its
+    // witness by id. Numbering by position in the sorted file list meant that
+    // adding one tablet renamed every tablet after it, and a POST would then
+    // hand ten manuscripts' lines to the wrong stones. So an id, once given,
+    // is kept, and only a file that has never had one gets the next free
+    // number. Removing a manuscript leaves a gap, which eBL permits.
+    const idFor = new Map();
+    const taken = new Set();
+    // Whoever holds an id keeps it. If two files somehow claim the same one,
+    // the first in file order keeps it and the other is treated as new.
+    for (const file of sortedFiles) {
+      const held = Number((byFile.get(file) || {}).id);
+      if (!Number.isInteger(held) || held < 1 || taken.has(held)) continue;
+      taken.add(held);
+      idFor.set(file, held);
+    }
+    // A new manuscript goes above every id ever handed out here, rather than
+    // into a gap a removed one left behind. Reusing a freed id would give the
+    // newcomer whatever eBL still had filed under that number.
+    let nextFree = taken.size ? Math.max.apply(null, [...taken]) + 1 : 1;
+    for (const file of sortedFiles) {
+      if (idFor.has(file)) continue;
+      taken.add(nextFree);
+      idFor.set(file, nextFree);
+      nextFree++;
+    }
+
+    const reconciled = sortedFiles.map((file) => {
       const prev = byFile.get(file);
+      const id = idFor.get(file);
       if (!prev) return defaultManuscriptEntry(file, id);
 
       const healed = { ...prev, file, id, siglumDisambiguator: prev.siglumDisambiguator || String(id) };
@@ -376,6 +428,87 @@
       return healed;
     });
     return { version: 1, manuscripts: reconciled };
+  }
+
+  // A manuscript's museum number, however either side chose to write it. This
+  // is the one field the chapter and manuscripts.json always agree on, so it is
+  // what the two lists are matched by.
+  function museumNumberOf(m) {
+    const n = m && m.museumNumber;
+    if (!n) return '';
+    if (typeof n === 'string') return n.trim();
+    return [n.prefix, n.number, n.suffix].filter(Boolean).join('.');
+  }
+
+  // What sending this list would do to the chapter eBL already holds.
+  //
+  // An id is how eBL knows which tablet a line belongs to. A list that gives an
+  // existing manuscript a different number does not rename it — it hands that
+  // manuscript's lines to whichever tablet now carries the number, quietly and
+  // across every line of the chapter. So `moved` is not a warning: it is a
+  // reason not to send.
+  function compareManuscripts(held, sending) {
+    const theirs = new Map();
+    for (const m of (held || [])) {
+      const k = museumNumberOf(m);
+      if (k) theirs.set(k, m.id);
+    }
+    const ours = new Set();
+    const moved = [], added = [], matched = [];
+    for (const m of (sending || [])) {
+      const k = museumNumberOf(m);
+      if (k) ours.add(k);
+      if (!k || !theirs.has(k)) { added.push({ museumNumber: k || '(no museum number)', id: m.id }); continue; }
+      const was = theirs.get(k);
+      if (was === m.id) matched.push({ museumNumber: k, id: m.id });
+      else moved.push({ museumNumber: k, from: was, to: m.id });
+    }
+    const dropped = [];
+    for (const [k, id] of theirs) if (!ours.has(k)) dropped.push({ museumNumber: k, id });
+    return { moved, added, dropped, matched };
+  }
+
+  // Take eBL's numbering for every manuscript it already knows.
+  //
+  // The chapter is the authority here: its lines already point at these ids, and
+  // a local file cannot renumber them by wishing. Anything eBL does not have
+  // keeps its own id where that is still free, and otherwise takes the next one
+  // above everything in use.
+  function adoptChapterIds(meta, held) {
+    const theirs = new Map();
+    for (const m of (held || [])) {
+      const k = museumNumberOf(m);
+      if (k) theirs.set(k, m.id);
+    }
+    const rows = (meta && meta.manuscripts) || [];
+    const taken = new Set();
+    const assigned = new Map();
+    for (const m of rows) {
+      const id = theirs.get(museumNumberOf(m));
+      if (id == null || taken.has(id)) continue;
+      taken.add(id);
+      assigned.set(m.file, id);
+    }
+    // Then the ones eBL does not know, keeping their number if it is still free.
+    for (const m of rows) {
+      if (assigned.has(m.file)) continue;
+      const held2 = Number(m.id);
+      if (Number.isInteger(held2) && held2 >= 1 && !taken.has(held2)) {
+        taken.add(held2);
+        assigned.set(m.file, held2);
+      }
+    }
+    let next = taken.size ? Math.max.apply(null, [...taken]) + 1 : 1;
+    for (const m of rows) {
+      if (assigned.has(m.file)) continue;
+      assigned.set(m.file, next);
+      taken.add(next);
+      next++;
+    }
+    return {
+      version: 1,
+      manuscripts: rows.map((m) => ({ ...m, id: assigned.get(m.file) })),
+    };
   }
 
   // Strip local-only fields and return the array eBL's POST /manuscripts expects.
@@ -460,6 +593,8 @@
     postManuscripts,
     postImport,
     postLines,
+    postAlignment,
+    postLemmatization,
     deleteAllLines,
 
     // fragmentarium
@@ -471,6 +606,9 @@
     defaultManuscriptEntry,
     reconcileManuscripts,
     toEblManuscripts,
+    museumNumberOf,
+    compareManuscripts,
+    adoptChapterIds,
     validateManuscripts,
 
     EblError,
