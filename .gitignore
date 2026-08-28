@@ -31,3 +31,6 @@ dist-validator/
 build/
 __pycache__/
 *.pyc
+
+# Local Python env for the ATF validator (npm start finds it automatically)
+.venv/

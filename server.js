@@ -9,9 +9,64 @@ const { setupWSConnection } = require('y-websocket/bin/utils');
 // Validator binary resolution
 // - In bundled Electron desktop builds, VALIDATE_ATF_BIN points at the PyInstaller exe
 // - In dev (`npm start` with a system Python), we spawn `python validate_atf.py`
-const VALIDATE_ATF_BIN = process.env.VALIDATE_ATF_BIN || null;
+// The PyInstaller build carries its own lark, so it works whether or not the
+// system Python has one. It lives in the repo, so dev should use it too —
+// without this, `npm start` falls through to a system Python, and if that has
+// no lark the validator answers "valid" to everything it is given.
+const BUNDLED_VALIDATOR = path.join(__dirname, 'dist', 'validator',
+  process.platform === 'win32' ? 'validate_atf.exe' : 'validate_atf');
+const VALIDATE_ATF_BIN = process.env.VALIDATE_ATF_BIN
+  || (fs.existsSync(BUNDLED_VALIDATOR) ? BUNDLED_VALIDATOR : null);
 const VALIDATE_SCRIPT = path.join(__dirname, 'validate_atf.py');
 const PYTHON_EXE = process.env.PYTHON_EXE || (process.platform === 'win32' ? 'python' : 'python3');
+
+// Which validator to run, decided once at startup.
+//
+// A Python that has lark runs validate_atf.py, so it is always the current
+// rules. The bundled binary carries its own lark and its own frozen copy of
+// that script — which is why it is only trusted while it is at least as new
+// as the source. A binary older than the script predates whatever the script
+// has learned since, and a validator running stale rules is worse than none:
+// it rejects ATF that is actually valid, and the editor has no way to tell.
+// A project-local virtualenv is tried before whatever `python` means on PATH,
+// so `pip install lark` into .venv is enough to turn the validator on and
+// nothing has to be installed system-wide. Both layouts are checked: Scripts/
+// on a stock Windows Python, bin/ under MSYS2.
+function pythonCandidates() {
+  const venv = path.join(__dirname, '.venv');
+  return [
+    path.join(venv, 'Scripts', 'python.exe'),
+    path.join(venv, 'bin', 'python.exe'),
+    path.join(venv, 'bin', 'python'),
+  ].filter((p) => fs.existsSync(p)).concat([PYTHON_EXE]);
+}
+
+function resolveValidator() {
+  for (const exe of pythonCandidates()) {
+    try {
+      const probe = require('child_process').spawnSync(exe, ['-c', 'import lark'], { timeout: 5000 });
+      if (probe.status === 0) return { cmd: exe, args: [VALIDATE_SCRIPT], kind: 'python', mode: 'dev' };
+    } catch (_) { /* not this one */ }
+  }
+
+  if (VALIDATE_ATF_BIN && fs.existsSync(VALIDATE_ATF_BIN)) {
+    let stale = false;
+    try {
+      stale = fs.existsSync(VALIDATE_SCRIPT)
+        && fs.statSync(VALIDATE_ATF_BIN).mtimeMs < fs.statSync(VALIDATE_SCRIPT).mtimeMs;
+    } catch (_) { /* if we cannot tell, trust it */ }
+    if (stale) {
+      return { cmd: null, args: [], kind: 'stale-binary', mode: 'dev',
+        why: 'The bundled validator is older than validate_atf.py. Rebuild it with'
+          + ' `npm run build:validator`, or `pip install lark` so the script runs directly.' };
+    }
+    return { cmd: VALIDATE_ATF_BIN, args: [], kind: 'binary', mode: 'desktop' };
+  }
+
+  return { cmd: null, args: [], kind: 'none', mode: 'dev',
+    why: 'No validator: install Python + `pip install lark`, or build the bundled binary.' };
+}
+const VALIDATOR = resolveValidator();
 
 const PORT = process.env.PORT || 3000;
 const PROJECTS_DIR = path.join(__dirname, 'projects');
@@ -59,23 +114,14 @@ const server = http.createServer((req, res) => {
   // available) vs "browser/dev mode" (no validator).
   // ===========================================
   if (req.method === 'GET' && req.url === '/api/health') {
-    let validatorAvailable = false;
-    let mode = 'dev';
-    if (VALIDATE_ATF_BIN && fs.existsSync(VALIDATE_ATF_BIN)) {
-      validatorAvailable = true;
-      mode = 'desktop';
-    } else {
-      // Best-effort check for system python on PATH. Not authoritative —
-      // the actual spawn in /api/validate-atf will report definitively.
-      try {
-        const probe = require('child_process').spawnSync(PYTHON_EXE, ['-c', 'import lark'], { timeout: 3000 });
-        if (probe.status === 0) validatorAvailable = true;
-      } catch (_) { /* python not on PATH */ }
-    }
+    const validatorAvailable = !!VALIDATOR.cmd;
+    const mode = VALIDATOR.mode;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
       validator: validatorAvailable,
+      validatorSource: VALIDATOR.kind,
+      validatorWhy: VALIDATOR.why || null,
       mode,
       app: 'cuneiform-scorer',
     }));
@@ -100,15 +146,19 @@ const server = http.createServer((req, res) => {
       }
       const atf = (payload && typeof payload.atf === 'string') ? payload.atf : '';
 
-      // Pick the bundled binary if present, otherwise fall back to system Python.
-      let cmd, args;
-      if (VALIDATE_ATF_BIN && fs.existsSync(VALIDATE_ATF_BIN)) {
-        cmd = VALIDATE_ATF_BIN;
-        args = [];
-      } else {
-        cmd = PYTHON_EXE;
-        args = [VALIDATE_SCRIPT];
+      // Decided at startup. With no usable validator, say so plainly rather
+      // than answering "valid" — the editor shows that the ATF went
+      // unchecked instead of being told it passed.
+      if (!VALIDATOR.cmd) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          valid: true, errors: [], warnings: [], parsed_lines: 0,
+          validation_source: VALIDATOR.kind, available: false, init_error: VALIDATOR.why,
+        }));
+        return;
       }
+      const cmd = VALIDATOR.cmd;
+      const args = VALIDATOR.args;
 
       let child;
       try {

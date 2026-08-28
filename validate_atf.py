@@ -96,7 +96,20 @@ def _get_parser():
 # Recognize the structural shape of each row in the scorer's artifact so we
 # know what to feed the Lark parser.
 RECON_RE = re.compile(r"^\s*\d+'?\.\s")
-WITNESS_RE = re.compile(r"^\s*([^\s]+)\s+(\d+'?)\.\s+(.*)$")
+
+# A witness row is "SIGLUM [LABELS] N. content". eBL chapter ATF allows a
+# surface and column label between the siglum and the line number ("A r 18'."),
+# and line numbers carrying a letter or a prime ("1a.", "18'."). The fragment
+# grammar this validator parses with knows none of that, so the shape is
+# recognised here and reduced to a plain "1. content" before parsing — the
+# content is what we are checking; eBL itself validates the label and number.
+_SURFACE = r"(?:o|r|b\.e\.|e\.|l\.e\.|r\.e\.|t\.e\.)"
+_COLUMN = r"(?:i{1,3}|iv|vi{0,3}|v|ix|xi{0,2}|x)"
+_LABEL = r"(?:%s|%s)" % (_SURFACE, _COLUMN)
+_LINE_NO = r"(?:\d+[A-Za-z]?'?)"
+WITNESS_RE = re.compile(
+    r"^\s*(\S+)((?:\s+" + _LABEL + r")*)\s+(" + _LINE_NO + r")\.\s+(.*)$"
+)
 TRANSLATION_RE = re.compile(r"^#tr\b")
 
 
@@ -186,13 +199,12 @@ def validate(atf_text: str):
         start = "translation_line" if TRANSLATION_RE.match(stripped) else "start"
         witness_match = WITNESS_RE.match(raw)
         if witness_match and not RECON_RE.match(raw):
-            siglum, ms_line, content = witness_match.groups()
+            content = witness_match.group(4)
             # Recompose as a fragment-style text line for the Lark grammar.
-            to_parse = f"{ms_line}. {content}"
-            # Column in `to_parse` → column in original `raw`
-            col_offset = raw.find(ms_line)
-            if col_offset < 0:
-                col_offset = 0
+            to_parse = f"1. {content}"
+            # Column in `to_parse` → column in original `raw`. Content starts
+            # at group 4 in `raw` and after the 3 characters of "1. " here.
+            col_offset = witness_match.start(4) - 3
 
         if parser:
             ok, msg, col = _parse_with_lark(parser, to_parse, start)
