@@ -112,6 +112,11 @@
     let s = stripMarks(raw);
     if (!keepDeterminative) s = s.replace(/{[^}]*}/g, '');
     s = deSubscript(s).toLowerCase();
+    // A sign-form modifier says how the sign was drawn, not which word it is:
+    // KAM@v is KAM turned, and the index keys no form with an @ in it at all.
+    // Left on, MU.1.KAM@v missed the mu-1-kam eBL holds and was trimmed down
+    // to bare mu, which is a different word.
+    s = s.replace(/@[a-z0-9]+/g, '');
     // A compound is written with dots in ATF and with hyphens in the index.
     s = s.replace(/[.]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     return s;
@@ -480,6 +485,24 @@
   }
 
 
+  // The same key with the count generalised: eBL's own x placeholder, and the
+  // instance it happens to have keyed.
+  function countVariants(key) {
+    const parts = String(key || '').split('-');
+    const out = [];
+    for (let i = 0; i < parts.length; i++) {
+      if (!/^[0-9]+$/.test(parts[i])) continue;
+      for (const stand of ['x', '1']) {
+        if (parts[i] === stand) continue;
+        const alt = parts.slice();
+        alt[i] = stand;
+        const k = alt.join('-');
+        if (out.indexOf(k) < 0) out.push(k);
+      }
+    }
+    return out;
+  }
+
   // Every way this word might be found, best first. Each rung says how it was
   // reached, so the editor can see whether a candidate came from the word as
   // written or from something trimmed off it.
@@ -550,12 +573,26 @@
       }
     }
 
+    // A count in a formula is not part of the word. MU.1.KAM and MU.2.KAM are
+    // both the year; U₄.15.KAM is the day whatever day it is. eBL keys one
+    // instance and writes the rest with its own placeholder — mu-x-kam — so
+    // both that and the keyed exemplar are tried.
+    const counted = countVariants(plain);
+    for (const key of counted) {
+      tries.push([key, 'the same formula, whatever the number']);
+    }
+
     // The same signs under another of their names, one sign at a time. Only
     // one, because two substitutions at once stop being the same word read
     // differently and start being a different word.
+    //
+    // Run over the counted forms as well: eBL keys the day as ud-1-kam, so
+    // U₄.2.KAM needs the reading changed and the number generalised together,
+    // and neither alone reaches it.
     if (signReadingsOf) {
-      const signs = plain ? plain.split('-') : [];
       let made = 0;
+      for (const base of [plain].concat(counted)) {
+      const signs = base ? base.split('-') : [];
       for (let i = 0; i < signs.length && made < 6; i++) {
         let siblings = null;
         try { siblings = signReadingsOf(signs[i]); } catch (_) { siblings = null; }
@@ -573,6 +610,7 @@
             'the same sign, with ' + signs[i].toUpperCase() + ' written ' + sib.toUpperCase()]);
           made++;
         }
+      }
       }
     }
 
@@ -660,7 +698,11 @@
   function joinSyllables(parts) {
     let out = '';
     for (const raw of parts) {
-      const piece = String(raw).replace(/[0-9]+$/, '');
+      // The digits after a reading are its sign index: ša₂ and ša are the same
+      // syllable. A part that is ALL digits is a number and stays — dropping it
+      // joined mu-3-kam into mukam, which then peeled as muk plus a ventive
+      // -am, and MU.3.KAM@v came out as the year plus a suffix it never had.
+      const piece = String(raw).replace(/([^0-9])[0-9]+$/, '$1');
       if (!piece) continue;
       const last = out.slice(-1);
       const first = piece.slice(0, 1);
@@ -775,6 +817,10 @@
     peel(BOUND_ENDINGS);
     peel(VENTIVE);
     if (!ids.length) return null;
+    // A numeral left in what remains means this was never a word with an
+    // ending on it: ITI.3.KAM joins as iti3kam, which happily gives up an -am
+    // and leaves iti3k, and the verb test below would take that seriously.
+    if (/[0-9]/.test(word)) return null;
 
     for (const base of baseForms(word, assimilated)) {
       if (forms_has(base)) return { stem: base, ids, forms, assimilated };
