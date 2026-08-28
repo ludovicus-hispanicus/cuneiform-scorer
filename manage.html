@@ -95,6 +95,32 @@
       font-size: 0.85rem;
     }
 
+    /* Whether a tablet is carrying any of the score yet. */
+    .use-dot {
+      width: 0.6rem;
+      height: 0.6rem;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      background: #d9a520;
+    }
+    .use-dot.is-used { background: #3f9142; }
+    .file-item a { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .file-period {
+      flex: 0 0 auto;
+      opacity: 0.75;
+      font-size: 0.78rem;
+      min-width: 9rem;
+      text-align: right;
+    }
+    .file-use {
+      flex: 0 0 auto;
+      font-size: 0.78rem;
+      min-width: 12rem;
+      text-align: right;
+      color: #8a6d1f;
+    }
+    .file-use.is-used { color: #3f9142; }
+
     .file-item:last-child {
       border-bottom: none;
     }
@@ -592,6 +618,18 @@
         <button id="ebl-fetch-chapter-btn" class="btn btn-secondary" type="button">Fetch chapter info</button>
         <span id="ebl-chapter-status" class="ebl-hint" style="margin: 0;"></span>
       </div>
+
+      <hr style="margin: 1.2rem 0; border: 0; border-top: 1px solid var(--border-color);">
+
+      <p style="margin-bottom: 0.5rem;">Registering the manuscripts. A witness eBL does not
+        know is left out of every line that quotes it, so a new tablet has to be registered
+        before its lines can go.</p>
+      <div class="actions">
+        <button id="ebl-ms-check-btn" class="btn btn-secondary" type="button">Compare with eBL</button>
+        <button id="ebl-ms-adopt-btn" class="btn btn-secondary" type="button" hidden>Take eBL&#39;s numbering</button>
+        <button id="ebl-ms-send-btn" class="btn" type="button" disabled>Register manuscripts</button>
+      </div>
+      <div id="ebl-ms-report" class="ebl-hint" style="margin-top: 0.6rem;"></div>
     </div>
 
     <!-- Import Section -->
@@ -720,11 +758,43 @@
           manuscriptsMeta = reconciled;
         }
 
+        await readManuscriptUsage();
         renderFileList();
         renderMappingTable();
       } catch (err) {
         showStatus('Failed to load files: ' + err.message, 'error');
       }
+    }
+
+    // How much of the score each tablet actually carries.
+    //
+    // A file in the folder is not yet a witness. It becomes one when its lines
+    // are assigned to sections — the § marker at the head of a line — and until
+    // then it has nothing to give the chapter and no reason to be registered.
+    //
+    // Only the marker is looked for, not the whole line: a witness line may
+    // carry a surface label, a prime, a letter suffix, and matching all of that
+    // here would only be a second place for the format to be got wrong.
+    let manuscriptUsage = {};
+    const SECTION_MARK = new RegExp('^\\s*\\u00A7(\\d+)[a-z]?(?![0-9])');
+
+    async function readManuscriptUsage() {
+      manuscriptUsage = {};
+      await Promise.all(manuscriptFiles.map(async (file) => {
+        const siglum = file.replace(/\.txt$/, '');
+        let text = null;
+        try { text = await FileSystem.readManuscript(dirHandle, siglum); } catch (_) { text = null; }
+        if (text == null) { manuscriptUsage[file] = null; return; }
+        const sections = new Set();
+        let lines = 0;
+        for (const raw of text.split(/\r?\n/)) {
+          const m = SECTION_MARK.exec(raw);
+          if (!m) continue;
+          lines++;
+          sections.add(m[1]);
+        }
+        manuscriptUsage[file] = { lines, sections: sections.size };
+      }));
     }
 
     // Render file list
@@ -736,15 +806,34 @@
         return;
       }
 
+      const metaByFile = new Map((manuscriptsMeta.manuscripts || [])
+        .map((m) => [m.file, m]));
+
       container.innerHTML = manuscriptFiles.map(file => {
         const primary = window.EblClient
           ? window.EblClient.extractMuseumNumber(file).primary
           : file.split(/\s*\(\s*\+\s*\)\s*/)[0];
         const href = `https://www.ebl.lmu.de/library/${encodeURIComponent(primary)}`;
+        const withExt = file.endsWith('.txt') ? file : file + '.txt';
+        const meta = metaByFile.get(withExt) || metaByFile.get(file) || {};
+        const period = [meta.periodModifier && meta.periodModifier !== 'None' ? meta.periodModifier : '',
+          meta.period || ''].filter(Boolean).join(' ');
+        const use = manuscriptUsage[file];
+        // Green once the tablet carries lines of the score; amber while it is
+        // only a file in the folder.
+        const used = use && use.lines > 0;
+        const mark = used ? 'is-used' : 'is-idle';
+        const said = use == null ? 'could not be read'
+          : used ? use.lines + ' line' + (use.lines === 1 ? '' : 's')
+              + ' in ' + use.sections + ' section' + (use.sections === 1 ? '' : 's')
+            : 'no lines assigned to a section';
         return `
         <div class="file-item">
+          <span class="use-dot ${mark}" title="${escapeHtml(said)}"></span>
           <a href="${href}" target="_blank" rel="noopener noreferrer" data-ebl-link="1"
              title="Open ${escapeHtml(primary)} in eBL Fragmentarium">${escapeHtml(file)}</a>
+          <span class="file-period">${escapeHtml(period || '—')}</span>
+          <span class="file-use ${mark}">${escapeHtml(said)}</span>
           <button class="delete-file-btn" data-file="${escapeHtml(file)}" title="Delete">&times;</button>
         </div>
       `;
@@ -942,6 +1031,9 @@
 
       document.getElementById('ebl-test-btn').addEventListener('click', testEblConnection);
       document.getElementById('ebl-fetch-chapter-btn').addEventListener('click', fetchChapterInfo);
+      document.getElementById('ebl-ms-check-btn').addEventListener('click', checkManuscriptsAgainstEbl);
+      document.getElementById('ebl-ms-send-btn').addEventListener('click', registerManuscriptsWithEbl);
+      document.getElementById('ebl-ms-adopt-btn').addEventListener('click', adoptEblNumbering);
       document.getElementById('ebl-sync-meta-btn').addEventListener('click', syncMetadataFromEbl);
 
       renderEblStatus();
@@ -978,6 +1070,116 @@
           showStatus('Failed to save eBL settings: ' + err.message, 'error');
         }
       }, 500);
+    }
+
+    // ---- registering the manuscripts with eBL ------------------------------
+    //
+    // Compare before sending, always. An id is how eBL knows which tablet a
+    // line belongs to, so a list that moves an existing manuscript to another
+    // number hands its lines to whichever tablet now holds that number — across
+    // the whole chapter, and without saying so. That case disables the button
+    // rather than warning about it.
+    let msPlan = null;
+
+    function eblTargetFromForm() {
+      return {
+        genre: document.getElementById('ebl-target-genre').value.trim(),
+        category: parseIntOrString(document.getElementById('ebl-target-category').value.trim()),
+        index: parseIntOrString(document.getElementById('ebl-target-index').value.trim()),
+        stage: document.getElementById('ebl-target-stage').value.trim(),
+        name: document.getElementById('ebl-target-name').value.trim(),
+      };
+    }
+
+    function renderManuscriptPlan(plan) {
+      const el = document.getElementById('ebl-ms-report');
+      const send = document.getElementById('ebl-ms-send-btn');
+      const line = (t) => '<div>' + t + '</div>';
+      const names = (list) => list.map((x) => x.museumNumber).join(', ');
+      const out = [];
+      out.push(line('<b>' + plan.matched.length + '</b> already registered and unchanged.'));
+      if (plan.added.length) {
+        out.push(line('<b>' + plan.added.length + '</b> to add: '
+          + plan.added.map((x) => x.museumNumber + ' (as ' + x.id + ')').join(', ')));
+      }
+      if (plan.dropped.length) {
+        out.push(line('<b>' + plan.dropped.length + '</b> on eBL but not in this project: '
+          + names(plan.dropped) + '. Registering removes them.'));
+      }
+      if (plan.moved.length) {
+        out.push(line('<b style="color:#a33">' + plan.moved.length + ' would change id</b> — '
+          + plan.moved.slice(0, 8).map((x) => x.museumNumber + ': ' + x.from + ' to ' + x.to).join(', ')
+          + (plan.moved.length > 8 ? ', and ' + (plan.moved.length - 8) + ' more' : '')
+          + '. Sending this would give their lines to other tablets, so it is blocked.'));
+        out.push(line('The chapter is the authority on these numbers, since its lines already'
+          + ' point at them. Take eBL&#39;s numbering to bring this project into line.'));
+      }
+      document.getElementById('ebl-ms-adopt-btn').hidden = !plan.moved.length;
+      if (!plan.added.length && !plan.dropped.length && !plan.moved.length) {
+        out.push(line('Nothing to change.'));
+      }
+      el.innerHTML = out.join('');
+      send.disabled = !!plan.moved.length || (!plan.added.length && !plan.dropped.length);
+    }
+
+    async function checkManuscriptsAgainstEbl() {
+      const el = document.getElementById('ebl-ms-report');
+      const btn = document.getElementById('ebl-ms-check-btn');
+      el.textContent = 'Reading the chapter...';
+      btn.disabled = true;
+      msPlan = null;
+      document.getElementById('ebl-ms-send-btn').disabled = true;
+      try {
+        const target = eblTargetFromForm();
+        const chapter = await EblClient.getChapter(target);
+        const sending = EblClient.toEblManuscripts(manuscriptsMeta);
+        msPlan = EblClient.compareManuscripts(chapter.manuscripts || [], sending);
+        renderManuscriptPlan(msPlan);
+      } catch (err) {
+        el.textContent = 'Could not read the chapter: ' + (err && err.message || err);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function registerManuscriptsWithEbl() {
+      const el = document.getElementById('ebl-ms-report');
+      const btn = document.getElementById('ebl-ms-send-btn');
+      if (!msPlan) { await checkManuscriptsAgainstEbl(); }
+      if (!msPlan || msPlan.moved.length) return;
+      const dropping = msPlan.dropped.length
+        ? String.fromCharCode(10) + 'This also removes from eBL: '
+          + msPlan.dropped.map((x) => x.museumNumber).join(', ')
+        : '';
+      if (!confirm('Register ' + msPlan.added.length + ' manuscript(s) with eBL?' + dropping)) return;
+      btn.disabled = true;
+      el.textContent = 'Registering...';
+      try {
+        await EblClient.postManuscripts(eblTargetFromForm(),
+          EblClient.toEblManuscripts(manuscriptsMeta), []);
+        el.textContent = 'Registered. Reload the chapter page on eBL to see it.';
+        msPlan = null;
+      } catch (err) {
+        el.textContent = 'eBL refused it: ' + (err && err.message || err);
+        btn.disabled = false;
+      }
+    }
+
+    // Bring manuscripts.json into line with the numbering eBL already uses.
+    async function adoptEblNumbering() {
+      const el = document.getElementById('ebl-ms-report');
+      const btn = document.getElementById('ebl-ms-adopt-btn');
+      btn.disabled = true;
+      try {
+        const chapter = await EblClient.getChapter(eblTargetFromForm());
+        manuscriptsMeta = EblClient.adoptChapterIds(manuscriptsMeta, chapter.manuscripts || []);
+        await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+        await checkManuscriptsAgainstEbl();
+      } catch (err) {
+        el.textContent = 'Could not take the numbering: ' + (err && err.message || err);
+      } finally {
+        btn.disabled = false;
+      }
     }
 
     function parseIntOrString(v) {

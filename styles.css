@@ -16,6 +16,30 @@
   --text-muted: #666;
   --on-accent: #ffffff;
 
+  /* The score has ONE text column: witness readings, composite readings and
+     variant readings all begin at the same x. This is the width of the
+     siglum/label gutter to its left — change it here and every row follows. */
+  --score-gutter: 160px;
+  /* How far a variant's header steps right of the main reading. Its label is
+     narrowed by the same amount, so the text column does not move. At 0 a
+     variant sits exactly where the main reading and the witnesses do. */
+  --score-variant-indent: 0rem;
+
+  /* The left bar every score row carries. Only the translation line and the
+     composite reading paint it; on the rest it is transparent, there to hold
+     the column. One width, so nothing can drift by a pixel. */
+  --score-rule-width: 3px;
+  /* The rule drawn between one reading of a line and the next. Heavier than
+     the dashed rule between two manuscripts, lighter than the rule that opens
+     an omen: three divisions, three weights. */
+  --score-variant-rule-width: 2px;
+
+  /* Width of the "§ N" label. A witness row puts its text at
+     0.25rem + rule + 1rem + gutter; a header row's own left edge is
+     rule + 0.5rem, and the flex gap (0.5rem) and the reading's left padding
+     (0.3rem) sit between label and text. The rule cancels out. */
+  --score-label-width: calc(var(--score-gutter) + 0.25rem + 1rem - 0.5rem - 0.5rem - 0.3rem);
+
   /* Manuscript-type colours (categorical; light steps).
      Library/Commentary/Excerpt are the three types in normal use and are
      validated on the all-pairs list: worst CVD ΔE 9.2, normal-vision ΔE 24.0.
@@ -1253,6 +1277,15 @@ body.dark-mode .parallels-kwic-hit {
 
 .score-line {
   margin-bottom: 1.25rem;
+  /* One omen ends here. Solid and full-width, against the short dashed rule
+     that only marks a change of witness inside an omen. */
+  padding-bottom: 1.25rem;
+  border-bottom: 3px solid var(--border-color);
+}
+
+.score-line:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 /* Arrived at from a search result: says where you landed, then gets out of
@@ -1283,7 +1316,7 @@ body.dark-mode .score-line-found {
   font-style: italic;
   font-size: 0.9rem;
   background: #f8f9fa;
-  border-left: 3px solid #9db4d0;
+  border-left: var(--score-rule-width) solid #9db4d0;
   border-radius: 0 3px 3px 0;
 }
 
@@ -1310,10 +1343,14 @@ body.dark-mode .score-line-found {
   color: #bbb;
 }
 
+/* Boxed like the translation line above it: flush left, square, same padding
+   and the same left bar. The label beside it does the work of putting the
+   reading on the witnesses' text column. */
 .score-line-header {
-  padding: 0.25rem 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-left: var(--score-rule-width) solid var(--accent);
   background: var(--accent-light);
-  border-radius: 3px;
+  border-radius: 0;
   margin-bottom: 0.25rem;
   display: flex;
   align-items: center;
@@ -1321,6 +1358,8 @@ body.dark-mode .score-line-found {
 }
 
 .line-label {
+  width: var(--score-label-width);
+  padding-right: 1rem;
   font-weight: 700;
   color: var(--accent);
   flex-shrink: 0;
@@ -1343,6 +1382,33 @@ body.dark-mode .score-line-found {
 .reconstructed-text:focus {
   background: white;
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Send this omen to eBL. Sits with the "+" and, like it, stays out of the way
+   until the line is hovered or something in it has focus. */
+.omen-export {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.12s;
+}
+
+.score-line:hover .omen-export,
+.score-line:focus-within .omen-export,
+.omen-export:focus-visible {
+  opacity: 0.7;
+}
+
+.omen-export:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.5);
 }
 
 /* "+" on the reading: adds a note or a parallel. Stays out of the way until
@@ -1428,13 +1494,36 @@ body.dark-mode .score-line-found {
 /* A variant reading: same shape as the main one, tinted so the eye can tell
    at a glance that the line has more than one reading. */
 .score-line-header.is-variant {
-  background: #f3eefb;
-  border-left: 3px solid #9b7fd4;
-  margin-top: 0.35rem;
+  /* A filled lilac panel gave a variant as much weight on the page as the omen
+     it belongs to, and a left rule made it look like a line of its own. What
+     separates one reading from the next is a rule ACROSS the score, drawn above
+     the variant — the same gesture as the rule between two manuscripts, one
+     step stronger.
+
+     The left edge stays the omen's own width, uncoloured, so the text column
+     does not move. */
+  position: relative;
+  background: transparent;
+  border-left-color: transparent;
+  margin-top: 0.75rem;
+  margin-left: var(--score-variant-indent);
+}
+.score-line-header.is-variant::before {
+  content: '';
+  position: absolute;
+  top: -0.4rem;
+  left: calc(1.25rem + var(--score-rule-width) + var(--score-gutter)
+             - var(--score-variant-indent));
+  right: 0;
+  border-top: var(--score-variant-rule-width) solid var(--text-muted);
+  opacity: 0.55;
 }
 
+/* Whatever the indent steps this header right, the label gives back, so the
+   reading stays on the column no matter how the variant is offset. */
 .score-line-header.is-variant .line-label {
-  color: #6b4fa8;
+  width: calc(var(--score-label-width) - var(--score-variant-indent));
+  color: var(--text-muted);
 }
 
 .recon-add-item.danger {
@@ -1509,7 +1598,6 @@ body.dark-mode .score-line-found {
 
 body.dark-mode .score-line-header.is-variant {
   background: #332b45;
-  border-left-color: #9b7fd4;
 }
 
 body.dark-mode .score-line-header.is-variant .line-label {
@@ -1623,9 +1711,17 @@ body.dark-mode .reconstructed-text:empty::before {
   color: #8b949e;
 }
 
+/* Between two manuscripts within one score line. Indented past the siglum
+   column so it separates the readings without cutting the sigla. */
+.witness-rule {
+  border-top: 2px dashed var(--border-color);
+  margin: 0.3rem 0 0.3rem calc(1.25rem + var(--score-rule-width) + var(--score-gutter));
+  height: 0;
+}
+
 .score-witness {
   padding: 0.2rem 0 0.2rem 1rem;
-  border-left: 2px solid var(--border-color);
+  border-left: var(--score-rule-width) solid transparent;
   margin-left: 0.25rem;
   display: flex;
   flex-wrap: wrap;
@@ -1633,7 +1729,7 @@ body.dark-mode .reconstructed-text:empty::before {
 
 .witness-siglum {
   color: var(--text-muted);
-  width: 160px;
+  width: var(--score-gutter);
   flex-shrink: 0;
   padding-right: 1rem;
 }
@@ -1650,15 +1746,135 @@ body.dark-mode .reconstructed-text:empty::before {
 
 /* Continuation lines */
 .score-witness.continuation {
-  border-left-style: dashed;
   opacity: 0.85;
+}
+
+/* A "#note:" typed under a witness in its manuscript file */
+.score-witness.witness-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.score-witness.witness-note .witness-text {
+  color: var(--text-muted);
+}
+
+.witness-note-prefix {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.75rem;
+  color: var(--accent);
+  opacity: 0.75;
+  user-select: none;
+}
+
+/* ---- Position mode ------------------------------------------------------
+   The score as the alignment it already is. Colour carries the position, so a
+   witness word that answers to position 7 is the same colour as position 7
+   above it and a wrong number is visible without reading it. */
+.reconstructed-text.is-positions,
+.witness-text.is-positions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: flex-end;
+  text-indent: 0;
+  padding-left: 0;
+}
+
+.pos-word {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.05rem;
+  padding: 0.1rem 0.25rem;
+  border-radius: 3px;
+  line-height: 1.25;
+}
+
+/* A break: "[...]", a bare x. On the tablet as a statement that something is
+   lost, so it is shown, but it attests nothing and takes no position. */
+.pos-word.is-break {
+  color: var(--text-muted);
+  background: none;
+  opacity: 0.45;
+  align-self: center;
+}
+
+/* A gloss under !cm. On the tablet, but not the text being edited, so it is
+   shown and never numbered. */
+.pos-word.is-commentary {
+  color: var(--type-commentary-text);
+  background: none;
+  opacity: 0.75;
+  font-style: italic;
+}
+
+/* A commentary protocol or column separator: shown, because it is on the
+   tablet, but never numbered — it is not a word. */
+.pos-word.is-meta {
+  color: var(--text-muted);
+  background: none;
+  opacity: 0.55;
+  font-size: 0.8em;
+  align-self: center;
+}
+
+.pos-word.is-divider {
+  color: var(--text-muted);
+  background: none;
+  opacity: 0.6;
+}
+
+.pos-num {
+  font-size: 0.65rem;
+  font-family: "Consolas", "Monaco", monospace;
+  opacity: 0.85;
+  user-select: none;
+}
+
+/* The box you type the position into. Sized for two digits and no more, so a
+   row of them reads as a ruler rather than a form. */
+.pos-input {
+  width: 2.1rem;
+  padding: 0 0.15rem;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  background: var(--bg-white);
+  color: var(--text-dark);
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.65rem;
+  text-align: center;
+  line-height: 1.3;
+}
+
+.pos-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* An unplaced word: nothing typed, so it answers to nothing yet. */
+.pos-input:placeholder-shown,
+.pos-input[value=""] {
+  border-style: dashed;
+}
+
+.pos-tally {
+  flex-basis: 100%;
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.tab-header-btn.is-on {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 /* Parallels section (expandable) */
 .parallels-section {
   margin-left: 1rem;
   margin-top: 0.25rem;
-  border-left: 2px solid #c9d4e0;
 }
 
 .parallels-header {
@@ -2988,74 +3204,109 @@ body.dark-mode .viewer-footer {
   background: var(--bg-dark);
 }
 
-/* ===========================================
- * Reconstructed View (export artifact editor)
- * =========================================== */
-
-.recon-view {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: var(--bg-white);
-  z-index: 800;
-  display: flex;
-  flex-direction: column;
+/* Coverage: how much of the reading a witness preserves. Sits beside the
+   agreement bar because either one alone misleads — four surviving words that
+   all match agree 100% with a twelve-word reading. */
+.cover {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
 }
 
-.recon-view.hidden {
-  display: none;
+.cover-num {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.75rem;
+  color: var(--text-dark);
 }
 
-.recon-view-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--border-color);
-  background: var(--bg-light);
-}
-
-.recon-view-header h2 {
-  font-size: 1rem;
-  color: var(--accent);
-  margin: 0;
-}
-
-.recon-view-subtitle {
-  font-size: 0.85rem;
+.cover-pct {
+  font-size: 0.72rem;
   color: var(--text-muted);
 }
 
-.recon-view-header .header-spacer {
-  flex: 1;
+.cover-pct.is-thin { color: #a15c00; font-weight: 600; }
+
+.report-thin {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
-.recon-view-header button {
-  padding: 0.4rem 0.8rem;
-  font-size: 0.85rem;
-  background: var(--bg-white);
-  color: var(--text-dark);
+body.dark-mode .cover-pct.is-thin { color: #e0a352; }
+
+/* Two ways of reading the same measurements. */
+.stats-views {
+  display: inline-flex;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.stats-view {
+  border: 0;
+  border-radius: 0;
+  padding: 0.2rem 0.6rem;
+  background: var(--bg-white);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.82rem;
   cursor: pointer;
 }
 
-.recon-view-header button:hover {
-  background: var(--accent-light);
+.stats-view + .stats-view { border-left: 1px solid var(--border-color); }
+.stats-view:hover { background: var(--accent-light); }
+.stats-view.is-on { background: var(--accent); color: var(--on-accent); }
+
+/* A section unfolded: the per-witness table, in the row's own space. */
+.stats-detail.hidden { display: none; }
+
+.stats-detail > td {
+  padding: 0.6rem 0.8rem 0.9rem;
+  background: var(--bg-light);
 }
 
-.recon-view-header button.btn-primary {
-  background: var(--accent);
-  color: white;
-  border-color: var(--accent);
+.stats-detail .report-table { background: var(--bg-white); }
+
+.stats-table tr.is-open > td { font-weight: 600; }
+
+.stats-table .report-siglum { text-decoration: underline dotted; }
+.stats-table .report-siglum:hover { color: var(--accent); }
+
+/* The offer to split divergent witnesses off into their own variants. */
+.report-offer {
+  margin: 0.9rem 0 0.3rem;
+  padding: 0.7rem 0.8rem;
+  background: rgba(239, 140, 0, 0.08);
+  border-left: 3px solid #ef8c00;
+  border-radius: 0 3px 3px 0;
 }
 
-.recon-view-header button.btn-primary:hover {
-  background: #3d5d8a;
+.report-offer p {
+  margin: 0 0 0.55rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-dark);
 }
 
+.report-offer button {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #ef8c00;
+  border-radius: 3px;
+  background: var(--bg-white);
+  color: #a15c00;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.report-offer button:hover { background: #ef8c00; color: #fff; }
+
+body.dark-mode .report-offer { background: rgba(239, 140, 0, 0.13); }
+body.dark-mode .report-offer button { color: #e0a352; }
+
+/* The eBL token pill in the header. These styles lived inside the
+   Reconstructed View block and went with it when that was removed; the
+   element survived, invisible, which is a good argument for keeping a
+   component's rules next to nothing else. */
 .ebl-status-pill {
   display: inline-flex;
   align-items: center;
@@ -3080,50 +3331,366 @@ body.dark-mode .viewer-footer {
 .ebl-status-pill.bad { background: #ffebee; color: #c62828; }
 .ebl-status-pill.bad .dot { background: #e53935; }
 
-.recon-ace {
-  flex: 1;
-  width: 100%;
+/* ---- Statistics tab ------------------------------------------------------
+   The edition read as a whole: which sections the witnesses agree about, and
+   which they do not. The second kind is where the work is. */
+.stats-empty {
+  padding: 2rem 1rem;
+  color: var(--text-muted);
+  text-align: center;
 }
 
-.recon-status {
-  border-top: 1px solid var(--border-color);
-  padding: 0.5rem 1rem;
-  font-size: 0.85rem;
-  max-height: 30vh;
-  overflow-y: auto;
-  background: var(--bg-light);
-}
-
-.recon-status.hidden {
-  display: none;
-}
-
-.recon-status .recon-status-title {
-  font-weight: 600;
-  margin-bottom: 0.3rem;
-}
-
-.recon-status ul {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.recon-status li {
-  padding: 0.25rem 0;
+.stats-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0.7rem 0.5rem 0.5rem;
+  background: var(--bg-white);
   border-bottom: 1px solid var(--border-color);
+}
+
+.stats-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.stats-controls select,
+.stats-controls button {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-white);
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 0.82rem;
   cursor: pointer;
 }
 
-.recon-status li:hover {
-  background: var(--accent-light);
+.stats-controls button:hover { background: var(--accent-light); }
+
+.stats-stamp {
+  margin-left: auto;
+  font-size: 0.75rem;
+  opacity: 0.8;
 }
 
-.recon-status .err-line {
-  font-weight: 600;
-  color: #c62828;
-  margin-right: 0.4rem;
+.stats-table { margin-top: 0.3rem; }
+
+.stats-table tbody tr { cursor: pointer; }
+.stats-table tbody tr:hover td { background: var(--accent-light); }
+.stats-table tr.is-mid td { background: rgba(239, 140, 0, 0.06); }
+
+.stats-text {
+  max-width: 26rem;
+  color: var(--text-dark);
+  line-height: 1.5;
 }
+
+.stats-basis {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+body.dark-mode .stats-head { background: var(--bg-white); }
+body.dark-mode .stats-table tr.is-mid td { background: rgba(239, 140, 0, 0.12); }
+
+/* Footer for the report overlay: save, close, or answer a question. */
+.compose-report-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.7rem 1.1rem;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-light);
+  border-radius: 0 0 8px 8px;
+}
+
+.compose-report-foot.hidden { display: none; }
+
+.compose-report-foot button {
+  padding: 0.35rem 0.9rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-white);
+  color: var(--text-dark);
+  font: inherit;
+  cursor: pointer;
+}
+
+.compose-report-foot button:hover { background: var(--accent-light); }
+
+.compose-report-foot .btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.compose-report-foot .btn-primary.is-danger {
+  background: #a11d13;
+  border-color: #a11d13;
+  color: #fff;
+}
+
+/* The reading with a number under every word, so "omits 5, 6, 7" can be read
+   off the page rather than counted out on it. */
+.pos-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0 0 0.9rem;
+  padding: 0.5rem;
+  background: var(--bg-light);
+  border-radius: 3px;
+}
+
+.pos-strip-word {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  line-height: 1.3;
+  font-size: 0.85rem;
+}
+
+.pos-strip-word.is-divider {
+  color: var(--text-muted);
+  background: none;
+  opacity: 0.6;
+}
+
+.pos-strip-num {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.62rem;
+  opacity: 0.85;
+  user-select: none;
+}
+
+/* Witnesses belonging to another reading of the same section: shown, because
+   they voted, but set back so the reading's own are read first. */
+.report-table tr.is-other td { opacity: 0.72; }
+
+.report-owner {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.report-diverge td.report-text { font-size: 0.85rem; }
+.report-note.is-good { color: #2e7d32; }
+body.dark-mode .report-note.is-good { color: #7fc98a; }
+
+/* ---- The composition report ---------------------------------------------
+   What a composition found. The interesting part is comparative — who agrees,
+   who omits, who has gone their own way — so it is a table with a bar, not a
+   paragraph. */
+.compose-report {
+  max-width: 46rem;
+  width: 92%;
+  max-height: 82vh;
+  background: var(--bg-white);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+}
+
+.compose-report-body {
+  padding: 0.9rem 1.1rem 1.2rem;
+  overflow: auto;
+}
+
+/* The reading itself, given room to be read. */
+.report-reading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  background: var(--accent-light);
+  border-left: 3px solid var(--accent);
+  margin-bottom: 0.7rem;
+}
+
+.report-label {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.report-text {
+  color: var(--text-dark);
+  line-height: 1.6;
+}
+
+.report-text.is-old {
+  color: var(--text-muted);
+  padding: 0.4rem 0.7rem;
+}
+
+.report-before > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  padding: 0.2rem 0;
+  margin-bottom: 0.5rem;
+}
+
+.report-note {
+  margin: 0 0 0.7rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.report-note.is-warn { color: #a15c00; }
+.report-note.is-bad  { color: #a11d13; }
+
+.report-heading {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+.report-empty {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* Per-witness table */
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.report-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.report-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: middle;
+}
+
+.report-table tr.is-divergent td {
+  background: rgba(161, 92, 0, 0.07);
+}
+
+.report-siglum {
+  font-weight: 600;
+  color: var(--text-dark);
+  white-space: nowrap;
+}
+
+.report-lineno {
+  margin-left: 0.4rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.report-nums {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.78rem;
+}
+
+.report-dash { color: var(--text-muted); opacity: 0.5; }
+
+.report-verdict {
+  color: #a15c00;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+/* Agreement, as a bar you can scan down a column */
+.agree {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.agree-track {
+  width: 4.5rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--border-color);
+  overflow: hidden;
+}
+
+.agree-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.agree-fill.is-high { background: #2e7d32; }
+.agree-fill.is-mid  { background: #ef8c00; }
+.agree-fill.is-low  { background: #c62828; }
+
+.agree-pct {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  min-width: 2.4rem;
+}
+
+.agree-none {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+
+/* Project-wide counts */
+.report-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+
+.report-count {
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  background: var(--bg-light);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.report-count b { color: var(--text-dark); }
+.report-count.is-done { background: #e8f5e9; color: #2e7d32; }
+.report-count.is-done b { color: #2e7d32; }
+.report-count.is-bad { background: #ffebee; color: #c62828; }
+.report-count.is-bad b { color: #c62828; }
+
+.report-flagged {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: var(--text-dark);
+  line-height: 1.7;
+}
+
+.report-flagged li { font-family: "Consolas", "Monaco", monospace; }
+
+body.dark-mode .report-table tr.is-divergent td { background: rgba(239, 140, 0, 0.12); }
+body.dark-mode .report-note.is-warn { color: #e0a352; }
+body.dark-mode .report-note.is-bad  { color: #e88b83; }
+body.dark-mode .report-verdict      { color: #e0a352; }
+body.dark-mode .report-count.is-done { background: #23372a; color: #7fc98a; }
+body.dark-mode .report-count.is-done b { color: #7fc98a; }
+body.dark-mode .report-count.is-bad { background: #3a2426; color: #e88b83; }
+body.dark-mode .report-count.is-bad b { color: #e88b83; }
 
 /* ===========================================
  * Export modal
@@ -3229,6 +3796,120 @@ body.dark-mode .viewer-footer {
   cursor: pointer;
 }
 
+/* The section box under "Update one line". Indented to the mode labels so it
+   reads as part of that choice rather than a fourth option. */
+.export-line-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.15rem 0 0.5rem 1.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.export-line-picker input {
+  width: 5.5rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-white);
+  color: var(--text-dark);
+  font: inherit;
+}
+
+/* The artifact, read-only. Editing happens in the score; this is here so you
+   can see exactly what leaves the machine before it leaves. */
+.export-preview-wrap {
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.export-preview-wrap > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  user-select: none;
+  padding: 0.2rem 0;
+}
+
+.export-preview-wrap > summary:hover {
+  color: var(--accent);
+}
+
+.export-preview-count {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.export-preview {
+  max-height: 18rem;
+  overflow: auto;
+  margin: 0.35rem 0 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-light);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-dark);
+}
+
+.export-preview .preview-error {
+  display: block;
+  background: rgba(198, 40, 40, 0.12);
+}
+
+/* The Export split button in the header */
+.export-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 13rem;
+  padding: 0.25rem;
+  background: var(--bg-white);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+.export-menu.hidden {
+  display: none;
+}
+
+.export-menu button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  padding: 0.4rem 0.6rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-dark);
+  font: inherit;
+  text-align: left;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.export-menu button:hover {
+  background: var(--accent-light);
+}
+
+.export-menu em {
+  font-style: normal;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 .export-effect {
   border-radius: 4px;
   padding: 0.55rem 0.75rem;
@@ -3326,15 +4007,8 @@ body.dark-mode .viewer-footer {
    unaffected, and the type is already spelled out in the siglum ("…Com1",
    "…Ex1") and in the legend, so hue is never the only cue. */
 
-.score-witness.type-library    { border-left-color: var(--type-library); }
-.score-witness.type-commentary { border-left-color: var(--type-commentary); }
-.score-witness.type-excerpt    { border-left-color: var(--type-excerpt); }
-.score-witness.type-school     { border-left-color: var(--type-school); }
-.score-witness.type-varia      { border-left-color: var(--type-varia); }
-.score-witness.type-amulet     { border-left-color: var(--type-amulet); }
-.score-witness.type-quotation  { border-left-color: var(--type-quotation); }
-.score-witness.type-parallel   { border-left-color: var(--type-parallel); }
-.score-witness.type-none       { border-left-color: var(--type-none); }
+/* Score rows carry no coloured bar any more — the type shows in the siglum
+   and text colour below. The sidebar keeps its margin rule. */
 
 /* Sidebar: a left rule, matching the score. A ::before dot is not usable here
    because .manuscript-item and its link are flex columns, which would stack the
@@ -3387,11 +4061,7 @@ body.dark-mode .viewer-footer {
 .type-swatch.type-quotation  { background: var(--type-quotation); }
 .type-swatch.type-parallel   { background: var(--type-parallel); }
 
-/* The witness rule is the primary mark; give it enough width to read. */
-.score-witness { border-left-width: 3px; }
-
 @media (forced-colors: active) {
-  .score-witness[class*="type-"] { border-left-color: CanvasText; }
   .manuscript-item[class*="type-"] { border-left-color: CanvasText; }
   .type-swatch { forced-color-adjust: none; }
 }
@@ -3910,7 +4580,7 @@ body.dark-mode .viewer-footer {
   align-items: center;
   padding: 0.15rem 0 0.15rem 1rem;
   margin-left: 0.25rem;
-  border-left: 3px solid var(--border-color);
+  border-left: var(--score-rule-width) solid transparent;
 }
 
 .score-extra .witness-siglum { color: var(--text-muted); }
@@ -3926,21 +4596,40 @@ body.dark-mode .viewer-footer {
   color: var(--text-muted);
 }
 
-.score-extra.type-library    { border-left-color: var(--type-library); }
-.score-extra.type-commentary { border-left-color: var(--type-commentary); }
-.score-extra.type-excerpt    { border-left-color: var(--type-excerpt); }
-.score-extra.type-school     { border-left-color: var(--type-school); }
-.score-extra.type-varia      { border-left-color: var(--type-varia); }
-.score-extra.type-amulet     { border-left-color: var(--type-amulet); }
-.score-extra.type-quotation  { border-left-color: var(--type-quotation); }
-.score-extra.type-parallel   { border-left-color: var(--type-parallel); }
-.score-extra.type-none       { border-left-color: var(--type-none); }
-
 /* Delete control on a sidebar row. Kept faint until the row is hovered so it
    does not compete with the siglum, and never on the row's own click path. */
 .manuscript-item {
   position: relative;
+  padding-right: 1.6rem;
 }
+
+/* Whether this source is carrying any of the score yet. Green once its lines
+   are assigned to sections, amber while it is only a file in the folder — the
+   ones to clear out before registering the manuscripts with eBL. */
+.ms-use-dot {
+  position: absolute;
+  right: 0.6rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #d9a520;
+  transition: opacity 0.12s;
+}
+.ms-use-dot.is-used { background: #3f9142; }
+/* The delete button lives in this corner and only appears on hover, so the dot
+   steps aside for it rather than the two sharing the space. */
+.manuscript-item:hover .ms-use-dot { opacity: 0; }
+
+.ms-meta {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+  margin-top: 0.1rem;
+}
+.ms-meta.is-idle { color: #8a6d1f; }
 
 .delete-manuscript-btn {
   position: absolute;
@@ -3990,3 +4679,642 @@ body.dark-mode .parallels-section-title,
 body.dark-mode .parallels-lines-c {
   color: #d9a441;
 }
+
+/* ---- Scope picker --------------------------------------------------------
+   Which witnesses a composition is a composition of. */
+.scope-list {
+  max-height: 20rem;
+  overflow: auto;
+  margin: 0.3rem 0 0.2rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+}
+
+.scope-group {
+  padding: 0.35rem 0.7rem 0.2rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  background: var(--bg-light);
+  border-top: 1px solid var(--border-color);
+}
+
+.scope-group:first-child { border-top: 0; }
+
+.scope-option {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.32rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.scope-option:hover { background: var(--accent-light); }
+
+.scope-name { color: var(--text-dark); }
+
+.scope-count {
+  margin-left: auto;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.scope-note {
+  flex-basis: 100%;
+  padding-left: 1.4rem;
+  font-size: 0.75rem;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+/* The caret that unfolds a statistics row. Its own cell, because the rest of
+   the row navigates and one hand cursor should not mean two things. */
+.stats-fold {
+  width: 1.4rem;
+  padding-right: 0 !important;
+  color: var(--text-muted);
+  text-align: center;
+  user-select: none;
+}
+
+.stats-fold:hover { color: var(--accent); }
+
+/* What just happened to the score, at the top of every compose report. Each
+   outcome wore the same footer, so "not composed" and "composed" were telling
+   each other apart by one word in the title — and the difference between them
+   is whether the omen changed at all. */
+.report-outcome {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.8rem;
+  border-radius: 4px;
+  border-left: 4px solid;
+  font-size: 0.9rem;
+}
+
+.report-outcome span {
+  font-size: 0.82rem;
+  opacity: 0.85;
+}
+
+.report-outcome.is-changed {
+  background: #e8f5e9;
+  border-left-color: #2e7d32;
+  color: #1b5e20;
+}
+
+.report-outcome.is-kept {
+  background: #fff3e0;
+  border-left-color: #ef8c00;
+  color: #8a4b00;
+}
+
+body.dark-mode .report-outcome.is-changed { background: #23372a; color: #9fd6a8; }
+body.dark-mode .report-outcome.is-kept    { background: #3a3122; color: #e0b877; }
+
+/* A commentary among the witnesses: shown, measured, never counted. It quotes
+   the text to discuss it, so its wording answers to the discussion. */
+.report-table tr.is-commentary-row td {
+  background: rgba(235, 104, 52, 0.06);
+}
+
+.report-table tr.is-commentary-row .report-siglum {
+  color: var(--type-commentary-text);
+}
+
+body.dark-mode .report-table tr.is-commentary-row td {
+  background: rgba(217, 89, 38, 0.13);
+}
+
+/* A siglum in a table is a reference to a tablet — make it one you can follow. */
+.source-link {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.source-link:hover {
+  color: var(--accent);
+  text-decoration-style: solid;
+}
+
+/* An error exactly as it came back — selectable, scrollable, not shortened. */
+.report-raw {
+  max-height: 20rem;
+  overflow: auto;
+  margin: 0.3rem 0 0.8rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-light);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dark);
+  user-select: text;
+}
+
+/* The whole report is meant to be readable and copyable. */
+.compose-report-body { user-select: text; }
+
+/* ---- Lemmas -------------------------------------------------------------
+   Three states, three colours, because a prefilled chapter is only useful if
+   you can see at a glance what is still only a guess:
+
+     confirmed  someone chose it            green, solid
+     suggested  the dictionary filled it    amber, dashed
+     none       nothing fits                grey, faint
+
+   Laid out like Positions so switching between the two moves nothing. */
+:root {
+  --lem-hand: #2f7d4f;
+  --lem-hand-bg: rgba(47, 125, 79, 0.10);
+  --lem-auto: #9a6b12;
+  --lem-auto-bg: rgba(154, 107, 18, 0.10);
+  --lem-none: #8a8178;
+  --lem-none-bg: rgba(138, 129, 120, 0.08);
+}
+body.dark-mode {
+  --lem-hand: #7fc79b;
+  --lem-hand-bg: rgba(127, 199, 155, 0.14);
+  --lem-auto: #e0b055;
+  --lem-auto-bg: rgba(224, 176, 85, 0.14);
+  --lem-none: #9a938a;
+  --lem-none-bg: rgba(154, 147, 138, 0.12);
+}
+
+.reconstructed-text.is-lemmas {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.35rem;
+  align-items: flex-end;
+}
+.lem-word {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.1rem 0.35rem 0.05rem;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  border-bottom-width: 2px;
+  cursor: pointer;
+}
+.lem-word.is-hand { border-bottom-color: var(--lem-hand); background: var(--lem-hand-bg); }
+.lem-word.is-auto { border-bottom-color: var(--lem-auto); border-bottom-style: dashed; background: var(--lem-auto-bg); }
+.lem-word.is-none { border-bottom-color: var(--lem-none); background: var(--lem-none-bg); }
+.lem-word.is-skip,
+.lem-word.is-divider { cursor: default; opacity: 0.5; border-bottom-color: transparent; }
+.lem-word:hover,
+.lem-word:focus-visible { border-color: var(--accent, #7a5c3e); outline: none; }
+.lem-word-text { line-height: 1.3; }
+.lem-id {
+  font-size: 0.68rem;
+  line-height: 1.25;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lem-word.is-hand .lem-id { color: var(--lem-hand); font-weight: 600; }
+.lem-word.is-auto .lem-id { color: var(--lem-auto); font-style: italic; }
+.lem-word.is-none .lem-id { color: var(--lem-none); opacity: 0.8; }
+
+/* The picker, opened in place on the word it is tagging. Ten rows and then a
+   scroll: enough to see the field without burying the line being read. */
+.lem-edit { display: inline-block; position: relative; }
+.lem-input {
+  width: 13rem;
+  padding: 0.05rem 0.25rem;
+  font: inherit;
+  font-size: 0.72rem;
+  border: 1px solid var(--accent, #7a5c3e);
+  border-radius: 3px;
+  background: var(--input-bg, #fff);
+  color: inherit;
+}
+.lem-list {
+  position: absolute;
+  z-index: 40;
+  top: 100%;
+  left: 0;
+  min-width: 22rem;
+  max-height: calc(10 * 1.45rem);
+  overflow-y: auto;
+  display: block;
+  background: var(--bg-white, #fff);
+  border: 1px solid var(--border-color, #cfc3b4);
+  border-radius: 3px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+  text-align: left;
+}
+.lem-option {
+  display: grid;
+  grid-template-columns: minmax(6rem, 10rem) 1fr auto auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.2rem 0.5rem;
+  height: 1.45rem;
+  box-sizing: border-box;
+  font-size: 0.74rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.lem-option.is-active { background: var(--accent-light); }
+.lem-option:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.1)); }
+.lem-option.is-empty { display: block; opacity: 0.6; cursor: default; }
+.lem-option-id { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.lem-option-guide { opacity: 0.85; overflow: hidden; text-overflow: ellipsis; }
+.lem-option-how { grid-column: 3; font-size: 0.68rem; opacity: 0.6; font-style: italic; }
+
+/* The mark that records a reading for the whole project rather than this word.
+   Kept faint until the row is under the cursor: it is the rarer of the two
+   things a row can do, and it should not compete with simply choosing. */
+.lem-pin {
+  grid-column: 4;
+  opacity: 0;
+  padding: 0 0.15rem;
+  font-weight: 700;
+  color: var(--accent, #7a5c3e);
+}
+.lem-option:hover .lem-pin, .lem-option.is-active .lem-pin { opacity: 0.55; }
+.lem-pin:hover { opacity: 1; }
+
+/* This project's own dictionary. */
+.gloss-table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 0.82rem; }
+.gloss-table th {
+  text-align: left;
+  font-weight: 600;
+  opacity: 0.7;
+  padding: 0.2rem 0.4rem;
+  border-bottom: 1px solid var(--border-color, #cfc3b4);
+}
+.gloss-table td { padding: 0.25rem 0.4rem; border-bottom: 1px solid rgba(0, 0, 0, 0.06); }
+.gloss-form { font-weight: 600; }
+.gloss-reach { text-align: right; opacity: 0.65; font-variant-numeric: tabular-nums; }
+.gloss-add { display: flex; gap: 0.4rem; margin: 0.6rem 0; }
+.gloss-add input { flex: 1; min-width: 0; padding: 0.3rem 0.4rem; font-size: 0.82rem; }
+.gloss-file { display: flex; gap: 0.4rem; margin-top: 0.6rem; }
+
+/* The lemmas of a reading, shown whether or not the mode is on. Each lemma
+   sits under the word it belongs to — a bare row of ids reads as a column of
+   unrelated words. */
+.lemma-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 0;
+  /* The same column the witness text and the witness rule start in, by the
+     same reckoning — past the rule and the siglum gutter — so the lemmas read
+     as another row of the score rather than as a caption floating under it. */
+  margin: 0.15rem 0 0.35rem calc(1.25rem + var(--score-rule-width) + var(--score-gutter));
+  line-height: 1.25;
+}
+.lem-pair {
+  display: inline-flex;
+  flex-direction: column;
+  /* Left, not centred. Centring each pair on its own width made every column
+     start at a different place, so nothing lined up down the page. */
+  align-items: flex-start;
+  /* A rule between one word and the next. Without it a two-line run of short
+     lemmas reads as a single sentence, and it stops being clear which lemma
+     belongs to which word. */
+  padding: 0 0.4rem;
+  border-right: 1px solid var(--border-color, #cfc3b4);
+}
+.lem-pair:first-child { padding-left: 0; }
+.lem-pair:last-child { border-right: none; }
+.lem-pair-word { font-size: 0.8rem; opacity: 0.55; }
+.lem-pair-id { font-size: 0.68rem; white-space: nowrap; }
+/* Colour alone here. The underline belongs to the editing view, where a word
+   is a target you click; in the reading view it is one more rule across a page
+   that already has plenty. */
+.lem-pair.is-hand .lem-pair-id { color: var(--lem-hand); font-weight: 600; }
+.lem-pair.is-auto .lem-pair-id { color: var(--lem-auto); font-style: italic; }
+.lem-pair.is-none .lem-pair-id { color: var(--lem-none); opacity: 0.7; }
+
+/* Positions and Compose all as one control, pushed to the right edge. They
+   belong together: one shows the numbering, the other fills it in. */
+.tab-header-split {
+  display: inline-flex;
+  margin-left: auto;
+  /* Off the edge of the window. Flush right put it exactly where the screen
+     stops, which reads as a rendering fault rather than as a margin. */
+  margin-right: 0.75rem;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border, #cfc3b4);
+}
+.tab-header-split .tab-header-btn {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+.tab-header-split .tab-header-btn + .tab-header-btn {
+  border-left: 1px solid var(--border, #cfc3b4);
+}
+
+/* What you can do to one line, gathered at its end: show it as positions, show
+   its lemmas, send it. Wraps rather than overflows, so a narrow pane stacks the
+   icons instead of squeezing the reading. */
+.line-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex-shrink: 0;
+}
+
+/* The four actions, all one size so a wrap breaks them evenly. They used to be
+   four different widths, which is why a narrow pane stacked them three deep
+   instead of two and two. */
+.line-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.15rem;
+  /* Room for four across; below, room for two. */
+  max-width: 7.4rem;
+}
+@media (max-width: 1200px) {
+  .line-actions { max-width: 3.7rem; }
+}
+/* One button, four times over. They were four different things before — two
+   bordered and two not, two accent-coloured and two inheriting, three font
+   sizes — which is why they never looked like a set. */
+.line-actions > .line-mode-btn,
+.line-actions > .omen-export,
+.line-actions > .recon-add-wrap > .recon-add {
+  box-sizing: border-box;
+  width: 1.7rem;
+  height: 1.4rem;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1;
+  font-weight: 400;
+  border: 1px solid var(--border-color, #cfc3b4);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.line-mode-btn {
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1;
+  border: 1px solid var(--border, #cfc3b4);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.4;
+  cursor: pointer;
+}
+.line-mode-btn:hover:not(:disabled) { opacity: 1; }
+.line-mode-btn:disabled { opacity: 0.25; cursor: progress; }
+.line-mode-btn.is-on {
+  border-color: var(--accent, #7a5c3e);
+  color: var(--accent, #7a5c3e);
+  font-weight: 700;
+}
+
+/* Every action on a line behaves the same way: out of sight until the line is
+   hovered or something in it has focus. They used to disagree — the toggles sat
+   there permanently while the send and the "+" hid — which read as two
+   unrelated sets of controls rather than one. */
+.line-tools .line-mode-btn,
+.line-tools .omen-export,
+.line-tools .recon-add {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.score-line:hover .line-tools .line-mode-btn,
+.score-line:hover .line-tools .omen-export,
+.score-line:hover .line-tools .recon-add,
+.line-tools:focus-within .line-mode-btn,
+.line-tools:focus-within .omen-export,
+.line-tools:focus-within .recon-add {
+  opacity: 0.7;
+}
+.score-line:hover .line-tools .line-mode-btn:hover,
+.line-tools .line-mode-btn:focus-visible,
+.score-line:hover .line-tools .omen-export:hover,
+.score-line:hover .line-tools .recon-add:hover { opacity: 1; }
+/* A toggle that is on stays on show: it is the reason the line looks the way
+   it does, and hiding it would leave that unexplained. */
+.line-tools .line-mode-btn.is-on { opacity: 1; }
+
+/* Tablets opened from Parallels, on their own row under the fixed tabs. Hidden
+   entirely when none is open, so the score keeps its full height. */
+.tablet-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--border, #cfc3b4);
+  background: var(--surface-2, rgba(0, 0, 0, 0.02));
+}
+.tablet-tabs.hidden { display: none; }
+.tablet-tabs .pane-tab-tablet {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.45rem;
+}
+
+/* The three requests behind one send, each one a decision. */
+.send-parts {
+  border: 1px solid var(--border, #cfc3b4);
+  border-radius: 4px;
+  padding: 0.4rem 0.7rem 0.6rem;
+  margin: 0.6rem 0 0.2rem;
+}
+.send-parts legend { font-size: 0.78rem; opacity: 0.7; padding: 0 0.3rem; }
+.send-parts label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+}
+.send-parts input:disabled + *,
+.send-parts label:has(input:disabled) { opacity: 0.55; }
+
+/* A placeholder in the reading — x, (x), [...] — keeps its number because eBL
+   counts it as a token, but it is not a word and nothing is measured against
+   it. Shown plainly so it does not read as one of the coloured positions. */
+.pos-word.is-placeholder {
+  color: var(--text-muted, #8a8178);
+  background: transparent;
+  opacity: 0.7;
+}
+
+/* Whether this section is on eBL, and whether it still reads as it did when it
+   went. Not a button — it reports, it does not act. */
+.line-sent {
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  width: 1.1rem;
+  padding: 0.12rem 0;
+  border: 0;
+  background: transparent;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+.line-sent:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.12)); border-radius: 3px; }
+.line-sent.is-never { color: var(--text-muted, #8a8178); }
+.line-sent.is-sent { color: var(--lem-hand, #2f7d4f); opacity: 1; }
+/* Sent, then edited. The tick stays — it did go — but it is struck through,
+   because what is on eBL is no longer what is here. */
+.line-sent.is-changed {
+  color: var(--lem-auto, #9a6b12);
+  opacity: 1;
+  text-decoration: line-through;
+}
+
+/* ---- A line wears whether it is on eBL ----------------------------------
+   Blue is the ordinary state: nothing has been sent from here. Green means
+   sent and unchanged since; amber means sent, then edited. Reading a chapter
+   down the page, the colour answers "what still needs sending?" without
+   anything having to be hovered or counted. */
+:root {
+  --sent-accent: #2f7d4f;
+  --sent-light: #e6f4ec;
+  --changed-accent: #9a6b12;
+  --changed-light: #fbf1dc;
+}
+body.dark-mode {
+  --sent-accent: #7fc79b;
+  --sent-light: #24352b;
+  --changed-accent: #e0b055;
+  --changed-light: #3a3222;
+}
+.score-line-header.sent-sent {
+  background: var(--sent-light);
+  border-left-color: var(--sent-accent);
+}
+.score-line-header.sent-sent .line-label { color: var(--sent-accent); }
+.score-line-header.sent-changed {
+  background: var(--changed-light);
+  border-left-color: var(--changed-accent);
+}
+.score-line-header.sent-changed .line-label { color: var(--changed-accent); }
+
+/* The tick is no longer the only thing saying this, so it hides with the rest
+   of the controls rather than sitting there permanently. */
+.line-sent {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.score-line:hover .line-sent,
+.line-tools:focus-within .line-sent { opacity: 0.75; }
+.score-line:hover .line-sent:hover,
+.line-sent:focus-visible { opacity: 1; }
+
+/* Each variant a split would write, shown before it is written and each one a
+   choice of its own — three witnesses reading three different things is not a
+   reason to want three variants. */
+.split-preview {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.35rem 0.5rem;
+  margin: 0.3rem 0;
+  border-left: 2px solid var(--text-muted);
+  background: var(--bg-light);
+  border-radius: 0 3px 3px 0;
+  cursor: pointer;
+}
+.split-preview:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.08)); }
+.split-preview:has(input:not(:checked)) { opacity: 0.5; }
+.split-pick { flex: 0 0 auto; margin: 0; cursor: pointer; }
+.split-preview-label { font-weight: 700; color: var(--text-muted); flex: 0 0 auto; }
+.split-preview-body { display: flex; flex-direction: column; gap: 0.15rem; }
+.split-preview-text { font-family: var(--mono, monospace); }
+.split-preview-from { font-size: 0.78rem; opacity: 0.7; }
+#split-variants:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* A choice that only matters when the one above it is taken. */
+.send-parts .send-sub {
+  margin-left: 1.4rem;
+  font-size: 0.78rem;
+  opacity: 0.85;
+}
+
+/* The ‡ eBL prints on a word some witness reads otherwise or has not got.
+   Shown here so the published line can be read before it is published. */
+/* The line as eBL will print it, under the reading it belongs to. Quieter than
+   the reading — it is not another reading, it is the same one seen from the
+   other side. */
+.ebl-line {
+  margin: 0.1rem 0 0.2rem calc(1.25rem + var(--score-rule-width) + var(--score-gutter));
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+.ebl-marked { cursor: help; }
+.ebl-dagger {
+  color: var(--accent);
+  font-weight: 700;
+  padding-left: 0.05rem;
+}
+.pos-dagger {
+  font-size: 0.72rem;
+  opacity: 0.8;
+  cursor: help;
+  margin-right: 0.05rem;
+}
+
+/* Move a witness to another reading of its section, by dragging it there.
+   Sits with the siglum, because it is a fact about that witness, and stays out
+   of sight until the line is hovered — like everything else that acts on a
+   line. */
+.witness-move {
+  display: inline-block;
+  font-size: 0.78rem;
+  line-height: 1;
+  margin-left: 0.35rem;
+  padding: 0 0.15rem;
+  color: var(--accent);
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.12s;
+  user-select: none;
+}
+.score-witness:hover .witness-move { opacity: 0.6; }
+.score-witness:hover .witness-move:hover { opacity: 1; }
+.witness-move:active { cursor: grabbing; }
+
+/* While one is in flight: the row it came from recedes, and the readings it
+   could land on are shown as targets — otherwise a drag has nowhere visible to
+   go and reads as broken. */
+.score-witness.is-being-moved { opacity: 0.45; }
+body.is-moving-witness .witness-move { opacity: 0.6; }
+body.is-moving-witness .score-line-header { transition: outline-color 0.1s; }
+.score-line-header.is-drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+/* The second end of an export range. Hidden unless the range mode is chosen,
+   so the single-line picker keeps the shape it always had. */
+.export-range-to {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: 0.6rem;
+}
+.export-range-to.hidden { display: none; }

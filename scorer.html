@@ -17,6 +17,8 @@
   <script src="ebl-corpus.js"></script>
   <script src="ebl-ngram.js"></script>
   <script src="ebl-atf-signs.js"></script>
+  <script src="compositor.js"></script>
+  <script src="lemmatizer.js"></script>
   <!-- Ace Editor -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ace.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.6/ext-searchbox.js"></script>
@@ -45,6 +47,9 @@
               font-size="24" font-weight="600" fill="#4a6fa5">§</text>
       </svg>
       <h1 id="project-title">Manuscript Scorer</h1>
+      <span id="ebl-token-pill" class="ebl-status-pill bad" title="eBL token status — paste one in Settings">
+        <span class="dot"></span><span id="ebl-token-pill-text">Not connected</span>
+      </span>
     </div>
     <div class="header-actions">
       <div id="status" class="gdrive-status">
@@ -64,8 +69,13 @@
       <button id="settings-btn" class="icon-btn" title="Project settings, eBL metadata and export"
         aria-label="Project settings">&#9881;</button>
       <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes</button>
-      <button id="recon-view-btn" title="Open Reconstructed View (export artifact)">Recon view</button>
-      <button id="export-btn">Export</button>
+      <span class="export-menu-wrap">
+        <button id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
+        <span id="export-menu" class="export-menu hidden">
+          <button type="button" id="export-txt-item">Export .txt<em>the synoptic score</em></button>
+          <button type="button" id="export-ebl-item">Export to eBL<em>the whole chapter</em></button>
+        </span>
+      </span>
     </div>
   </header>
 
@@ -105,14 +115,25 @@
             <button class="pane-tab" data-tab="colophons">Colophons</button>
             <button class="pane-tab" data-tab="parallels">Parallels</button>
             <button class="pane-tab" data-tab="paradigms">Paradigms</button>
+            <button class="pane-tab" data-tab="stats">Statistics</button>
             <button class="pane-tab" data-tab="images">Images</button>
           </div>
+          <span class="tab-header-split">
+            <button id="lemma-mode-btn" class="tab-header-btn" title="Give each word of a reading a dictionary lemma. Alt+Shift+L for the whole project, Alt+L for the omen under the cursor.">Lemmas</button>
+            <button id="glossary-btn" class="tab-header-btn" title="The readings this project has settled for itself, ahead of the general dictionary. Alt+Shift+D.">Dictionary</button>
+            <button id="position-mode-btn" class="tab-header-btn" title="Show each reading as numbered positions and align the witnesses to them. Alt+Shift+P for the whole project, Alt+P for the omen under the cursor.">Positions</button>
+            <button id="compose-all-btn" class="tab-header-btn" title="Compose every reading in the project from its witnesses. Overwrites what is there — never runs on its own.">Compose all</button>
+          </span>
           <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
         </div>
+        <!-- Tablets opened from Parallels get their own row: they come and go,
+             and mixing them into the fixed tabs above pushes those around. -->
+        <div id="tablet-tabs" class="tablet-tabs hidden"></div>
         <div id="score" class="score tab-content active" data-tab="score"></div>
         <div id="colophons" class="score tab-content" data-tab="colophons"></div>
         <div id="parallels" class="score tab-content" data-tab="parallels"></div>
         <div id="paradigms-tab" class="score tab-content" data-tab="paradigms"></div>
+        <div id="stats-tab" class="score tab-content" data-tab="stats"></div>
         <div id="images-tab" class="tab-content" data-tab="images">
           <div id="images-grid" class="images-grid">
             <div class="images-empty">No images for this source.</div>
@@ -335,24 +356,6 @@
     </div>
   </div>
 
-  <!-- Reconstructed View overlay (full-screen export artifact editor) -->
-  <div id="recon-view" class="recon-view hidden">
-    <div class="recon-view-header">
-      <h2>Reconstructed View — Export Artifact</h2>
-      <span id="recon-view-subtitle" class="recon-view-subtitle"></span>
-      <span class="header-spacer"></span>
-      <span id="recon-token-pill" class="ebl-status-pill warn">
-        <span class="dot"></span><span id="recon-token-text">No token</span>
-      </span>
-      <button id="recon-refresh-btn" title="Rebuild artifact from current score (discards in-view edits)">Refresh from score</button>
-      <button id="recon-validate-btn" title="Validate against the eBL ATF grammar (shows up to 5 errors per pass)">Validate</button>
-      <button id="recon-export-btn" class="btn-primary" title="Export this artifact to eBL">Export to eBL</button>
-      <button id="recon-close-btn" title="Close and sync edits back">Close</button>
-    </div>
-    <div id="recon-ace" class="recon-ace"></div>
-    <div id="recon-status" class="recon-status hidden"></div>
-  </div>
-
   <!-- Add a line variant: the alternative reading + the witnesses that attest it -->
   <dialog id="variant-dialog" class="dialog variant-dialog">
     <form id="variant-form" method="dialog">
@@ -409,6 +412,18 @@
     </form>
   </dialog>
 
+  <!-- What a composition found -->
+  <div id="compose-report" class="modal hidden">
+    <div class="modal-content compose-report">
+      <div class="modal-header">
+        <h3 id="compose-report-title">Composed</h3>
+        <button class="modal-close" id="compose-report-close">&times;</button>
+      </div>
+      <div class="compose-report-body" id="compose-report-body"></div>
+      <div class="compose-report-foot hidden" id="compose-report-foot"></div>
+    </div>
+  </div>
+
   <!-- Export modal -->
   <div id="export-modal" class="modal hidden">
     <div class="modal-content export-modal">
@@ -439,18 +454,41 @@
           <label class="export-mode">
             <input type="radio" name="export-mode" value="validate" checked>
             <span class="export-mode-name">Validate only</span>
-            <span class="export-mode-hint">Check the ATF. Nothing is sent to eBL.</span>
-          </label>
-          <label class="export-mode">
-            <input type="radio" name="export-mode" value="append">
-            <span class="export-mode-name">Append</span>
-            <span class="export-mode-hint">Add these lines after the ones already in the chapter.</span>
+            <span class="export-mode-hint" id="export-validate-hint">Check the ATF. Nothing is sent to eBL.</span>
           </label>
           <label class="export-mode">
             <input type="radio" name="export-mode" value="replace">
             <span class="export-mode-name">Replace all lines</span>
             <span class="export-mode-hint">Delete every existing line, then import these. Lemmatization and alignment on the old lines are lost.</span>
           </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="line">
+            <span class="export-mode-name">Update one line</span>
+            <span class="export-mode-hint">Replace a single &sect; in place. Every other line keeps its lemmatization and alignment.</span>
+          </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="alignment">
+            <span class="export-mode-name">Send the alignment</span>
+            <span class="export-mode-hint">Which witness word answers to which word of the reading, and what it reads if it differs. This is what eBL&rsquo;s hover follows; a line export cannot carry it.</span>
+          </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="lemmas">
+            <span class="export-mode-name">Send the lemmas</span>
+            <span class="export-mode-hint">The dictionary word behind each word of the reading. Witness words take the lemma of whatever they are aligned to, so align a section first and they come with it.</span>
+          </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="range">
+            <span class="export-mode-name">Update a range of lines</span>
+            <span class="export-mode-hint">Replace every &sect; from one to another, in a single request. Lines outside the range keep their lemmatization and alignment.</span>
+          </label>
+          <div class="export-line-picker hidden" id="export-line-picker">
+            <label for="export-line-num">Section &sect;</label>
+            <input type="number" id="export-line-num" min="1" step="1" placeholder="1">
+            <span class="export-range-to hidden" id="export-range-to">
+              <label for="export-line-to">to &sect;</label>
+              <input type="number" id="export-line-to" min="1" step="1" placeholder="20">
+            </span>
+          </div>
           <div class="export-options">
             <label><input type="checkbox" id="export-opt-manuscripts" checked> Register manuscripts first</label>
             <label><input type="checkbox" id="export-opt-save-atf"> Save a copy of the ATF in the project folder</label>
@@ -458,6 +496,12 @@
         </fieldset>
 
         <div id="export-effect" class="export-effect hidden"></div>
+
+        <details id="export-preview-wrap" class="export-preview-wrap">
+          <summary>What will be sent <span id="export-preview-count" class="export-preview-count"></span></summary>
+          <pre id="export-preview" class="export-preview"></pre>
+        </details>
+
         <div id="export-warnings" class="export-warnings hidden"></div>
         <div id="export-progress" class="export-progress hidden">
           <div class="export-step" data-step="validate">
@@ -471,6 +515,9 @@
           </div>
           <div class="export-step" data-step="delete">
             <span class="step-icon">·</span> Delete existing lines
+          </div>
+          <div class="export-step" data-step="line">
+            <span class="step-icon">·</span> Replace the line
           </div>
           <div class="export-step" data-step="import">
             <span class="step-icon">·</span> Import lines

@@ -211,6 +211,37 @@ const parallelLines = {}; // { [lineNum]: string[] } — text after "// "
 // with its own note and parallels like any other reading.
 //   { [lineNum]: [{ text, note, parallels }] }
 const variantLines = {};
+
+// ---- Positional alignment ----------------------------------------------
+// Which composite position each witness word answers to:
+//   lineAlignments[lineNum][siglum|sourceLine][witnessWordIndex] = position
+// Richer than eBL can hold: eBL takes only omittedWords, which is this map
+// projected onto "absent or not". The pairings themselves, and the
+// substitutions they reveal, live here and nowhere else.
+const lineAlignments = {};
+
+// Lemmas chosen for the reading, as lemmaChoices[section][variant][position]
+// = [lemma id]. Only the reading is lemmatized here; a witness word takes the
+// lemma of whatever reading word it is aligned to, which is what the alignment
+// already knows and what eBL does with it anyway.
+const lemmaChoices = {};
+
+// Per section: the fingerprint of what was sent to eBL, and when.
+const exportedSections = {};
+let positionMode = false;
+
+// Sections shown as positions or as lemmas on their own, without turning the
+// whole project over to it. Working on one omen is the common case;
+// rebuilding ninety of them to do it is not.
+const positionSections = new Set();
+const lemmaSections = new Set();
+function positionsOn(lineNum) {
+  return positionMode || positionSections.has(lineNum);
+}
+function lemmasOn(lineNum) {
+  return lemmaMode || lemmaSections.has(lineNum);
+}
+let lemmaMode = false;
 let siglaMappings = {}; // Museum number -> Siglum (from project config)
 
 let imagesIndex = {}; // { siglum: [{ fileName, originalName, addedAt }] }
@@ -493,16 +524,99 @@ let manuscriptTypes = {}; // museum number -> type slug
 
 function rebuildTypeMap() {
   manuscriptTypes = {};
+  manuscriptPeriods = {};
   for (const m of (manuscriptsMeta && manuscriptsMeta.manuscripts) || []) {
     const key = (m.file || '').replace(/\.txt$/, '');
     if (!key) continue;
     manuscriptTypes[key] = MANUSCRIPT_TYPE_SLUGS[m.type] || 'none';
+    // eBL's own abbreviation — Neo-Assyrian is NA, Late Babylonian LB — so the
+    // sidebar and the siglum eBL builds agree on what the letters mean. A
+    // modifier keeps its initial in front: Early Neo-Assyrian is ENA.
+    const abbr = EblClient.abbrevOf(EblClient.PERIODS, m.period || '');
+    const mod = m.periodModifier && m.periodModifier !== 'None'
+      ? m.periodModifier.slice(0, 1) : '';
+    manuscriptPeriods[key] = abbr ? mod + abbr : '';
   }
   renderTypeLegend();
+  refreshManuscriptBadges();
   // grouping depends on the types, so re-sort if the list is already built
   if (typeof manuscriptList !== 'undefined' && manuscriptList &&
       manuscriptList.querySelector('.manuscript-item')) {
     resortManuscriptList();
+  }
+}
+
+// ---- what each source is carrying, in the sidebar --------------------------
+//
+// A file in the folder is not yet a witness. It becomes one when its lines are
+// assigned to sections, and until then it has nothing to give the chapter and
+// no reason to be registered with eBL.
+//
+// Both numbers come from the same file in one pass, so they cannot disagree:
+// lines placed over lines the tablet has.
+let manuscriptPeriods = {};   // museum number -> period, abbreviated as eBL does
+
+function manuscriptUse() {
+  const use = {};
+  for (const id of Object.keys(manuscripts || {})) {
+    const ms = manuscripts[id];
+    if (!ms) continue;
+    const key = String(ms.siglum || '').replace(/\.txt$/, '');
+    if (!key) continue;
+    const sections = new Set();
+    let total = 0;
+    let used = 0;
+    for (const raw of String(ms.content || '').split(/\r?\n/)) {
+      const parsed = splitScoreLine(raw);
+      if (!parsed) continue;         // a heading, a $ directive, a blank
+      total++;
+      if (parsed.sec == null) continue;
+      used++;
+      sections.add(parsed.sec);
+    }
+    use[key] = { total, used, sections: sections.size };
+  }
+  return use;
+}
+
+function refreshManuscriptBadges() {
+  if (typeof manuscriptList === 'undefined' || !manuscriptList) return;
+  const rows = manuscriptList.querySelectorAll('.manuscript-item');
+  if (!rows.length) return;
+  const use = manuscriptUse();
+
+  for (const li of rows) {
+    const key = li.dataset.museum || '';
+    const held = use[key] || { total: 0, used: 0, sections: 0 };
+    const carrying = held.used > 0;
+    const said = held.total
+      ? held.used + ' of ' + held.total + ' lines placed'
+        + (held.sections ? ', in ' + held.sections + ' section'
+          + (held.sections === 1 ? '' : 's') : '')
+      : 'no numbered lines in this file';
+
+    let dot = li.querySelector('.ms-use-dot');
+    if (!dot) {
+      dot = document.createElement('span');
+      dot.className = 'ms-use-dot';
+      li.appendChild(dot);
+    }
+    dot.classList.toggle('is-used', carrying);
+    dot.title = said;
+
+    const period = manuscriptPeriods[key] || '';
+    let meta = li.querySelector('.ms-meta');
+    if (!meta) {
+      meta = document.createElement('span');
+      meta.className = 'ms-meta';
+      const del = li.querySelector('.delete-manuscript-btn');
+      li.insertBefore(meta, del || null);
+    }
+    // used/total, so an unplaced tablet reads 0/12 at a glance.
+    meta.textContent = [period, held.total ? held.used + '/' + held.total : '']
+      .filter(Boolean).join('  ·  ');
+    meta.title = said;
+    meta.classList.toggle('is-idle', !carrying);
   }
 }
 
@@ -840,6 +954,516 @@ function setEditorContent(content) {
 }
 
 // Parse a manuscript text and extract scored lines
+// Re-render without the page jumping.
+//
+// renderScore() throws the score away and builds it again, so whatever was on
+// screen is gone and the pane snaps back to the top. Toggling Positions on a
+// long chapter is the case that makes this unbearable: the omen being worked on
+// disappears and has to be found again.
+//
+// The § nearest the top of the pane is remembered, along with how far into it
+// the view had got, and put back where it was afterwards.
+function keepScoreInView(run) {
+  const pane = document.getElementById('score');
+  if (!pane) { run(); return; }
+
+  const top = pane.getBoundingClientRect().top;
+  let anchor = null;
+  let offset = 0;
+  for (const el of pane.querySelectorAll('.score-line[data-line]')) {
+    const box = el.getBoundingClientRect();
+    if (box.bottom > top) {
+      anchor = el.dataset.line;
+      offset = box.top - top;
+      break;
+    }
+  }
+
+  run();
+
+  if (anchor == null) return;
+  const again = pane.querySelector(`.score-line[data-line="${anchor}"]`);
+  if (!again) return;
+  // Measured after the new layout, so the same § sits where it sat before.
+  pane.scrollTop += again.getBoundingClientRect().top - top - offset;
+}
+
+// Say a section is already on eBL, or take that back.
+//
+// The fingerprint can only speak for sends made from here, so a chapter that
+// was imported some other way starts out looking as though none of it had ever
+// gone. Marking it by hand fixes the starting point; from then on it behaves
+// like any other mark and clears itself when the section changes.
+//
+// Shift-click carries the mark down from the last one set, so a run of omens
+// takes two clicks rather than one each.
+let lastMarkedSection = null;
+
+async function toggleSentMark(lineNum, extend) {
+  const from = (extend && lastMarkedSection != null)
+    ? Math.min(lastMarkedSection, lineNum) : lineNum;
+  const to = (extend && lastMarkedSection != null)
+    ? Math.max(lastMarkedSection, lineNum) : lineNum;
+
+  const clearing = sentState(lineNum) !== 'never';
+  const { scoreLines } = buildScore();
+  const known = new Set(Object.keys(scoreLines).map(Number));
+  let touched = 0;
+  for (let n = from; n <= to; n++) {
+    if (!known.has(n)) continue;
+    if (clearing) { delete exportedSections[n]; touched++; }
+    else { markSent(n, ['said to be on eBL already']); touched++; }
+  }
+  lastMarkedSection = lineNum;
+  if (!touched) return;
+  await saveScoreDataToFile();
+  keepScoreInView(renderScore);
+  setStatus('connected', (clearing ? 'Cleared ' : 'Marked ') + touched + ' section(s)'
+    + (from === to ? '' : ' (§' + from + '–§' + to + ')'));
+  setTimeout(() => setStatus('connected', 'Ready'), 4000);
+}
+
+document.addEventListener('click', (e) => {
+  const mark = e.target && e.target.closest ? e.target.closest('.line-sent') : null;
+  if (!mark) return;
+  const lineNum = parseInt(mark.dataset.line, 10);
+  if (!Number.isFinite(lineNum)) return;
+  e.preventDefault();
+  toggleSentMark(lineNum, e.shiftKey);
+});
+
+// Keyboard: Alt+P for positions, Alt+L for lemmas.
+//
+// Alt rather than Ctrl, which the browser has already spoken for, and both are
+// ignored while something is being typed into — the readings are editable, and
+// a shortcut that fires mid-word would be worse than no shortcut.
+//
+// With the cursor in a line, the toggle applies to that § alone; otherwise it
+// turns the whole project over, which is what the header buttons do.
+function typingSomewhere() {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = (el.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select';
+}
+
+// The last § the user actually put a cursor or a click into. Clicking a
+// witness line focuses nothing — it is not editable — so without this the
+// shortcut has only the scroll position to go on, and answers with whatever
+// happens to be nearest the top edge.
+let lastTouchedSection = null;
+document.addEventListener('click', (e) => {
+  const line = e.target && e.target.closest ? e.target.closest('.score-line[data-line]') : null;
+  if (!line) return;
+  const n = parseInt(line.dataset.line, 10);
+  if (Number.isFinite(n)) lastTouchedSection = n;
+}, true);
+
+// How much of a line is actually on screen.
+function visibleHeightOf(el, top, bottom) {
+  const box = el.getBoundingClientRect();
+  return Math.max(0, Math.min(box.bottom, bottom) - Math.max(box.top, top));
+}
+
+// Which § a shortcut means.
+//
+// In order: whatever has focus, then the last one clicked (if it is still on
+// screen), then the one taking up most of the pane. The old answer — the first
+// line whose bottom had not yet passed the top edge — is the omen ABOVE the one
+// being read as soon as the previous one is half scrolled off, which is why
+// clicking §4 and pressing the key opened §3.
+function sectionUnderCursor() {
+  const el = document.activeElement;
+  const focused = el && el.closest ? el.closest('.score-line[data-line]') : null;
+  if (focused) return parseInt(focused.dataset.line, 10);
+
+  const pane = document.getElementById('score');
+  if (!pane) return lastTouchedSection;
+  const box = pane.getBoundingClientRect();
+
+  if (lastTouchedSection != null) {
+    const row = pane.querySelector(`.score-line[data-line="${lastTouchedSection}"]`);
+    if (row && visibleHeightOf(row, box.top, box.bottom) > 0) return lastTouchedSection;
+  }
+
+  let best = null;
+  let bestSeen = 0;
+  for (const row of pane.querySelectorAll('.score-line[data-line]')) {
+    const seen = visibleHeightOf(row, box.top, box.bottom);
+    if (seen > bestSeen) { bestSeen = seen; best = parseInt(row.dataset.line, 10); }
+  }
+  return best;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!e.altKey || e.ctrlKey || e.metaKey) return;
+  const key = (e.key || '').toLowerCase();
+  if (key !== 'p' && key !== 'l') return;
+  if (typingSomewhere()) return;
+  const scoreTab = document.querySelector('.pane-tab[data-tab="score"]');
+  if (scoreTab && !scoreTab.classList.contains('active')) return;
+  e.preventDefault();
+  const mode = key === 'p' ? 'positions' : 'lemmas';
+  if (e.shiftKey) {
+    // Alt+Shift+P / Alt+Shift+L: the whole project, as the header buttons do.
+    const btn = document.getElementById(mode === 'positions' ? 'position-mode-btn' : 'lemma-mode-btn');
+    if (btn) btn.click();
+    return;
+  }
+  const sec = sectionUnderCursor();
+  if (sec != null) toggleSection(mode, sec, null);
+});
+
+const lemmaModeBtn = document.getElementById('lemma-mode-btn');
+if (lemmaModeBtn) lemmaModeBtn.addEventListener('click', async () => {
+  lemmaMode = !lemmaMode;
+  lemmaModeBtn.classList.toggle('is-on', lemmaMode);
+  // The two modes both take the reading over, so only one at a time.
+  if (lemmaMode && positionMode) {
+    positionMode = false;
+    const pb = document.getElementById('position-mode-btn');
+    if (pb) pb.classList.remove('is-on');
+  }
+  if (lemmaMode) {
+    lemmaModeBtn.disabled = true;
+    try {
+      await Lemmatizer.load();
+      // The sign table too, though not at the cost of the mode: it is what
+      // lets GU₄.U₄ find the entry eBL keyed as GU₄.UD, and KI.LAM find GANBA.
+      try { await ensureAtfConverter(); } catch (_) { /* readings stay literal */ }
+      // Everything the dictionary can place, filled in at once and marked as
+      // its suggestion. Reading through and confirming is quicker than
+      // choosing from nothing, and the colours say which is which.
+      const done = prefillLemmas();
+      if (done.filled) await saveScoreDataToFile();
+      // Suggestions made before the dictionary learned something stay wrong
+      // until they are re-asked: prefill will not overwrite them.
+      const stale = refreshSuggestions(null, false).length;
+      if (stale) {
+        setTimeout(() => offerRefreshSuggestions(null), 400);
+      }
+      const c = lemmaCount();
+      setStatus('connected', done.filled
+        ? done.filled + ' suggested, ' + c.hand + ' confirmed'
+          + (done.blank ? ', ' + done.blank + ' the dictionary could not place' : '')
+        : c.total + ' lemmas, ' + c.hand + ' confirmed');
+      setTimeout(() => setStatus('connected', 'Ready'), 6000);
+    } catch (err) {
+      lemmaMode = false;
+      lemmaModeBtn.classList.remove('is-on');
+      showComposeReport('Lemmas', [noteBlock('The dictionary did not load: '
+        + (err && err.message || err), 'bad')]);
+    }
+    lemmaModeBtn.disabled = false;
+  }
+  keepScoreInView(renderScore);
+});
+
+const positionModeBtn = document.getElementById('position-mode-btn');
+if (positionModeBtn) positionModeBtn.addEventListener('click', async () => {
+  positionMode = !positionMode;
+  positionModeBtn.classList.toggle('is-on', positionMode);
+  if (positionMode && lemmaMode) {
+    lemmaMode = false;
+    if (lemmaModeBtn) lemmaModeBtn.classList.remove('is-on');
+  }
+  // Sign codes are what makes {iti}BAR₂ and {iti}BARA₂ one word rather than
+  // two. Fetch the table on the way in so the first render already judges
+  // properly instead of flagging spelling as difference.
+  if (positionMode && !parallelsState.converter) {
+    positionModeBtn.disabled = true;
+    try { await ensureAtfConverter(); } catch (_) { /* fall back to text comparison */ }
+    positionModeBtn.disabled = false;
+  }
+  keepScoreInView(renderScore);
+});
+
+// ---- Position mode -------------------------------------------------------
+//
+// The score, shown as the alignment it already is. Each word of a reading gets
+// a position; each witness word gets a box you type that position into. The
+// colour is the position, so a witness word takes the colour of whatever it is
+// answering to and a mistake is visible without reading a single number.
+//
+// From the pairings everything else follows, and none of it is stored:
+//   a position no witness word points at, witness intact   -> omitted
+//   a position no witness word points at, witness broken    -> missing, no claim
+//   a witness word pointing nowhere                         -> extra
+//   a pairing whose two words differ                        -> variant material
+
+// Words as eBL counts them: dividers occupy the line but are not Words, so
+// they take no position and never shift the numbering omittedWords uses.
+const DIVIDER = /^[:;]$/;
+// The reading, numbered the way eBL numbers it.
+//
+// eBL's alignment index counts EVERY token of the reconstruction, dividers
+// included. In EAE 55 §38 the witness aligns to 7, which is I₃.GAL₂ — token 7,
+// but only word 6, because the ":" at 5 takes a number of its own. Numbering
+// words alone puts every position after a divider one short, and those numbers
+// are what goes to eBL.
+function positionWords(text) {
+  const out = [];
+  let pos = 0;
+  for (const tok of String(text || '').trim().split(/\s+/).filter(Boolean)) {
+    out.push({ text: tok, pos: pos++, divider: DIVIDER.test(tok) });
+  }
+  return out;
+}
+
+// A hue per position, walked by a large step so neighbours never look alike.
+// Lightness differs by theme so the text stays readable on either ground.
+function positionColor(pos) {
+  const hue = (pos * 137.508) % 360;
+  const dark = document.body.classList.contains('dark-mode');
+  return {
+    fg: `hsl(${hue}, ${dark ? '70%, 72%' : '65%, 32%'})`,
+    bg: `hsl(${hue}, ${dark ? '55%, 22%' : '75%, 92%'})`,
+  };
+}
+
+// Repaint one word to the colour of the position it now answers to. In place,
+// because the alternative is re-rendering the panel out from under the caret.
+function paintPositionWord(input) {
+  const word = input.closest ? input.closest('.pos-word') : null;
+  if (!word) return;
+  const raw = input.value.trim();
+  if (raw === '') { word.style.color = ''; word.style.background = ''; return; }
+  const c = positionColor(parseInt(raw, 10));
+  word.style.color = c.fg;
+  word.style.background = c.bg;
+}
+
+// A run of positions as a range. "lost 0,1,2,3,4,5,6,7" says nothing the eye
+// can take in; "lost 0–7" does.
+function positionRun(list) {
+  const ns = [...new Set(list)].sort((a, b) => a - b);
+  const out = [];
+  let i = 0;
+  while (i < ns.length) {
+    let j = i;
+    while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++;
+    out.push(j - i >= 2 ? ns[i] + '–' + ns[j] : ns.slice(i, j + 1).join(','));
+    i = j + 1;
+  }
+  return out.join(',');
+}
+
+// Recount one witness row after one of its boxes changed.
+function refreshPositionTally(input) {
+  const row = input.closest ? input.closest('.score-witness') : null;
+  if (!row) return;
+  const out = row.querySelector('.pos-tally');
+  if (!out) return;
+
+  const lineNum = input.dataset.line;
+  const key = input.dataset.key;
+  const vi = Number(input.dataset.variant || 0);
+  const { scoreLines } = buildScore();
+  const w = (scoreLines[lineNum] || []).find(
+    (x) => x.type === 'line' && (x.variant || 0) === vi && (x.siglum + '|' + x.sourceLine) === key);
+  const reading = variantsFor(lineNum)[vi];
+  if (!w || !reading) return;
+
+  const tally = alignmentTally(lineNum, w, positionWords(reading.text));
+  // Worded exactly as the full render words it, or the label changes meaning
+  // the moment a box is edited.
+  const bits = [];
+  if (tally.omitted.length) bits.push('omits ' + positionRun(tally.omitted));
+  if (tally.illegible.length) bits.push('lost ' + positionRun(tally.illegible));
+  if (tally.differing.length) bits.push('reads otherwise at ' + positionRun(tally.differing));
+  if (tally.duplicated.length) bits.push('two words at ' + tally.duplicated.join(','));
+  if (tally.extra) bits.push(tally.extra + ' unplaced');
+  out.textContent = bits.length ? bits.join(' · ') : '✓';
+}
+
+// A witness line split the way the compositor splits it. Commentary
+// protocols and column separators are shown but never numbered: they are
+// not words, and numbering them shifts every real word after them out of
+// step with the alignment the compositor wrote.
+function witnessWords(content) {
+  if (!window.Compositor || !Compositor.classify) {
+    return String(content || '').trim().split(/\s+/).filter(Boolean)
+      .map((text, index) => ({ text, role: 'text', index }));
+  }
+  const convert = positionConverter();
+  let idx = 0;
+  return Compositor.classify(content).map((t) => {
+    // Only text is numbered. A marker and a gloss are on the tablet but are
+    // not the text; and a word with no sign content at all — "[...]", a bare
+    // x — is a placeholder for what was lost, which can answer to no position
+    // and must not consume one.
+    // Numbered to match eBL's alignable tokens: a marker, a gloss, a break and
+    // a divider are none of them alignable, so none of them takes an index.
+    let role = t.role;
+    if (role === 'text' && Compositor.isDivider(t.text)) role = 'divider';
+    else if (role === 'text' && convert && !Compositor.isLegible(t.text, convert)) role = 'break';
+    return { text: t.text, role, index: role === 'text' ? idx++ : null };
+  });
+}
+
+// The sign converter, once it exists. Position mode fetches it when it is
+// switched on; until then the tally falls back to comparing transliterations,
+// which is stricter than it should be but never wrong in the other direction.
+function positionConverter() {
+  const c = (typeof parallelsState === 'object' && parallelsState) ? parallelsState.converter : null;
+  if (!c) return null;
+  return (text) => { try { return c.convertLine(text).codes; } catch (_) { return []; } };
+}
+
+function alignmentFor(lineNum, siglum) {
+  if (!lineAlignments[lineNum]) lineAlignments[lineNum] = {};
+  if (!lineAlignments[lineNum][siglum]) lineAlignments[lineNum][siglum] = {};
+  return lineAlignments[lineNum][siglum];
+}
+
+// One witness row in position mode: every word with the box that says where it
+// belongs. The key is the witness's own line number, so two lines of the same
+// manuscript under one section do not share an alignment.
+function renderPositionWitness(lineNum, vi, w) {
+  const key = w.siglum + '|' + w.sourceLine;
+  const map = alignmentFor(lineNum, key);
+  let html = '';
+  witnessWords(w.content).forEach((tok) => {
+    const word = tok.text;
+    const i = tok.index;
+    if (i == null) {
+      const cls = tok.role === 'commentary' ? 'is-commentary'
+        : tok.role === 'break' ? 'is-break' : 'is-meta';
+      const why = tok.role === 'commentary' ? 'Commentary, not the text'
+        : tok.role === 'break' ? 'Lost to damage — answers to no position'
+        : 'Not part of the text';
+      html += `<span class="pos-word ${cls}" title="${why}">` +
+        `<span class="pos-word-text">${escapeHtml(word)}</span></span>`;
+      return;
+    }
+    const at = map[i];
+    const style = at == null ? '' : (() => {
+      const c = positionColor(at);
+      return ` style="color:${c.fg};background:${c.bg}"`;
+    })();
+    html += `<span class="pos-word"${style}>` +
+      `<span class="pos-word-text">${renderAtf(word)}</span>` +
+      `<input class="pos-input" type="text" inputmode="numeric" ` +
+      `data-line="${lineNum}" data-key="${escapeHtml(key)}" data-index="${i}" ` +
+      `data-variant="${vi}" ` +
+      `value="${at == null ? '' : at}" title="Position in the reading above; blank = answers to nothing">` +
+      `</span>`;
+  });
+  return html;
+}
+
+// What the pairings add up to for one witness row.
+//
+// This judges the same way the compositor does, and for the same reasons:
+//   - words are compared as signs, so {iti}BAR₂ and {iti}BARA₂ are one word
+//     and IGI against IGI-ir is a complement, not a difference;
+//   - a witness only omits a position inside the stretch it actually
+//     preserves — a tablet broken to "[...]" claims nothing at all;
+//   - dividers, protocol markers and commentary are not words and take no
+//     position, so they are never counted as unplaced.
+function alignmentTally(lineNum, w, readingWords) {
+  const key = w.siglum + '|' + w.sourceLine;
+  const map = alignmentFor(lineNum, key);
+  const stream = witnessWords(w.content);
+  const words = stream.filter((t) => t.index != null);
+  const convert = positionConverter();
+  const C = window.Compositor;
+
+  const legible = (text) => (convert && C ? C.isLegible(text, convert) : true);
+  const divider = (text) => (C ? C.isDivider(text) : /^[:;]$/.test(text));
+
+  const taken = new Map();
+  const duplicated = [];
+  let extra = 0;
+  for (const tok of words) {
+    const at = map[tok.index];
+    // A divider answers to no position, so leaving it unpaired is not a gap
+    // in the alignment and must not be reported as one.
+    if (at == null) { if (!divider(tok.text) && legible(tok.text)) extra++; continue; }
+    if (taken.has(at) && duplicated.indexOf(at) < 0) duplicated.push(at);
+    taken.set(at, tok.text);
+  }
+
+  // Which reading positions the tablet cannot answer for.
+  //
+  // A word missing between two placed words is only an omission if the tablet
+  // runs straight from the one to the other. Where traces stand in between — an
+  // x, a bracketed loss — the word is not absent, it is unreadable, and saying
+  // "omitted" asserts something about the scribe that the tablet does not
+  // support. eBL stores that assertion in omittedWords, so it matters.
+  //
+  // The ends count too. A line opening "[..." says the start is broken away, so
+  // every position before its first word is lost rather than merely unspoken —
+  // silence at the edge is only uninformative when nothing marks it.
+  const lost = new Set();
+  {
+    let first = null;
+    let last = null;
+    let brokenBefore = false;
+    let broken = false;
+    for (const tok of stream) {
+      if (tok.role === 'break') {
+        broken = true;
+        if (first === null) brokenBefore = true;
+        continue;
+      }
+      if (tok.index == null) continue;
+      const at = map[tok.index];
+      if (at == null) continue;
+      if (last != null && broken) {
+        for (let p = Math.min(last, at) + 1; p < Math.max(last, at); p++) lost.add(p);
+      }
+      if (first === null) first = at;
+      last = at;
+      broken = false;
+    }
+    if (brokenBefore && first != null) {
+      for (const rw of readingWords) {
+        if (rw.pos != null && rw.pos < first) lost.add(rw.pos);
+      }
+    }
+    // `broken` still set means a break stood after the last placed word.
+    if (broken && last != null) {
+      for (const rw of readingWords) {
+        if (rw.pos != null && rw.pos > last) lost.add(rw.pos);
+      }
+    }
+  }
+
+  // The stretch this witness speaks to. Outside it, silence is damage.
+  const held = [...taken.keys()];
+  const lo = held.length ? Math.min.apply(null, held) : null;
+  const hi = held.length ? Math.max.apply(null, held) : null;
+
+  const omitted = [], differing = [], illegible = [];
+  for (const rw of readingWords) {
+    if (rw.pos == null) continue;
+    // An x, an (x), a [...] in the reading itself is a placeholder for what
+    // could not be read, not a word. It keeps its number — eBL counts these as
+    // reconstruction tokens, so dropping them would shift every index after it
+    // out of step with eBL — but no witness can be said to omit it, lose it, or
+    // read it otherwise. There is nothing there to have an opinion about.
+    if (!legible(rw.text)) continue;
+    if (!taken.has(rw.pos)) {
+      if (rw.divider) continue;
+      // A break accounts for this position wherever it falls, inside the
+      // stretch the witness covers or beyond either end of it.
+      if (lost.has(rw.pos)) { illegible.push(rw.pos); continue; }
+      // An omission is a claim about the scribe, so it is only made where the
+      // witness is demonstrably present on both sides of the gap.
+      if (lo != null && rw.pos > lo && rw.pos < hi) omitted.push(rw.pos);
+      continue;
+    }
+    const verdict = convert && C
+      ? C.compareWords(rw.text, taken.get(rw.pos), convert)
+      : (taken.get(rw.pos).replace(/[#?!*\[\]⸢⸣]/g, '') === rw.text.replace(/[#?!*\[\]⸢⸣]/g, '')
+          ? 'same' : 'different');
+    if (verdict === 'different') differing.push(rw.pos);
+  }
+  return { omitted, differing, illegible, duplicated, extra, paired: taken.size };
+}
+
 // ---- Line variants -------------------------------------------------------
 // A reading is tied to one of a line's variants by a letter on the § marker:
 // "§34" (or "§34a") is the main reading, "§34b" the second, "§34c" the third.
@@ -950,6 +1574,23 @@ function parseManuscript(siglum, text) {
       continue;
     }
 
+    // A note on the witness above: "#note: ...". eBL's manuscript_line takes
+    // paratext after the reading —
+    //   manuscript_line: ... manuscript_text paratext_line*
+    //   paratext:        note_line | dollar_line
+    // — so the note belongs to that one reading, not to the chapter line, and
+    // more than one is allowed. Attaches the way "//" does: to the entry above.
+    // Without this branch the line fell through to the unknown-line case below,
+    // which dropped it AND broke the adjacency chain for whatever followed.
+    const noteMatch = trimmed.match(/^#note:s*(.*)$/);
+    if (noteMatch) {
+      if (lastEntry && lastEntry.type !== 'ruling' && lastEntry.type !== 'comment') {
+        if (!lastEntry.notes) lastEntry.notes = [];
+        lastEntry.notes.push(noteMatch[1].trim());
+      }
+      continue;
+    }
+
     // Check for continuation lines: ($___$) or leading whitespace indicating continuation
     const continuationMatch = trimmed.match(/^\(\$___\$\)\s*(.*)$/);
     if (continuationMatch) {
@@ -978,7 +1619,8 @@ function parseManuscript(siglum, text) {
         surface: currentSurface,
         content,
         parallels: [],
-        continuation: []
+        continuation: [],
+        notes: []
       };
       entries.push(entry);
       lastEntry = entry;
@@ -1009,7 +1651,8 @@ function parseManuscript(siglum, text) {
         surface: currentSurface,
         content,
         parallels: [],
-        continuation: []
+        continuation: [],
+        notes: []
       };
       entries.push(entry);
       lastEntry = entry;
@@ -1059,6 +1702,9 @@ function buildScore() {
 function renderScore() {
   const { scoreLines } = buildScore();
   const sortedLineNumbers = Object.keys(scoreLines).map(Number).sort((a, b) => a - b);
+  // The sidebar counts follow the score, so they are refreshed with it rather
+  // than being computed again from the files.
+  refreshManuscriptBadges();
 
   if (sortedLineNumbers.length === 0) {
     scorePanel.innerHTML = '<div class="score-empty">No scored lines yet. Use §[line] [source]. to add lines.</div>';
@@ -1083,9 +1729,63 @@ function renderScore() {
       const reading = readings[vi];
       const letter = variantLetterOf(vi);
 
-      html += `<div class="score-line-header${vi ? ' is-variant' : ''}">`;
+      // The state of the send is worn by the line itself: blue for never sent,
+      // green for sent and unchanged, amber for sent and edited since. Only the
+      // first reading carries it — a variant is part of the same chapter line
+      // and goes with it.
+      const sentClass = vi ? '' : ' sent-' + sentState(lineNum);
+      html += `<div class="score-line-header${vi ? ' is-variant' : ''}${sentClass}">`;
       html += `<span class="line-label">§ ${lineNum}${letter}</span> `;
-      html += `<span class="reconstructed-text" contenteditable="true" data-line="${lineNum}" data-variant="${vi}">${renderAtf(reading.text)}</span>`;
+
+      if (lemmasOn(lineNum)) {
+        // Same ruler as Positions, read the same way, but each word shows the
+        // lemma it carries and how sure that is. Clicking one opens a dropdown
+        // in place — there is no dialog, so a whole line can be worked through
+        // without the reading ever leaving the screen.
+        const daggersHere = daggerPositions(lineNum, vi, reading);
+      html += `<span class="reconstructed-text is-lemmas">` + positionWords(reading.text).map((t) => {
+          if (t.divider) return `<span class="lem-word is-divider">${escapeHtml(t.text)}</span>`;
+          const state = lemmaState(lineNum, vi, t.pos, t.text);
+          const ids = lemmasAt(lineNum, vi, t.pos);
+          const dag = daggersHere.has(t.pos)
+            ? `<span class="pos-dagger" title="${escapeHtml(daggersHere.get(t.pos).join('; '))}">‡</span>`
+            : '';
+          const label = ids.length ? ids.join(' + ') : (state === 'skip' ? '' : 'no lemma');
+          return `<span class="lem-word is-${state}"`
+            + ` data-line="${lineNum}" data-variant="${vi}" data-pos="${t.pos}"`
+            + ` tabindex="${state === 'skip' ? -1 : 0}"`
+            + ` title="${escapeHtml(lemmaTitle(state, ids))}">`
+            + `<span class="lem-word-text">${dag}${renderAtf(t.text)}</span>`
+            + `<span class="lem-id">${escapeHtml(label)}</span></span>`;
+        }).join('') + `</span>`;
+      } else if (positionsOn(lineNum)) {
+        // Not editable here: in this mode the reading is the ruler the
+        // witnesses are measured against, and it should not move under them.
+        const rw = positionWords(reading.text);
+        const marksHere = daggerPositions(lineNum, vi, reading);
+        html += `<span class="reconstructed-text is-positions">` + rw.map((t) => {
+          if (t.divider) return `<span class="pos-word is-divider">${escapeHtml(t.text)}`
+            + `<span class="pos-num">${t.pos}</span></span>`;
+          // Numbered, because eBL numbers it, but shown as the placeholder it is.
+          if (window.Compositor && !Compositor.isLegible(t.text, positionConverter() || (() => []))) {
+            return `<span class="pos-word is-placeholder">${escapeHtml(t.text)}`
+              + `<span class="pos-num">${t.pos}</span></span>`;
+          }
+          const c = positionColor(t.pos);
+          const dag = marksHere.has(t.pos)
+            ? `<span class="pos-dagger" title="${escapeHtml(marksHere.get(t.pos).join('; '))}">‡</span>`
+            : '';
+          return `<span class="pos-word" style="color:${c.fg};background:${c.bg}">` + dag +
+            `<span class="pos-word-text">${renderAtf(t.text)}</span>` +
+            `<span class="pos-num">${t.pos}</span></span>`;
+        }).join('') + `</span>`;
+      } else {
+        html += `<span class="reconstructed-text" contenteditable="true" data-line="${lineNum}" data-variant="${vi}">${renderAtf(reading.text)}</span>`;
+        // The ‡ eBL will print, alongside the reading rather than inside it —
+        // the reading is contenteditable and a marker put in there would be
+        // typed over, and would end up in the text that goes to eBL.
+
+      }
       // Notes anchored to this §, open ones only: resolved notes stop tugging
       // at the eye but stay reachable through the panel.
       if (vi === 0) {
@@ -1097,17 +1797,59 @@ function renderScore() {
       }
       // One affordance, not three. The grammar allows a single note per reading,
       // so that entry disables itself once this reading has one.
+      // The per-omen toggles live with the other things you do to a line —
+      // send it, add to it — rather than beside its number. The group wraps,
+      // so a narrow pane stacks them instead of pushing the reading out.
+      if (vi === 0) {
+        html += `<span class="line-tools">`;
+        const posOn = positionSections.has(lineNum);
+        const lemOn = lemmaSections.has(lineNum);
+        const sent = sentState(lineNum);
+        html += `<button type="button" class="line-sent is-${sent}" data-line="${lineNum}"`
+          + ` title="${escapeHtml(sentTitle(lineNum))}">`
+          + (sent === 'never' ? '·' : '✓') + `</button>`;
+        // The four actions wrap as a block of their own, so they break 2 and 2
+        // rather than dragging the mark into the arithmetic.
+        html += `<span class="line-actions">`;
+        html += `<button type="button" class="line-mode-btn${posOn ? ' is-on' : ''}"`
+          + ` data-line="${lineNum}" data-mode="positions"`
+          + ` title="${posOn ? 'Stop showing' : 'Show'} § ${lineNum} as numbered positions (Alt+P)">#</button>`;
+        html += `<button type="button" class="line-mode-btn${lemOn ? ' is-on' : ''}"`
+          + ` data-line="${lineNum}" data-mode="lemmas"`
+          + ` title="${lemOn ? 'Stop showing' : 'Show'} the lemmas of § ${lineNum} (Alt+L).`
+          + ` Shift-click to fill in the suggestions from § ${lineNum} to the end.">L</button>`;
+        html += `<button class="omen-export" data-line="${lineNum}" ` +
+                `title="Validate §${lineNum} and send it to eBL">⇗</button>`;
+      } else {
+        // A variant row has only its own "+", but it still gets the group so
+        // the button sits in the same column as the ones above it.
+        html += `<span class="line-tools"><span class="line-actions">`;
+      }
       html += `<span class="recon-add-wrap">`;
       html += `<button class="recon-add" data-line="${lineNum}" data-variant="${vi}" title="Add a note, a parallel or a variant">+</button>`;
       html += `<span class="recon-add-menu hidden">`;
       html += `<button class="recon-add-item" data-kind="note" data-line="${lineNum}" data-variant="${vi}"${reading.note != null ? ' disabled' : ''}>Note<em>#note:</em></button>`;
       html += `<button class="recon-add-item" data-kind="parallel" data-line="${lineNum}" data-variant="${vi}">Parallel<em>//</em></button>`;
+      html += `<button class="recon-add-item" data-kind="compose" data-line="${lineNum}" data-variant="${vi}">Compose from witnesses<em>↻</em></button>`;
+      html += `<button class="recon-add-item" data-kind="compose-from" data-line="${lineNum}" data-variant="${vi}">Compose from…<em>⌥</em></button>`;
+      html += `<button class="recon-add-item" data-kind="report" data-line="${lineNum}" data-variant="${vi}">Report on this reading<em>≡</em></button>`;
       html += `<button class="recon-add-item" data-kind="variant" data-line="${lineNum}" data-variant="${vi}">Variant<em>§${lineNum}${variantLetterOf(readings.length)}</em></button>`;
       if (vi > 0) {
         html += `<button class="recon-add-item danger" data-kind="drop-variant" data-line="${lineNum}" data-variant="${vi}">Delete this variant<em>✕</em></button>`;
       }
       html += `</span></span>`;
+      html += `</span>`;   // line-actions
+      html += `</span>`;   // line-tools
       html += `</div>`;
+      // After the header, not inside it. The header is a flex row, so a strip
+      // put in there becomes a column beside the reading and squeezes it —
+      // which is the opposite of standing the lemma under its word.
+      if (!lemmasOn(lineNum) && !positionsOn(lineNum)) {
+        // The published line first, then its lemmas: the order they will be
+        // read in.
+        html += daggerLine(lineNum, vi, reading, daggerPositions(lineNum, vi, reading));
+        html += lemmaStrip(lineNum, vi, reading);
+      }
 
       // The rest of the reconstruction block, in the order eBL fixes: note, then
       // parallels. Both hang off the reading above them.
@@ -1126,7 +1868,15 @@ function renderScore() {
         html += `</div>`;
       }
 
+      // A witness's lines belong together — reading, continuations, its
+      // rulings and parallels — so a dotted rule is drawn where the siglum
+      // changes, never before the first block or after the last.
+      let lastSiglum = null;
       for (const w of witnesses.filter((x) => (x.variant || 0) === vi)) {
+        if (lastSiglum !== null && w.siglum !== lastSiglum) {
+          html += '<div class="witness-rule"></div>';
+        }
+        lastSiglum = w.siglum;
         // A "$" directive assigned to this section: a ruling on the tablet,
         // shown against the witness it belongs to rather than as a reading.
         if (w.type !== 'line') {
@@ -1141,8 +1891,25 @@ function renderScore() {
         }
         const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
         html += `<div class="score-witness${typeClass(w.siglum)}">`;
-        html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
-        html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
+        html += `<span class="witness-siglum">${escapeHtml(ref)}`
+          + witnessMoveControl(lineNum, vi, w, readings.length) + `</span>`;
+        if (lemmasOn(lineNum)) {
+          // A witness word takes its lemma from the reading word it aligns to,
+          // so there is nothing to choose here and nothing to show but the text.
+          html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
+        } else if (positionsOn(lineNum)) {
+          const tally = alignmentTally(lineNum, w, positionWords(reading.text));
+          html += `<span class="witness-text is-positions">${renderPositionWitness(lineNum, vi, w)}</span>`;
+          const bits = [];
+          if (tally.omitted.length) bits.push(`omits ${positionRun(tally.omitted)}`);
+          if (tally.illegible.length) bits.push(`lost ${positionRun(tally.illegible)}`);
+          if (tally.differing.length) bits.push(`reads otherwise at ${positionRun(tally.differing)}`);
+          if (tally.duplicated.length) bits.push(`two words at ${tally.duplicated.join(',')}`);
+          if (tally.extra) bits.push(`${tally.extra} unplaced`);
+          html += `<span class="pos-tally">${bits.length ? escapeHtml(bits.join(" · ")) : "✓"}</span>`;
+        } else {
+          html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
+        }
         html += `</div>`;
 
         // Render continuation lines if any
@@ -1151,6 +1918,18 @@ function renderScore() {
             html += `<div class="score-witness continuation${typeClass(w.siglum)}">`;
             html += `<span class="witness-siglum"></span>`;
             html += `<span class="witness-text">${renderAtf(cont)}</span>`;
+            html += `</div>`;
+          }
+        }
+
+        // Notes typed under this witness in its manuscript file. Shown with
+        // the reading, not with the composite: they are remarks on what this
+        // one tablet has.
+        if (w.notes && w.notes.length > 0) {
+          for (const note of w.notes) {
+            html += `<div class="score-witness witness-note${typeClass(w.siglum)}">`;
+            html += `<span class="witness-siglum"></span>`;
+            html += `<span class="witness-text"><span class="witness-note-prefix">#note:</span> ${escapeHtml(note)}</span>`;
             html += `</div>`;
           }
         }
@@ -1176,8 +1955,10 @@ function renderScore() {
   // Add event listeners for translation editing
   scorePanel.querySelectorAll('.translation-text').forEach(el => {
     el.addEventListener('input', (e) => {
+      if (!e.target.isConnected) return;   // a detached row speaks for a stale score
       const lineNum = e.target.dataset.line;
       translationLines[lineNum] = e.target.innerText;
+      refreshSentMark(lineNum);
       markUnsaved();
     });
   });
@@ -1185,6 +1966,7 @@ function renderScore() {
   // Add event listeners for reconstructed text editing
   scorePanel.querySelectorAll('.reconstructed-text').forEach(el => {
     el.addEventListener('input', (e) => {
+      if (!e.target.isConnected) return;   // same reason as blur, below
       const lineNum = e.target.dataset.line;
       const vi = Number(e.target.dataset.variant || 0);
       writeReading(lineNum, vi, e.target.innerText);
@@ -1201,6 +1983,13 @@ function renderScore() {
       e.target.textContent = readReading(e.target.dataset.line, Number(e.target.dataset.variant || 0));
     });
     el.addEventListener('blur', (e) => {
+      // Re-rendering the score detaches this element, and the browser then
+      // fires blur on the orphan. Writing its text back at that point undoes
+      // whatever caused the re-render: composing a reading wrote the new text,
+      // the score repainted, and this handler put the old text straight back
+      // over it. A detached node speaks for a version of the score that no
+      // longer exists, so it does not get to write.
+      if (!e.target.isConnected) return;
       const text = e.target.innerText;
       writeReading(e.target.dataset.line, Number(e.target.dataset.variant || 0), text);
       e.target.innerHTML = renderAtf(text);
@@ -1213,6 +2002,50 @@ function renderScore() {
       e.preventDefault();
       addReconExtra(e.target.dataset.line, Number(e.target.dataset.variant || 0),
                     key === 'n' ? 'note' : 'parallel');
+    });
+  });
+
+  // Typing a position. The colour and the tally are repainted in place rather
+  // than by re-rendering the score: a re-render replaces every input in the
+  // panel, so the element Tab was moving to stops existing mid-keystroke and
+  // the tab order is lost the moment a number is entered.
+  scorePanel.querySelectorAll('.pos-input').forEach((el) => {
+    const commit = () => {
+      const map = alignmentFor(el.dataset.line, el.dataset.key);
+      const raw = el.value.trim();
+      if (raw === '') {
+        delete map[el.dataset.index];
+      } else {
+        const n = parseInt(raw, 10);
+        if (!Number.isFinite(n) || n < 0) { el.value = ''; delete map[el.dataset.index]; }
+        else { map[el.dataset.index] = n; el.value = String(n); }
+      }
+      paintPositionWord(el);
+      refreshPositionTally(el);
+      refreshSentMark(el.dataset.line);
+      markUnsaved();
+      saveScoreDataToFile();
+    };
+    el.addEventListener('change', commit);
+    // Enter commits and steps to the next box, so a row can be typed straight
+    // through. Shift+Enter steps back.
+    el.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      commit();
+      const boxes = [...scorePanel.querySelectorAll('.pos-input')];
+      const next = boxes[boxes.indexOf(el) + (e.shiftKey ? -1 : 1)];
+      if (next) { next.focus(); next.select(); }
+      else el.blur();
+    });
+    el.addEventListener('focus', () => el.select());
+  });
+
+  // Send this omen to eBL: validate the section on its own, then post it.
+  scorePanel.querySelectorAll('.omen-export').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      exportOmen(parseInt(btn.dataset.line, 10));
     });
   });
 
@@ -1232,7 +2065,24 @@ function renderScore() {
       closeReconAddMenus();
       const lineNum = btn.dataset.line;
       const vi = Number(btn.dataset.variant || 0);
-      if (btn.dataset.kind === 'variant') openVariantDialog(lineNum, vi);
+      if (btn.dataset.kind === 'report') {
+        analyseReading(parseInt(lineNum, 10), vi);
+      }
+      else if (btn.dataset.kind === 'compose-from') {
+        const n = parseInt(lineNum, 10);
+        askScope(n, vi).then((scope) => { if (scope) composeOmen(n, vi, scope); });
+      }
+      else if (btn.dataset.kind === 'compose') {
+        const n = parseInt(lineNum, 10);
+        const had = (readReading(lineNum, vi) || '').trim();
+        if (!had) { composeOmen(n, vi); return; }
+        askOverlay('Replace §' + lineNum + variantLetterOf(vi) + '?', [
+          noteBlock('A reading composed from the witnesses will take its place. This is'
+            + ' what is there now:', 'warn'),
+          readingBlock('§' + lineNum + variantLetterOf(vi), had, null),
+        ], 'Compose', true).then((yes) => { if (yes) composeOmen(n, vi); });
+      }
+      else if (btn.dataset.kind === 'variant') openVariantDialog(lineNum, vi);
       else if (btn.dataset.kind === 'drop-variant') dropVariant(lineNum, vi);
       else addReconExtra(lineNum, vi, btn.dataset.kind);
     });
@@ -1242,11 +2092,16 @@ function renderScore() {
   // row rather than text to retype, so it cannot be mistyped or lost.
   scorePanel.querySelectorAll('.recon-extra-text').forEach(el => {
     el.addEventListener('input', (e) => {
+      if (!e.target.isConnected) return;
       writeReconExtra(e.target, e.target.innerText);
       markUnsaved();
     });
-    // Clearing a row and leaving it is how you delete it.
+    // Clearing a row and leaving it is how you delete it. Which makes the
+    // detached case dangerous: a re-render orphans this row, the browser
+    // fires blur on it, innerText reads empty, and the note is deleted by a
+    // node that no longer belongs to the page.
     el.addEventListener('blur', (e) => {
+      if (!e.target.isConnected) return;
       const text = e.target.innerText.trim();
       writeReconExtra(e.target, text);
       if (!text) {
@@ -1263,6 +2118,162 @@ function renderScore() {
 function closeReconAddMenus() {
   document.querySelectorAll('.recon-add-menu').forEach(m => m.classList.add('hidden'));
 }
+// A word of a reading, clicked in Lemmas mode. Delegated, because the score
+// is rebuilt whenever anything changes.
+document.addEventListener('click', (e) => {
+  const el = e.target && e.target.closest ? e.target.closest('.lem-word') : null;
+  if (!el || el.classList.contains('is-divider')) return;
+  if (!lemmasOn(parseInt(el.dataset.line, 10))) return;
+  const lineNum = parseInt(el.dataset.line, 10);
+  const vi = parseInt(el.dataset.variant, 10);
+  const pos = parseInt(el.dataset.pos, 10);
+  if (!Number.isFinite(lineNum) || !Number.isFinite(pos)) return;
+  openLemmaDropdown(el);
+});
+
+// Enter opens the same picker, so the keyboard reaches it too.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const el = document.activeElement;
+  if (!el || !el.classList || !el.classList.contains('lem-word')) return;
+  if (!lemmasOn(parseInt(el.dataset.line, 10))) return;
+  e.preventDefault();
+  openLemmaDropdown(el);
+});
+
+// The per-omen toggles. Positions needs the sign converter and Lemmas needs
+// the dictionary, same as their project-wide counterparts, so each waits for
+// what it needs before turning on.
+async function toggleSection(mode, lineNum, btn) {
+  const set = mode === 'lemmas' ? lemmaSections : positionSections;
+  if (set.has(lineNum)) {
+    set.delete(lineNum);
+    keepScoreInView(renderScore);
+    return;
+  }
+  // The two take the reading over in different ways, so a section shows one or
+  // the other, never both at once.
+  (mode === 'lemmas' ? positionSections : lemmaSections).delete(lineNum);
+  if (btn) btn.disabled = true;
+  try {
+    if (mode === 'lemmas') {
+      await Lemmatizer.load();
+      try { await ensureAtfConverter(); } catch (_) { /* readings stay literal */ }
+    } else await ensureAtfConverter();
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    if (mode === 'lemmas') {
+      showComposeReport('Lemmas', [noteBlock('The dictionary did not load: '
+        + (err && err.message || err), 'bad')]);
+      return;
+    }
+    // Positions still works without it, by comparing the text instead.
+  }
+  if (mode === 'lemmas') {
+    const done = prefillLemmas(lineNum);
+    if (done.filled) await saveScoreDataToFile();
+    if (done.filled || done.blank) {
+      setStatus('connected', '§' + lineNum + ' — ' + done.filled + ' suggested'
+        + (done.blank ? ', ' + done.blank + ' the dictionary could not place' : ''));
+      setTimeout(() => setStatus('connected', 'Ready'), 5000);
+    }
+  }
+  if (btn) btn.disabled = false;
+  set.add(lineNum);
+  keepScoreInView(renderScore);
+}
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.line-mode-btn') : null;
+  if (!btn) return;
+  const lineNum = parseInt(btn.dataset.line, 10);
+  if (!Number.isFinite(lineNum)) return;
+
+  // Shift on the lemma button fills in from this section to the end, which
+  // is how you say "the rest of the chapter" without opening every omen.
+  if (e.shiftKey && btn.dataset.mode === 'lemmas') {
+    btn.disabled = true;
+    try {
+      await Lemmatizer.load();
+      // Two different things, and a section usually needs the second.
+      //
+      // Prefill only fills what is empty — that is what makes it safe to run
+      // again — so on a chapter that has been prefilled once it reports "0
+      // suggested" and changes nothing, while every word filled under an older
+      // version of the dictionary keeps its old answer. Re-asking the
+      // dictionary about its own guesses is a separate step, and this gesture
+      // does both.
+      const done = prefillLemmas({ from: lineNum });
+      if (done.filled) await saveScoreDataToFile();
+      keepScoreInView(renderScore);
+      const stale = refreshSuggestions(lineNum, false).length;
+      if (stale) {
+        await offerRefreshSuggestions(lineNum);
+      } else {
+        setStatus('connected', '§' + lineNum + ' onward — ' + done.filled + ' filled in'
+          + (done.blank ? ', ' + done.blank + ' the dictionary could not place' : '')
+          + ', nothing else to re-ask');
+        setTimeout(() => setStatus('connected', 'Ready'), 6000);
+      }
+    } catch (err) {
+      showComposeReport('Lemmas', [noteBlock('The dictionary did not load: '
+        + (err && err.message || err), 'bad')]);
+    }
+    btn.disabled = false;
+    return;
+  }
+  toggleSection(btn.dataset.mode, lineNum, btn);
+});
+
+// Enter opens the same picker, so the keyboard reaches it too.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const el = document.activeElement;
+  if (!el || !el.classList || !el.classList.contains('lem-word')) return;
+  if (!lemmasOn(parseInt(el.dataset.line, 10))) return;
+  e.preventDefault();
+  openLemmaDropdown(el);
+});
+
+// The per-omen positions button. Needs the sign converter, same as the
+// project-wide one, because a position is only useful once witness words can be
+// matched to it.
+document.addEventListener('click', async (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.line-pos-btn') : null;
+  if (!btn) return;
+  const lineNum = parseInt(btn.dataset.line, 10);
+  if (!Number.isFinite(lineNum)) return;
+  if (positionSections.has(lineNum)) positionSections.delete(lineNum);
+  else {
+    if (!parallelsState.converter) {
+      btn.disabled = true;
+      try { await ensureAtfConverter(); } catch (_) { /* fall back to text comparison */ }
+      btn.disabled = false;
+    }
+    positionSections.add(lineNum);
+  }
+  keepScoreInView(renderScore);
+});
+
+// The project's own dictionary, from the toolbar or from Alt+Shift+D. It needs
+// the general dictionary loaded, because every entry is checked against it
+// before it can be recorded.
+async function showGlossaryManager() {
+  try { await Lemmatizer.load(); } catch (err) {
+    showComposeReport('Dictionary', [noteBlock('The dictionary did not load: '
+      + (err && err.message || err), 'bad')]);
+    return;
+  }
+  openGlossaryManager();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!e.altKey || !e.shiftKey) return;
+  if (String(e.key).toLowerCase() !== 'd') return;
+  e.preventDefault();
+  showGlossaryManager();
+});
+
 document.addEventListener('click', closeReconAddMenus);
 
 // Reading 0 lives in the primary maps, readings 1..n in variantLines. These
@@ -1279,6 +2290,17 @@ function readReading(lineNum, vi) {
 }
 
 function writeReading(lineNum, vi, text) {
+  // Whatever this changes, the section no longer matches what was sent.
+  if (typeof refreshSentMark === 'function') refreshSentMark(lineNum);
+  // A contenteditable hands back a non-breaking space where the user typed an
+  // ordinary one, and it is indistinguishable on screen. eBL's parser refuses
+  // the line for it, pointing at a column that looks like a plain space — so it
+  // is cleaned here, at the one place a reading is written.
+  // The ‡ is eBL's, derived from the alignment. It is shown on its own row
+  // and never belongs in the reading — but if one ever finds its way into the
+  // editable span, it stops here rather than in an export.
+  text = String(text == null ? '' : text).replace(/‡/g, '');
+  if (window.EblAtf && EblAtf.normaliseAtfText) text = EblAtf.normaliseAtfText(text);
   const slot = variantSlot(lineNum, vi);
   if (slot) slot.text = text;
   else reconstructedLines[lineNum] = text;
@@ -1429,6 +2451,152 @@ async function assignWitnessesToVariant(witnesses, lineNum, variantIndex) {
   return touched;
 }
 
+// Move one witness between the readings of its section.
+//
+// A variant is made from the witnesses that attest it, and that judgement gets
+// revised: a tablet put in §11b turns out to belong with the main reading, or a
+// witness left behind belongs with the variant after all. Until now the only
+// way back was deleting the whole variant, which threw away the reading and
+// every other witness with it.
+//
+// The move is a rewrite of the § marker in the manuscript file — the file stays
+// the single source of truth for what attests what — so it survives a reload
+// and shows up in the .txt where an editor can see it.
+// The whole witness moves, not the line that was dragged.
+//
+// A manuscript often contributes several lines to one section — K.398 has three
+// under §12 — and they are one witness to one reading. Moving them one at a
+// time is both tedious and a way to leave a manuscript half in one variant and
+// half in another by accident.
+//
+// Lines of the same manuscript that sit in a DIFFERENT variant are left where
+// they are: that is a split someone made on purpose, and this should not undo
+// it silently.
+function witnessLinesToMove(lineNum, w) {
+  const { scoreLines } = buildScore();
+  const from = w.variant || 0;
+  return (scoreLines[lineNum] || []).filter((x) =>
+    x.type === 'line' && x.siglum === w.siglum && (x.variant || 0) === from);
+}
+
+async function moveWitnessTo(lineNum, w, targetVi) {
+  const readings = variantsFor(lineNum);
+  if (targetVi < 0 || targetVi >= readings.length) return;
+  if ((w.variant || 0) === targetVi) return;
+
+  const group = witnessLinesToMove(lineNum, w);
+  if (!group.length) return;
+
+  const touched = await assignWitnessesToVariant(group, lineNum, targetVi);
+  if (!touched.length) {
+    showComposeReport('§' + lineNum + ' — not moved', [
+      noteBlock('The § marker for ' + displaySiglum(w.siglum)
+        + ' could not be rewritten in the manuscript file. Nothing was changed.', 'bad'),
+    ]);
+    return;
+  }
+  keepScoreInView(renderScore);
+  const what = group.length === 1
+    ? displaySiglum(w.siglum) + ' ' + w.sourceLine
+    : displaySiglum(w.siglum) + ' (' + group.length + ' lines: '
+      + group.map((x) => x.sourceLine).join(', ') + ')';
+  setStatus('connected', what + ' → §' + lineNum + variantLetterOf(targetVi));
+  setTimeout(() => setStatus('connected', 'Ready'), 5000);
+}
+
+// The handle on a witness row. Only where there is somewhere to move it to.
+//
+// A drag rather than a menu: the first version opened a <select>, and a native
+// select fires blur as its own dropdown opens, so the control removed itself
+// the moment it was clicked. Dragging a row onto a reading says the same thing
+// and says it the way the score already reads — spatially.
+function witnessMoveControl(lineNum, vi, w, readingCount) {
+  if (readingCount < 2) return '';
+  return `<span class="witness-move" draggable="true" data-line="${lineNum}"`
+    + ` data-key="${escapeHtml(w.siglum + '|' + w.sourceLine)}" data-variant="${vi}"`
+    + ` title="Drag onto a reading of § ${lineNum} to move this witness there —`
+    + ` every line this manuscript has under this reading goes with it.`
+    + ` Ctrl-drag the row does the same.">⇅</span>`;
+}
+
+// What is in flight. dataTransfer cannot be read during dragover in most
+// browsers, and the drop targets have to know whether to light up.
+let draggingWitness = null;
+
+function witnessDragPayload(el) {
+  const lineNum = parseInt(el.dataset.line, 10);
+  const key = el.dataset.key;
+  if (!Number.isFinite(lineNum) || !key) return null;
+  return { lineNum, key, from: parseInt(el.dataset.variant, 10) || 0 };
+}
+
+document.addEventListener('dragstart', (e) => {
+  const handle = e.target && e.target.closest ? e.target.closest('.witness-move') : null;
+  const row = e.target && e.target.closest ? e.target.closest('.score-witness') : null;
+  // From the handle always; from the row only with Ctrl held, so an ordinary
+  // drag across a witness still selects its text.
+  const el = handle || ((e.ctrlKey || e.metaKey) && row ? row.querySelector('.witness-move') : null);
+  if (!el) return;
+  const payload = witnessDragPayload(el);
+  if (!payload) return;
+  draggingWitness = payload;
+  try {
+    e.dataTransfer.setData('text/plain', JSON.stringify(payload));
+    e.dataTransfer.effectAllowed = 'move';
+  } catch (_) { /* some browsers refuse; the module variable carries it */ }
+  document.body.classList.add('is-moving-witness');
+  if (row) row.classList.add('is-being-moved');
+});
+
+document.addEventListener('dragend', () => {
+  draggingWitness = null;
+  document.body.classList.remove('is-moving-witness');
+  for (const el of document.querySelectorAll('.is-being-moved, .is-drop-target')) {
+    el.classList.remove('is-being-moved', 'is-drop-target');
+  }
+});
+
+// A reading of the same section is a place to drop; anything else is not.
+function dropTargetFor(node) {
+  if (!draggingWitness || !node || !node.closest) return null;
+  const header = node.closest('.score-line-header');
+  if (!header) return null;
+  const line = header.closest('.score-line[data-line]');
+  if (!line || parseInt(line.dataset.line, 10) !== draggingWitness.lineNum) return null;
+  const headers = [...line.querySelectorAll('.score-line-header')];
+  const vi = headers.indexOf(header);
+  if (vi < 0 || vi === draggingWitness.from) return null;
+  return { header, vi };
+}
+
+document.addEventListener('dragover', (e) => {
+  const target = dropTargetFor(e.target);
+  if (!target) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  if (!target.header.classList.contains('is-drop-target')) {
+    for (const el of document.querySelectorAll('.is-drop-target')) el.classList.remove('is-drop-target');
+    target.header.classList.add('is-drop-target');
+  }
+});
+
+document.addEventListener('drop', (e) => {
+  const target = dropTargetFor(e.target);
+  if (!target) return;
+  e.preventDefault();
+  const job = draggingWitness;
+  draggingWitness = null;
+  document.body.classList.remove('is-moving-witness');
+  target.header.classList.remove('is-drop-target');
+  if (!job) return;
+
+  const { scoreLines } = buildScore();
+  const w = (scoreLines[job.lineNum] || []).find(
+    (x) => x.type === 'line' && (x.siglum + '|' + x.sourceLine) === job.key);
+  if (!w) return;
+  moveWitnessTo(job.lineNum, w, target.vi);
+});
+
 async function createVariant(lineNum, text, witnesses) {
   if (!Array.isArray(variantLines[lineNum])) variantLines[lineNum] = [];
   variantLines[lineNum].push({ text, parallels: [] });
@@ -1447,7 +2615,21 @@ async function createVariant(lineNum, text, witnesses) {
 // Drop a variant and return its witnesses to the main reading.
 async function dropVariant(lineNum, vi) {
   const list = variantLines[lineNum];
-  if (!Array.isArray(list) || vi < 1 || vi > list.length) return;
+  // Returning here without a word is why this could look like a dead button.
+  // If the menu offered the delete, the variant is supposed to exist; when it
+  // does not, the state and the score have parted company and that is worth
+  // saying out loud.
+  if (!Array.isArray(list) || vi < 1 || vi > list.length) {
+    const have = Array.isArray(list) ? list.length : 0;
+    if (typeof showComposeReport === 'function') {
+      showComposeReport('§' + lineNum + variantLetterOf(vi) + ' could not be deleted', [
+        noteBlock('The score offers this variant but the project data has ' + have
+          + ' variant(s) on §' + lineNum + '. Reload the project to bring the two'
+          + ' back into step — nothing was changed.', 'bad'),
+      ]);
+    }
+    return;
+  }
   const reading = list[vi - 1];
   const preview = (reading && reading.text ? reading.text : '(empty)').slice(0, 60);
   if (!confirm(`Delete variant §${lineNum}${variantLetterOf(vi)}?\n\n${preview}\n\nIts witnesses go back to the main reading.`)) return;
@@ -1455,7 +2637,21 @@ async function dropVariant(lineNum, vi) {
   const { scoreLines } = buildScore();
   const attached = (scoreLines[lineNum] || [])
     .filter((w) => w.type === 'line' && (w.variant || 0) === vi);
-  await assignWitnessesToVariant(attached, lineNum, 0);
+  // Its witnesses go back to the main reading first. If that write fails the
+  // variant must stay: dropping it would leave them pointing at a reading
+  // that no longer exists, and the failure would look like nothing happening.
+  try {
+    await assignWitnessesToVariant(attached, lineNum, 0);
+  } catch (err) {
+    if (typeof showComposeReport === 'function') {
+      showComposeReport('§' + lineNum + variantLetterOf(vi) + ' was not deleted', [
+        noteBlock('Its witnesses could not be moved back to the main reading, so'
+          + ' nothing was changed.', 'bad'),
+        noteBlock(String(err && err.message || err)),
+      ]);
+    }
+    return;
+  }
 
   list.splice(vi - 1, 1);
   if (!list.length) delete variantLines[lineNum];
@@ -1824,10 +3020,41 @@ function ensureAtfConverter() {
     atfConverterPromise = loadSignIndex().then((index) => {
       parallelsState.signIndex = index;
       parallelsState.converter = EblAtfSigns.create(index);
+      // The lemma lookup borrows it rather than loading the index again:
+      // a reading it cannot place may be another name for a sign the
+      // dictionary does know.
+      if (window.Lemmatizer) {
+        Lemmatizer.setSignLookup((reading) => {
+          const hit = parallelsState.converter.lookup(reading);
+          return hit && hit.name;
+        });
+        // And the other readings of that same sign, so a word written with U₄
+        // can still find the entry eBL keyed under UD.
+        Lemmatizer.setSignReadings(siblingReadings(index));
+      }
       return parallelsState.converter;
     });
   }
   return atfConverterPromise;
+}
+
+// reading -> the other readings of the same sign, built once from the table
+// already in memory. UD and U₄ are one sign; so are ŠU₂ and ŠÚ.
+function siblingReadings(index) {
+  let bySign = null;
+  const readings = (index && index.readings) || {};
+  return (reading) => {
+    if (!bySign) {
+      bySign = Object.create(null);
+      for (const r of Object.keys(readings)) {
+        const sign = readings[r];
+        if (!sign) continue;
+        (bySign[sign] || (bySign[sign] = [])).push(r);
+      }
+    }
+    const sign = readings[String(reading || '').toLowerCase()];
+    return sign ? bySign[sign] : null;
+  };
 }
 
 // The sign table is 800 KB and only this feature needs it, so it is fetched on
@@ -2456,9 +3683,13 @@ function closeTabletView(museum) {
 }
 
 function renderTabletTabs() {
-  const bar = document.querySelector('.pane-tabs');
+  // Their own row under the fixed tabs. A tablet opened from Parallels is
+  // transient, and putting it in the row above shifts Score, Colophons and
+  // the rest sideways every time one opens or closes.
+  const bar = document.getElementById('tablet-tabs');
   if (!bar) return;
-  bar.querySelectorAll('.pane-tab-tablet').forEach((b) => b.remove());
+  bar.innerHTML = '';
+  bar.classList.toggle('hidden', openTablets.size === 0);
   for (const museum of openTablets.keys()) {
     const btn = document.createElement('button');
     btn.className = 'pane-tab pane-tab-tablet' + (museum === activeTablet ? ' active' : '');
@@ -3488,6 +4719,11 @@ function setupTabs() {
       if (targetTab === 'paradigms') {
         renderParadigmsTab();
       }
+      if (targetTab === 'stats') {
+        // Measured once and kept: switching away and back should not spend
+        // the time again. "Measure again" is there for after an edit.
+        renderStatsTab(false);
+      }
       updateUploadButtonVisibility();
     });
   });
@@ -3509,10 +4745,14 @@ function abbreviateSurface(surface) {
 }
 
 // Escape HTML to prevent XSS
+// textContent -> innerHTML escapes & < > but NOT quotes, which is fine in text
+// and wrong in an attribute: a value containing a quote closes the attribute
+// early and the rest of it becomes garbage markup. That is how the split
+// button's data-keys="[\"K.2246|1\"]" arrived as "[" and the button died.
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Save editor content to current manuscript (in memory)
@@ -3578,6 +4818,58 @@ async function saveAll() {
   }
 }
 
+// ---- eBL token pill in the main header ---------------------------------
+// The same reading as the pill inside Recon view, but visible without opening
+// it: a token that has silently expired is the difference between an export
+// and a wasted click. It only reports — the token itself is pasted in
+// Settings, which is where it stays.
+//
+// A token is short-lived (eBL issues 24h ones), so this is re-read whenever
+// the window regains focus rather than only at load.
+const eblTokenPill = document.getElementById('ebl-token-pill');
+const eblTokenPillText = document.getElementById('ebl-token-pill-text');
+
+function updateEblTokenPill() {
+  if (!eblTokenPill || !window.EblClient) return;
+  const s = EblClient.tokenStatus();
+  let cls = 'bad';
+  let text = 'Not connected';
+  let title = 'No eBL token — paste one in Settings';
+  if (s.hasToken && !s.invalid && !s.expired) {
+    if (s.hasWriteTexts) {
+      cls = 'ok';
+      text = 'eBL connected';
+      title = 'Token valid, write:texts granted';
+    } else {
+      cls = 'warn';
+      text = 'No write:texts';
+      title = 'Token valid but cannot write to the corpus';
+    }
+    // An hour out from expiry, say so — long enough to finish and re-paste.
+    if (s.expiresInSec != null && s.expiresInSec < 3600) {
+      cls = 'warn';
+      const mins = Math.max(1, Math.round(s.expiresInSec / 60));
+      text = `Token expires in ${mins} min`;
+      title = 'Refresh the token in Settings before exporting';
+    }
+  } else if (s.hasToken && s.expired) {
+    text = 'Token expired';
+    title = 'Paste a fresh token in Settings';
+  } else if (s.hasToken && s.invalid) {
+    text = 'Invalid token';
+    title = 'The stored value is not a readable JWT';
+  }
+  eblTokenPill.classList.remove('ok', 'warn', 'bad');
+  eblTokenPill.classList.add(cls);
+  eblTokenPillText.textContent = text;
+  eblTokenPill.title = title;
+}
+
+updateEblTokenPill();
+// Settings opens in its own window, so returning here is the moment a newly
+// pasted token becomes visible.
+window.addEventListener('focus', updateEblTokenPill);
+
 // Project settings open in their own window, so the score stays put. The id
 // travels in the URL: session storage is per-tab and a new window does not
 // reliably inherit it.
@@ -3635,7 +4927,13 @@ async function saveScoreDataToFile() {
   const hasNotes = Object.keys(noteLines).length > 0;
   const hasParallels = Object.keys(parallelLines).length > 0;
   const hasVariants = Object.keys(variantLines).length > 0;
-  if (!hasReconstructed && !hasTranslations && !hasNotes && !hasParallels && !hasVariants) return;
+  const hasAlignments = Object.keys(lineAlignments).length > 0;
+  const hasLemmas = Object.keys(lemmaChoices).length > 0;
+  const hasExports = Object.keys(exportedSections).length > 0;
+  const hasGlossary = Object.keys(projectGlossary).length > 0;
+  if (!hasReconstructed && !hasTranslations && !hasNotes && !hasParallels
+      && !hasVariants && !hasAlignments && !hasLemmas && !hasExports
+      && !hasGlossary) return;
 
   try {
     const data = {
@@ -3644,6 +4942,10 @@ async function saveScoreDataToFile() {
       notes: noteLines,
       parallels: parallelLines,
       variants: variantLines,
+      alignments: lineAlignments,
+      lemmas: lemmaChoices,
+      glossary: projectGlossary,
+      exported: exportedSections,
       savedAt: new Date().toISOString()
     };
     await FileSystem.writeScoreData(dirHandle, data);
@@ -3672,6 +4974,14 @@ async function loadScoreData() {
       if (data.notes) Object.assign(noteLines, data.notes);
       if (data.parallels) Object.assign(parallelLines, data.parallels);
       if (data.variants) Object.assign(variantLines, data.variants);
+      if (data.alignments) Object.assign(lineAlignments, data.alignments);
+      if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
+      if (data.exported) Object.assign(exportedSections, data.exported);
+      if (data.glossary) {
+        projectGlossary = data.glossary;
+        applyProjectGlossary();
+      }
+      migrateSentMarks();
       console.log('Loaded score-data.json');
     }
   } catch (err) {
@@ -4665,10 +5975,21 @@ function setupSearchAll() {
     // Replace is off while the apparatus is ignored. A match found in the
     // stripped text spans the brackets that were dropped inside it, so writing
     // over it would leave an unbalanced brace or bracket in the source.
-    const canReplace = hasQuery && hasResults && !stripping() && !signsCheckbox.checked
-      && scopeSelect.value !== 'composite';
+    const canReplace = hasQuery && hasResults && !stripping() && !signsCheckbox.checked;
     replaceBtn.disabled = !canReplace || selectedResultIndex < 0;
     replaceAllBtn.disabled = !canReplace;
+    // A disabled button that will not say why is worse than no button.
+    const why = !hasQuery ? 'Type something to search for first.'
+      : !hasResults ? 'Nothing matches, so there is nothing to replace.'
+      : stripping() ? 'Replace is off while the apparatus is ignored: a match found in'
+          + ' the stripped text spans brackets that were dropped inside it, and writing'
+          + ' over it would leave them unbalanced.'
+      : signsCheckbox.checked ? 'Replace is off while matching by signs: a run of sign'
+          + ' codes does not say which spelling to write back.'
+      : '';
+    replaceAllBtn.title = why || 'Replace every match';
+    replaceBtn.title = why || (selectedResultIndex < 0
+      ? 'Pick a result from the list first' : 'Replace the selected match');
   }
 
   searchInput.addEventListener('input', updateReplaceButtons);
@@ -4853,6 +6174,67 @@ function setupSearchAll() {
 
   // Replace the selected match. Addressed by offset rather than by line, so a
   // pattern that spans lines is replaced the same as one that does not.
+  // Where an offset in the composite search document lands.
+  //
+  // The document is built for searching, one "§N reading" per line, and does
+  // not exist anywhere else — so a hit in it has to be carried back to the
+  // reading it came from before anything can be written.
+  //
+  // Returns null for a match that starts inside the "§N " marker or runs past
+  // the end of its line: neither can be written back without damaging a line
+  // number or spilling one reading into the next.
+  function compositeSpot(doc, starts, match) {
+    const li = lineIndexOf(starts, match.start);
+    const lineStart = starts[li];
+    const lineEnd = starts[li + 1] !== undefined ? starts[li + 1] - 1 : doc.length;
+    if (match.end > lineEnd) return null;
+    const head = /^§(\d+)([a-z]?)\s/.exec(doc.slice(lineStart, lineEnd));
+    if (!head) return null;
+    const from = lineStart + head[0].length;
+    if (match.start < from) return null;
+    return {
+      lineNum: parseInt(head[1], 10),
+      vi: variantIndexOf(head[2]),
+      start: match.start - from,
+      end: match.end - from,
+    };
+  }
+
+  // Replace inside the composite. The readings live in the score, not in a
+  // file, so this writes through writeReading and saves the score data rather
+  // than a manuscript.
+  function replaceInComposite(matches, replacement, doc) {
+    const starts = lineStartsOf(doc);
+    const byReading = new Map();
+    let skipped = 0;
+    for (const mt of matches) {
+      const spot = compositeSpot(doc, starts, mt);
+      if (!spot) { skipped++; continue; }
+      const key = spot.lineNum + '|' + spot.vi;
+      if (!byReading.has(key)) byReading.set(key, { lineNum: spot.lineNum, vi: spot.vi, hits: [] });
+      byReading.get(key).hits.push({ spot, m: mt.m });
+    }
+
+    let replaced = 0;
+    for (const entry of byReading.values()) {
+      const reading = variantsFor(entry.lineNum)[entry.vi];
+      if (!reading) { skipped += entry.hits.length; continue; }
+      const before = reading.text || '';
+      let text = before;
+      // Back to front, so the offsets ahead of each splice stay valid.
+      entry.hits.sort((a, b) => a.spot.start - b.spot.start);
+      for (let i = entry.hits.length - 1; i >= 0; i--) {
+        const h = entry.hits[i];
+        text = text.slice(0, h.spot.start)
+          + expandReplacement(replacement, h.m, h.spot.start, before)
+          + text.slice(h.spot.end);
+        replaced++;
+      }
+      if (text !== before) writeReading(entry.lineNum, entry.vi, text);
+    }
+    return { replaced, skipped };
+  }
+
   replaceBtn.addEventListener('click', () => {
     if (selectedResultIndex < 0 || currentResults.length === 0) return;
 
@@ -4860,6 +6242,13 @@ function setupSearchAll() {
     for (const group of currentResults) {
       for (const match of group.matches) {
         if (flatIndex === selectedResultIndex) {
+          if (group.id === '__composite__') {
+            const done = replaceInComposite([match], replaceInput.value, group.content
+              || compositeSearchDoc());
+            if (done.replaced) { saveScoreDataToFile(); renderScore(); }
+            performSearch(selectedResultIndex);
+            return;
+          }
           saveUndoState([group.id], `Replace in ${group.id}`);
 
           const ms = manuscripts[group.id];
@@ -4890,13 +6279,25 @@ function setupSearchAll() {
     const replacement = replaceInput.value;
     const query = searchInput.value;
 
-    // Save undo state for all affected manuscripts
-    const affectedIds = currentResults.map((g) => g.id);
+    // Save undo state for all affected manuscripts. The composite is not one
+    // of them: its readings live in the score, and the undo stack holds
+    // manuscript files.
+    const affectedIds = currentResults.map((g) => g.id)
+      .filter((id) => id !== '__composite__');
     saveUndoState(affectedIds, `Replace all: "${query}" → "${replacement}"`);
 
     let totalReplaced = 0;
 
+    let compositeSkipped = 0;
     for (const group of currentResults) {
+      if (group.id === '__composite__') {
+        const done = replaceInComposite(group.matches, replacement,
+          group.content || compositeSearchDoc());
+        totalReplaced += done.replaced;
+        compositeSkipped += done.skipped;
+        if (done.replaced) saveScoreDataToFile();
+        continue;
+      }
       const ms = manuscripts[group.id];
       const before = ms.content;
       // Spliced from the listed matches rather than by re-running the regex,
@@ -4925,7 +6326,17 @@ function setupSearchAll() {
     renderScore();
     performSearch(); // Refresh results
 
-    alert(`Replaced ${totalReplaced} occurrence(s)`);
+    showComposeReport('Replace', [
+      '<div class="report-outcome ' + (totalReplaced ? 'is-changed' : 'is-kept') + '">'
+        + '<strong>' + escapeHtml(totalReplaced
+            ? totalReplaced + ' occurrence' + (totalReplaced === 1 ? '' : 's') + ' replaced'
+            : 'Nothing was replaced') + '</strong>'
+        + '<span>' + escapeHtml('"' + query + '" → "' + replacement + '"') + '</span>'
+        + '</div>',
+      compositeSkipped ? noteBlock(compositeSkipped + ' match(es) in the composite were'
+        + ' left alone: they start inside a § marker or run past the end of a reading,'
+        + ' and writing those back would damage a line number.', 'warn') : '',
+    ], 'replace');
   });
 
   // preserveIndex holds the selection across a replace. Without it the
@@ -5111,6 +6522,10 @@ function setupSearchAll() {
         results.push({
           id,
           siglum: ms.siglum,
+          // Kept because the composite document is built for the search and
+          // exists nowhere else. A replace has to map its offsets back against
+          // the very text they were found in, not a document rebuilt later.
+          content,
           matches
         });
       }
@@ -5299,7 +6714,7 @@ function exportScore() {
   URL.revokeObjectURL(url);
 }
 
-exportBtn.addEventListener('click', exportScore);
+// exportBtn opens the two-item menu; see the export wiring further down.
 saveBtn.addEventListener('click', saveAll);
 
 // ===========================================
@@ -6747,11 +8162,23 @@ async function pollForChanges() {
         Object.keys(noteLines).forEach(k => delete noteLines[k]);
         Object.keys(parallelLines).forEach(k => delete parallelLines[k]);
         Object.keys(variantLines).forEach(k => delete variantLines[k]);
+        // Cleared like the rest, or a reload leaves stale alignments behind.
+        Object.keys(lineAlignments).forEach(k => delete lineAlignments[k]);
+        Object.keys(lemmaChoices).forEach(k => delete lemmaChoices[k]);
+        Object.keys(exportedSections).forEach(k => delete exportedSections[k]);
         if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
         if (data.translations) Object.assign(translationLines, data.translations);
         if (data.notes) Object.assign(noteLines, data.notes);
         if (data.parallels) Object.assign(parallelLines, data.parallels);
         if (data.variants) Object.assign(variantLines, data.variants);
+      if (data.alignments) Object.assign(lineAlignments, data.alignments);
+      if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
+      if (data.exported) Object.assign(exportedSections, data.exported);
+      if (data.glossary) {
+        projectGlossary = data.glossary;
+        applyProjectGlossary();
+      }
+      migrateSentMarks();
         renderScore();
         hasChanges = true;
       }
@@ -6960,11 +8387,23 @@ try {
         Object.keys(noteLines).forEach(k => delete noteLines[k]);
         Object.keys(parallelLines).forEach(k => delete parallelLines[k]);
         Object.keys(variantLines).forEach(k => delete variantLines[k]);
+        // Cleared like the rest, or a reload leaves stale alignments behind.
+        Object.keys(lineAlignments).forEach(k => delete lineAlignments[k]);
+        Object.keys(lemmaChoices).forEach(k => delete lemmaChoices[k]);
+        Object.keys(exportedSections).forEach(k => delete exportedSections[k]);
         if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
         if (data.translations) Object.assign(translationLines, data.translations);
         if (data.notes) Object.assign(noteLines, data.notes);
         if (data.parallels) Object.assign(parallelLines, data.parallels);
         if (data.variants) Object.assign(variantLines, data.variants);
+      if (data.alignments) Object.assign(lineAlignments, data.alignments);
+      if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
+      if (data.exported) Object.assign(exportedSections, data.exported);
+      if (data.glossary) {
+        projectGlossary = data.glossary;
+        applyProjectGlossary();
+      }
+      migrateSentMarks();
         renderScore();
       }
     } else if (msg.type === 'annotations-saved' && msg.projectId === projectId) {
@@ -7033,6 +8472,9 @@ async function init() {
   const settingsBtn = document.getElementById('settings-btn');
   if (settingsBtn) settingsBtn.addEventListener('click', openProjectSettings);
 
+  const glossaryBtn = document.getElementById('glossary-btn');
+  if (glossaryBtn) glossaryBtn.addEventListener('click', showGlossaryManager);
+
   // Setup siglum toggle
   setupSiglaToggle();
   setupEblPull();
@@ -7067,26 +8509,13 @@ async function init() {
 init();
 
 // ===========================================
-// RECONSTRUCTED VIEW + EXPORT TO eBL
+// EXPORT TO eBL
 // ===========================================
 //
-// Opens a full-screen Ace editor containing the eBL ATF artifact compiled
-// from the current score + manuscripts.json metadata. Witness edits in this
-// view sync back to the underlying manuscript .txt files on close.
-// Export sends the artifact to the eBL corpus chapter configured under
-// projectConfig.ebl.target.
-
-const reconView = document.getElementById('recon-view');
-const reconAceEl = document.getElementById('recon-ace');
-const reconStatusEl = document.getElementById('recon-status');
-const reconViewBtn = document.getElementById('recon-view-btn');
-const reconCloseBtn = document.getElementById('recon-close-btn');
-const reconRefreshBtn = document.getElementById('recon-refresh-btn');
-const reconExportBtn = document.getElementById('recon-export-btn');
-const reconValidateBtn = document.getElementById('recon-validate-btn');
-const reconTokenPill = document.getElementById('recon-token-pill');
-const reconTokenText = document.getElementById('recon-token-text');
-const reconSubtitle = document.getElementById('recon-view-subtitle');
+// Compiles the eBL ATF artifact from the current score + manuscripts.json,
+// shows it read-only, and sends it to the corpus chapter configured under
+// projectConfig.ebl.target — either the whole chapter, or one section at a
+// time through POST /lines.
 
 const exportModal = document.getElementById('export-modal');
 const exportCloseBtn = document.getElementById('export-close-btn');
@@ -7106,10 +8535,6 @@ const exportOptSaveAtfEl = document.getElementById('export-opt-save-atf');
 // What the target chapter holds right now, from the preflight GET. null until
 // it resolves; { error } when the chapter could not be read.
 let exportPreflight = null;
-
-let reconAceEditor = null;
-let reconLineMap = null;        // [{ row, kind, lineNum, ... }] from EblAtf.buildChapterAtf
-let reconOriginalAtf = '';      // The ATF as last compiled (used by diffArtifact)
 
 // Runtime capability flags — detected at startup.
 // - desktop mode: bundled validator available via /api/validate-atf
@@ -7135,12 +8560,14 @@ async function probeRuntimeCapabilities() {
 }
 
 function applyRuntimeCapabilities() {
-  // Hide the Validate button when no local validator is reachable. The button
-  // is rebuilt fresh whenever Recon view opens; we set display directly so
-  // it survives across opens until the next probe.
-  const btn = document.getElementById('recon-validate-btn');
-  if (btn) {
-    btn.style.display = localValidatorAvailable ? '' : 'none';
+  // Without a local validator, "Validate only" cannot actually check
+  // anything — eBL is then the only judge. Say that on the mode rather than
+  // leaving it looking like a check that passed.
+  const hint = document.getElementById('export-validate-hint');
+  if (hint) {
+    hint.textContent = localValidatorAvailable
+      ? 'Check the ATF against the eBL grammar. Nothing is sent to eBL.'
+      : 'No local validator here, so nothing can be checked — eBL validates on send.';
   }
 }
 
@@ -7148,216 +8575,67 @@ function applyRuntimeCapabilities() {
 // Recon view in any realistic scenario.
 probeRuntimeCapabilities();
 
-// ---- Open / close ----
+// ---- The export artifact -------------------------------------------------
+//
+// The chapter ATF, compiled from the score on demand.
+//
+// This used to be a full-screen Ace editor whose text could be hand-edited,
+// with the edits diffed back into the score and the manuscript .txt files. That
+// round trip is gone. The score is the only place text is written now, and this
+// is a read-only rendering of it — one direction, so the two cannot disagree.
 
-async function openReconView() {
-  if (!window.EblAtf || !window.EblClient) {
-    alert('eBL client not loaded. Reload the page.');
-    return;
-  }
-  reconView.classList.remove('hidden');
-  await refreshReconArtifact();
-  initReconAce();
-  updateReconTokenPill();
-  document.body.style.overflow = 'hidden';
-}
+let exportArtifactAtf = '';   // the ATF as last compiled, ready to send
 
-async function closeReconView() {
-  // Sync any edits back before hiding
-  await syncReconEditsBack();
-  reconView.classList.add('hidden');
-  document.body.style.overflow = '';
-}
-
-// ---- Compile artifact from current score ----
-
-async function refreshReconArtifact() {
-  // Build scoreLines via existing buildScore()
+// The whole chapter, or one section when lineNum is given. Building a section
+// on its own is what the omen icons and "Update one line" validate and send,
+// and it means an ATF error in §37 cannot block a fix to §1.
+async function buildExportArtifact(lineNum) {
   const { scoreLines } = buildScore();
   if (!manuscriptsMeta) {
     manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
   }
-  // Reconcile manuscripts.json against current manuscript list so newly
-  // added files show up with default rows
-  const filesOnDisk = Object.values(manuscripts).map((m) => m.siglum + '.txt');
+  // Newly added files show up with default rows rather than vanishing.
+  // index.json holds sigla with the extension in some projects and without it in
+  // others, so a siglum may already end in .txt — appending regardless produced
+  // "K.2246.txt.txt" and an entry matching no file.
+  const withTxt = (s) => (/\.txt$/.test(s) ? s : s + '.txt');
+  const filesOnDisk = Object.values(manuscripts).map((m) => withTxt(m.siglum));
   manuscriptsMeta = EblClient.reconcileManuscripts(manuscriptsMeta, filesOnDisk);
 
-  const eblSiglumByFile = await EblAtf.buildEblSiglumMap(manuscriptsMeta, EblClient);
+  const only = (map) => (lineNum == null
+    ? (map || {})
+    : (map && map[lineNum] !== undefined ? { [lineNum]: map[lineNum] } : {}));
+
   const result = await EblAtf.buildChapterAtf({
-    scoreLines,
-    reconstructedLines,
-    translationLines,
-    noteLines,
-    parallelLines,
-    variantLines,
+    scoreLines: only(scoreLines),
+    reconstructedLines: only(reconstructedLines),
+    translationLines: only(translationLines),
+    noteLines: only(noteLines),
+    parallelLines: only(parallelLines),
+    variantLines: only(variantLines),
     manuscriptsMeta,
-    eblSiglumByFile,
+    eblSiglumByFile: await EblAtf.buildEblSiglumMap(manuscriptsMeta, EblClient),
   });
-
-  reconOriginalAtf = result.atf;
-  reconLineMap = result.lineMap;
-
-  const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
-  const modeLabel = localValidatorAvailable
-    ? '(local validation available)'
-    : '(browser mode — eBL server validates on export)';
-  reconSubtitle.textContent = target
-    ? `→ ${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name} · ${Object.keys(scoreLines).length} chapter lines · ${manuscriptsMeta.manuscripts.length} manuscripts · ${modeLabel}`
-    : `No eBL target configured. Set one in Manage. ${modeLabel}`;
-
-  if (reconAceEditor) {
-    reconAceEditor.setValue(reconOriginalAtf, -1);
-    reconAceEditor.session.clearAnnotations();
-    hideReconStatus();
-  }
+  return EblAtf.stripFormatting(result.atf);
 }
 
-function initReconAce() {
-  if (reconAceEditor) {
-    reconAceEditor.resize(true);
-    return;
+// Paint the preview pane, marking any rows the validator rejected. Line
+// numbers come back 1-based and address the stripped text, which is exactly
+// what is shown here, so they index straight in.
+function renderExportPreview(atf, errors) {
+  const pre = document.getElementById('export-preview');
+  const count = document.getElementById('export-preview-count');
+  if (!pre) return;
+  const rows = String(atf || '').split('\n');
+  const bad = new Set((errors || []).map((e) => e.line).filter((n) => n != null));
+  pre.innerHTML = rows.map((row, i) => {
+    const html = escapeHtml(row) || '&nbsp;';
+    return bad.has(i + 1) ? `<span class="preview-error">${html}</span>` : html;
+  }).join('\n');
+  if (count) {
+    const n = countArtifactLines();
+    count.textContent = `· ${n} chapter line${n === 1 ? '' : 's'}, ${rows.length} rows`;
   }
-  reconAceEditor = ace.edit('recon-ace');
-  const dark = document.body.classList.contains('dark-mode');
-  reconAceEditor.setTheme(dark ? 'ace/theme/tomorrow_night' : 'ace/theme/chrome');
-  reconAceEditor.session.setMode('ace/mode/cuneiform_score');
-  reconAceEditor.setOptions({
-    fontSize: '14px',
-    fontFamily: '"Consolas", "Monaco", monospace',
-    showPrintMargin: false,
-    showGutter: true,
-    wrap: true,
-    tabSize: 2,
-    useSoftTabs: true,
-  });
-  reconAceEditor.setValue(reconOriginalAtf, -1);
-  markUnmatchedBrackets(reconAceEditor);
-  reconAceEditor.session.on('change', () => markUnmatchedBrackets(reconAceEditor));
-}
-
-// ---- Sync witness edits back to manuscript files ----
-
-async function syncReconEditsBack() {
-  if (!reconAceEditor || !reconLineMap) return;
-  const edited = reconAceEditor.getValue();
-  if (edited === reconOriginalAtf) return;
-
-  const diff = EblAtf.diffArtifact(reconLineMap, reconOriginalAtf, edited);
-  const reconEdits = diff.reconstructionEdits;
-  const translationEdits = diff.translationEdits;
-  const noteEdits = diff.noteEdits;
-  const parallelEdits = diff.parallelEdits;
-  const witnessEdits = diff.witnessEdits;
-
-  // Apply reconstruction, translation, note and parallel edits to in-memory
-  // state + score-data.json. Emptying a row drops that piece; the next build
-  // simply omits it.
-  // Reading 0 lives in the primary maps, the rest in variantLines.
-  const readingSlot = (lineNum, variantIndex) => {
-    if (!variantIndex) return null;
-    const list = variantLines[lineNum];
-    return Array.isArray(list) ? list[variantIndex - 1] : null;
-  };
-
-  for (const e of reconEdits) {
-    const slot = readingSlot(e.lineNum, e.variantIndex);
-    if (slot) slot.text = e.newContent;
-    else reconstructedLines[e.lineNum] = e.newContent;
-  }
-  for (const e of translationEdits) {
-    translationLines[e.lineNum] = e.newContent;
-  }
-  for (const e of noteEdits) {
-    const slot = readingSlot(e.lineNum, e.variantIndex);
-    if (slot) slot.note = e.newContent;
-    else noteLines[e.lineNum] = e.newContent;
-  }
-  for (const e of parallelEdits) {
-    const slot = readingSlot(e.lineNum, e.variantIndex);
-    const list = slot ? slot.parallels : parallelLines[e.lineNum];
-    if (Array.isArray(list) && e.index < list.length) list[e.index] = e.newContent;
-  }
-
-  // Group witness edits by manuscript and apply to each .txt
-  const editsByMs = new Map();
-  for (const e of witnessEdits) {
-    if (!editsByMs.has(e.msKey)) editsByMs.set(e.msKey, []);
-    editsByMs.get(e.msKey).push(e);
-  }
-
-  const touchedFiles = [];
-  for (const [msKey, edits] of editsByMs) {
-    // Find the in-memory manuscript by siglum
-    const msEntry = Object.values(manuscripts).find((m) => m.siglum === msKey);
-    if (!msEntry) continue;
-    let content = msEntry.content;
-    for (const e of edits) {
-      const res = EblAtf.applyWitnessEditToManuscript(content, e);
-      if (res.ok) content = res.content;
-    }
-    if (content !== msEntry.content) {
-      msEntry.content = content;
-      await FileSystem.writeManuscript(dirHandle, msKey, content);
-      touchedFiles.push(msKey);
-    }
-  }
-
-  // Persist reconstructed text + redraw the score so the user sees the changes
-  if (reconEdits.length || translationEdits.length || noteEdits.length
-      || parallelEdits.length || touchedFiles.length) {
-    await saveScoreDataToFile();
-    renderScore();
-    const parts = [];
-    if (reconEdits.length) parts.push(`${reconEdits.length} reconstruction edit${reconEdits.length === 1 ? '' : 's'}`);
-    if (translationEdits.length) parts.push(`${translationEdits.length} translation edit${translationEdits.length === 1 ? '' : 's'}`);
-    if (noteEdits.length) parts.push(`${noteEdits.length} note edit${noteEdits.length === 1 ? '' : 's'}`);
-    if (parallelEdits.length) parts.push(`${parallelEdits.length} parallel edit${parallelEdits.length === 1 ? '' : 's'}`);
-    if (touchedFiles.length) parts.push(`${touchedFiles.length} manuscript${touchedFiles.length === 1 ? '' : 's'} updated (${touchedFiles.join(', ')})`);
-    setStatus('connected', 'Synced: ' + parts.join(', '));
-    setTimeout(() => setStatus('connected', 'Ready'), 4000);
-  }
-
-  if (diff.unmatched.length) {
-    // Drift — user inserted/deleted whole lines. Surface a non-blocking note.
-    showReconStatus({
-      title: `${diff.unmatched.length} unmatched row${diff.unmatched.length === 1 ? '' : 's'} (structural changes are not synced back)`,
-      items: diff.unmatched.map((u) => ({ line: u.row + 1, message: `${u.oldText || '(empty)'} → ${u.newText || '(empty)'}` })),
-    });
-  }
-}
-
-// ---- Token pill in the Recon view header ----
-
-function updateReconTokenPill() {
-  const s = EblClient.tokenStatus();
-  reconTokenPill.classList.remove('ok', 'warn', 'bad');
-  if (!s.hasToken) { reconTokenPill.classList.add('warn'); reconTokenText.textContent = 'No token'; return; }
-  if (s.invalid) { reconTokenPill.classList.add('bad'); reconTokenText.textContent = 'Invalid JWT'; return; }
-  if (s.expired) { reconTokenPill.classList.add('bad'); reconTokenText.textContent = 'Token expired'; return; }
-  if (!s.hasWriteTexts) { reconTokenPill.classList.add('warn'); reconTokenText.textContent = 'No write:texts'; return; }
-  reconTokenPill.classList.add('ok'); reconTokenText.textContent = 'write:texts ready';
-}
-
-// ---- Status panel below Ace (used for unmatched + import errors) ----
-
-function showReconStatus({ title, items, onItemClick }) {
-  const titleHtml = `<div class="recon-status-title">${escapeHtml(title)}</div>`;
-  const listHtml = '<ul>' + items.map((it, i) => {
-    const lineLabel = it.line != null ? `<span class="err-line">line ${it.line}</span>` : '';
-    return `<li data-idx="${i}">${lineLabel}${escapeHtml(it.message)}</li>`;
-  }).join('') + '</ul>';
-  reconStatusEl.innerHTML = titleHtml + listHtml;
-  reconStatusEl.classList.remove('hidden');
-  if (onItemClick) {
-    reconStatusEl.querySelectorAll('li').forEach((li) => {
-      li.addEventListener('click', () => onItemClick(items[Number(li.dataset.idx)]));
-    });
-  }
-}
-
-function hideReconStatus() {
-  reconStatusEl.classList.add('hidden');
-  reconStatusEl.innerHTML = '';
 }
 
 // ---- Export modal ----
@@ -7367,12 +8645,65 @@ function hideReconStatus() {
 // reflected. Reconstruction rows are the unindented "N. ..." ones; witness
 // rows carry a siglum first.
 function countArtifactLines() {
-  const atf = reconAceEditor ? reconAceEditor.getValue() : reconOriginalAtf;
-  if (!atf) return 0;
-  return EblAtf.stripFormatting(atf)
+  if (!exportArtifactAtf) return 0;
+  return exportArtifactAtf
     .split('\n')
     .filter((row) => /^\d+['’]?\.\s/.test(row))
     .length;
+}
+
+// The section typed into the line picker, or null. Kept separate from the
+// mode so an empty box is a refusal rather than a guess at §1.
+function selectedExportLine() {
+  const el = document.getElementById('export-line-num');
+  const n = el ? parseInt(el.value, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// The sections a range covers, in order. Either end may be typed first, and a
+// range of one is just a single line.
+function selectedExportRange() {
+  const a = selectedExportLine();
+  const el = document.getElementById('export-line-to');
+  const b = el ? parseInt(el.value, 10) : NaN;
+  if (a == null) return null;
+  if (!Number.isFinite(b) || b < 1) return [a];
+  const from = Math.min(a, b);
+  const to = Math.max(a, b);
+  // Only sections this project actually has: a range is a convenience, not an
+  // instruction to invent the gaps in it.
+  const have = new Set(Object.keys(buildScore().scoreLines).map(Number));
+  const out = [];
+  for (let n = from; n <= to; n++) if (have.has(n)) out.push(n);
+  return out;
+}
+
+// The artifact for the sections being sent, and nothing else. Built so an ATF
+// error somewhere else in the chapter cannot block an update — the rows this
+// sends are the only rows it should have to answer for.
+//
+// Takes one section or a list of them; a range validates exactly what it sends.
+async function buildSingleLineAtf(which) {
+  const wanted = Array.isArray(which) ? which : [which];
+  const keep = new Set(wanted.map(Number));
+  const { scoreLines } = buildScore();
+  const only = (map) => {
+    const out = {};
+    for (const n of keep) if (map && map[n] !== undefined) out[n] = map[n];
+    return out;
+  };
+  const meta = manuscriptsMeta || { version: 1, manuscripts: [] };
+  const result = await EblAtf.buildChapterAtf({
+    scoreLines: only(scoreLines),
+    reconstructedLines: only(reconstructedLines),
+    translationLines: only(translationLines),
+    noteLines: only(noteLines),
+    parallelLines: only(parallelLines),
+    variantLines: only(variantLines),
+    manuscriptsMeta: meta,
+    eblSiglumByFile: await EblAtf.buildEblSiglumMap(meta, EblClient),
+  });
+  return EblAtf.stripFormatting(result.atf);
 }
 
 function selectedExportMode() {
@@ -7435,13 +8766,22 @@ function renderExportEffect() {
   let html = '';
   if (mode === 'validate') {
     html = `Checks ${sending} chapter line${sending === 1 ? '' : 's'}. Nothing is written to eBL.`;
-  } else if (mode === 'append') {
-    html = existing == null
-      ? `Adds ${sending} line${sending === 1 ? '' : 's'} to the end of the chapter.`
-      : `Chapter goes from <strong>${existing}</strong> to <strong>${existing + sending}</strong> lines.`;
-    if (existing) {
-      html += ` The ${existing} existing line${existing === 1 ? '' : 's'} stay${existing === 1 ? 's' : ''} and your §numbers will repeat.`;
-    }
+  } else if (mode === 'alignment') {
+    html = 'Sends which witness word answers to which word of the reading, for every'
+      + ' section aligned here. Other sections are sent back unchanged.';
+  } else if (mode === 'line') {
+    const n = selectedExportLine();
+    html = n == null
+      ? 'Type the section to update.'
+      : `Replaces <strong>§${n}</strong> in place. Every other line is untouched, ` +
+        'and their lemmatization and alignment survive.';
+  } else if (mode === 'range') {
+    const nums = selectedExportRange();
+    html = !nums || !nums.length
+      ? 'Type the first and last section to update.'
+      : `Replaces <strong>${nums.length}</strong> line${nums.length === 1 ? '' : 's'} ` +
+        `(§${nums[0]}–§${nums[nums.length - 1]}) in one request. Lines outside the range ` +
+        'are untouched, and their lemmatization and alignment survive.';
   } else {
     html = existing == null
       ? `Deletes every existing line, then writes ${sending}.`
@@ -7455,7 +8795,9 @@ function renderExportEffect() {
   exportEffectEl.classList.toggle('destructive', mode === 'replace');
 
   exportGoBtn.textContent = mode === 'validate' ? 'Validate'
-    : mode === 'append' ? 'Append to chapter'
+    : mode === 'alignment' ? 'Check the alignment'
+    : mode === 'line' ? 'Update this line'
+    : mode === 'range' ? 'Update these lines'
     : 'Replace all lines';
 }
 
@@ -7464,6 +8806,8 @@ function stepsForMode(mode) {
   if (mode === 'validate') return ['validate'];
   const steps = ['validate'];
   if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) steps.push('manuscripts');
+  if (mode === 'alignment') return [];   // it reports for itself
+  if (mode === 'line' || mode === 'range') { steps.push('line'); return steps; }
   if (mode === 'replace') steps.push('backup', 'delete');
   steps.push('import');
   return steps;
@@ -7476,8 +8820,17 @@ function syncExportSteps() {
   });
 }
 
-function openExportModal() {
-  updateReconTokenPill();
+async function openExportModal() {
+  // Compiled fresh every time the dialog opens: there is no editable copy
+  // to drift from the score any more, so this is always current.
+  try {
+    exportArtifactAtf = await buildExportArtifact();
+  } catch (err) {
+    alert('Could not compile the chapter ATF: ' + (err.message || err));
+    return;
+  }
+  renderExportPreview(exportArtifactAtf, null);
+
   const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
   exportTargetEl.textContent = target
     ? `${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`
@@ -7527,9 +8880,11 @@ function openExportModal() {
   // last export. Reset before the button state is derived from the mode.
   const validateRadio = document.querySelector('input[name="export-mode"][value="validate"]');
   if (validateRadio) validateRadio.checked = true;
+  const linePicker = document.getElementById('export-line-picker');
+  if (linePicker) linePicker.classList.add('hidden');
 
   // Validate-only writes nothing, so it needs neither a token nor write scope.
-  const canExport = !!reconLineMap;
+  const canExport = !!exportArtifactAtf;
   exportGoBtn.disabled = !canExport;
   exportGoBtn.title = canExport ? '' : 'Nothing compiled to validate yet';
 
@@ -7555,13 +8910,23 @@ document.querySelectorAll('input[name="export-mode"]').forEach((radio) => {
     const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
     const mode = selectedExportMode();
     const canWrite = target && ts.hasToken && !ts.expired && ts.hasWriteTexts;
-    const ok = mode === 'validate' ? !!reconLineMap : !!canWrite;
+    const ok = mode === 'validate' ? !!exportArtifactAtf : !!canWrite;
     exportGoBtn.disabled = !ok;
     exportGoBtn.title = ok ? '' : 'Cannot write to eBL — fix token/target first';
+    const picker = document.getElementById('export-line-picker');
+    if (picker) picker.classList.toggle('hidden', mode !== 'line' && mode !== 'range');
+    const toBox = document.getElementById('export-range-to');
+    if (toBox) toBox.classList.toggle('hidden', mode !== 'range');
     renderExportEffect();
     syncExportSteps();
   });
 });
+
+// Typing a section re-renders the effect line so it names the § being replaced.
+const exportLineNumEl = document.getElementById('export-line-num');
+if (exportLineNumEl) exportLineNumEl.addEventListener('input', renderExportEffect);
+const exportLineToEl = document.getElementById('export-line-to');
+if (exportLineToEl) exportLineToEl.addEventListener('input', renderExportEffect);
 exportOptManuscriptsEl && exportOptManuscriptsEl.addEventListener('change', syncExportSteps);
 
 function closeExportModal() {
@@ -7570,6 +8935,4056 @@ function closeExportModal() {
 
 // Thrown when the exporter stops before writing anything. Distinct from an
 // EblError so the catch below can say "nothing was sent" truthfully.
+// An async click handler that rejects fails in silence: the button appears to
+// do nothing and the reason sits in a console nobody has open. Anything that
+// gets this far is a bug, so it says so rather than being swallowed.
+window.addEventListener('unhandledrejection', (e) => {
+  const err = e.reason || {};
+  console.error('Unhandled rejection:', err);
+  if (typeof showComposeReport !== 'function') return;
+  showComposeReport('Something failed', [
+    noteBlock(String(err.message || err), 'bad'),
+    noteBlock('This should not happen. Nothing was necessarily saved — check the'
+      + ' score before carrying on.', 'warn'),
+  ]);
+});
+
+// ---- Scope: which witnesses are being asked --------------------------------
+//
+// A composition is always a composition *of something*. By default that is
+// every witness of the section, but an edition often wants less: the Nineveh
+// copies on their own, the Late Babylonian ones, or a single manuscript
+// followed as the base text.
+//
+// This is recension work. Composing the Nineveh witnesses separately and the
+// Babylonian ones separately, then comparing the two readings, is a different
+// question from composing them all together and calling the majority the text —
+// and the second answer can hide the first entirely.
+//
+// A scope is { kind, value }:
+//   all         every witness of the section
+//   provenance  those from one site
+//   period      those of one period
+//   type        library copies, commentaries, excerpts…
+//   witness     one manuscript, followed as the base text
+
+// A commentary is not a copy of the text. It quotes the text to talk about
+// it, so its wording answers to the discussion rather than to the tradition,
+// and letting it vote makes the composition an average of two different kinds
+// of document. IM.74460 agrees with 43% of EAE 56 across 24 lines and is
+// flagged divergent in thirteen sections — not because it is a poor witness
+// but because it is not that kind of witness at all.
+//
+// Two things say so and either is enough: the tablet's type in
+// manuscripts.json, and the !cm protocol on a line. The second is handled
+// per-line by Compositor.classify; this is the whole-tablet answer.
+function isCommentaryWitness(siglum) {
+  return manuscriptTypes[siglum] === 'commentary';
+}
+
+// Mark which of these rows are commentaries, so everything downstream can
+// show them without counting them.
+function markCommentaries(perWitness) {
+  for (const key of Object.keys(perWitness || {})) {
+    if (isCommentaryWitness(key.split('|')[0])) perWitness[key].commentary = true;
+  }
+  return perWitness;
+}
+
+function witnessMeta(siglum) {
+  const key = String(siglum || '') + '.txt';
+  const list = (manuscriptsMeta && manuscriptsMeta.manuscripts) || [];
+  return list.find((m) => m.file === key) || null;
+}
+
+function scopeLabel(scope) {
+  if (!scope || scope.kind === 'all') return 'every witness';
+  if (scope.kind === 'witness') return scope.value;
+  return scope.value;
+}
+
+function inScope(w, scope) {
+  if (!scope || scope.kind === 'all') return true;
+  if (scope.kind === 'witness') return w.siglum === scope.value;
+  const meta = witnessMeta(w.siglum);
+  if (!meta) return false;
+  return String(meta[scope.kind] || '') === scope.value;
+}
+
+// What can be asked for in this section, with how many witnesses each would
+// take. Options that would select nothing are not offered.
+function scopeOptions(lineNum, vi) {
+  const { scoreLines } = buildScore();
+  const rows = (scoreLines[lineNum] || [])
+    .filter((w) => w.type === 'line' && (w.variant || 0) === vi);
+  const groups = { provenance: new Map(), period: new Map(), type: new Map() };
+  const witnesses = new Map();
+  for (const w of rows) {
+    witnesses.set(w.siglum, (witnesses.get(w.siglum) || 0) + 1);
+    const meta = witnessMeta(w.siglum);
+    if (!meta) continue;
+    for (const kind of ['provenance', 'period', 'type']) {
+      const v = meta[kind];
+      if (!v) continue;
+      groups[kind].set(v, (groups[kind].get(v) || 0) + 1);
+    }
+  }
+  return { total: rows.length, groups, witnesses };
+}
+
+// The picker. Resolves to a scope, or null if the editor backed out.
+function askScope(lineNum, vi) {
+  const opts = scopeOptions(lineNum, vi);
+  const label = '§' + lineNum + variantLetterOf(vi);
+  const rows = [];
+  const add = (kind, value, count, note) => {
+    rows.push('<label class="scope-option">'
+      + `<input type="radio" name="scope-pick" data-kind="${escapeHtml(kind)}" `
+      + `data-value="${escapeHtml(value)}"${kind === 'all' ? ' checked' : ''}>`
+      + `<span class="scope-name">${escapeHtml(value)}</span>`
+      + `<span class="scope-count">${count} witness${count === 1 ? '' : 'es'}</span>`
+      + (note ? `<span class="scope-note">${escapeHtml(note)}</span>` : '')
+      + '</label>');
+  };
+
+  add('all', 'Every witness', opts.total, '');
+  for (const kind of ['provenance', 'period', 'type']) {
+    const entries = [...opts.groups[kind].entries()]
+      // A group that is everyone is not a choice, and one that is nobody cannot be made.
+      .filter(([, n]) => n > 0 && n < opts.total)
+      .sort((a, b) => b[1] - a[1]);
+    if (!entries.length) continue;
+    rows.push(`<div class="scope-group">By ${kind}</div>`);
+    for (const [value, n] of entries) {
+      add(kind, value, n, n < 2 ? 'only one — it will be followed as the base text' : '');
+    }
+  }
+  if (opts.witnesses.size > 1) {
+    rows.push('<div class="scope-group">Follow one manuscript</div>');
+    for (const [siglum, n] of opts.witnesses) add('witness', siglum, n, 'its own text becomes the reading');
+  }
+
+  const p = askOverlay('Compose ' + label + ' from…', [
+    noteBlock('Composing a site or a period on its own is how a recension becomes'
+      + ' visible. Weighed all together, the majority can bury it.'),
+    '<div class="scope-list">' + rows.join('') + '</div>',
+  ], 'Compose', true);
+
+  // Recorded as it is chosen. The overlay is hidden before the promise settles,
+  // so reading the DOM afterwards is asking a question of a closed dialog.
+  let picked = { kind: 'all' };
+  document.querySelectorAll('input[name="scope-pick"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      picked = { kind: el.dataset.kind, value: el.dataset.value };
+    });
+  });
+
+  return p.then((yes) => (yes ? picked : null));
+}
+
+// ---- Statistics ----------------------------------------------------------
+//
+// Every section measured against its own witnesses at once, so the edition can
+// be read as a whole rather than one omen at a time. The question it answers is
+// which sections the witnesses agree about and which they do not — the second
+// kind is where the editorial work is, and it is not otherwise visible until
+// you happen to open the section.
+//
+// Nothing here writes. It is a reading of the project as it stands.
+
+const statsTabEl = document.getElementById('stats-tab');
+let statsRun = null;   // the last measurement, so switching tabs does not recompute
+
+function statsPlaceholder(message) {
+  return `<div class="stats-empty">${escapeHtml(message)}</div>`;
+}
+
+async function renderStatsTab(force) {
+  if (!statsTabEl) return;
+  if (statsRun && !force) { paintStats(statsRun); return; }
+  if (!window.Compositor) { statsTabEl.innerHTML = statsPlaceholder('compositor.js did not load.'); return; }
+
+  statsTabEl.innerHTML = statsPlaceholder('Measuring every section…');
+  let convert;
+  try {
+    const conv = await ensureAtfConverter();
+    convert = (t) => conv.convertLine(t).codes;
+  } catch (err) {
+    statsTabEl.innerHTML = statsPlaceholder('The sign table could not be loaded: ' + (err.message || err));
+    return;
+  }
+
+  const { scoreLines } = buildScore();
+  const lineNums = Object.keys(scoreLines).map(Number).sort((a, b) => a - b);
+  const sections = [];
+
+  for (const n of lineNums) {
+    const rows = (scoreLines[n] || []).filter((w) => w.type === 'line');
+    if (!rows.length) continue;
+    const kept = rows.filter((w) => inScope(w, statsScope));
+    if (!kept.length) continue;
+    const all = kept.map((w) => ({ key: w.siglum + '|' + w.sourceLine, atf: w.content }));
+    const readings = variantsFor(n);
+    const written = (readings[0] && readings[0].text || '').trim();
+
+    // Measured against the reading as written when there is one — that is the
+    // edition being reported on. Otherwise against what the witnesses alone
+    // would give, so a section with no reading yet still gets a number.
+    let perWitness = {}, basis = 'written', text = written;
+    if (written) {
+      perWitness = Compositor.alignToReading(written, all, convert).perWitness;
+    } else if (all.length >= 2) {
+      const c = Compositor.composeSection(all, convert);
+      if (c) { perWitness = c.perWitness; text = c.text; basis = 'composed'; }
+    }
+
+    // Weighted by how much each witness preserves. An unweighted mean lets a
+    // four-word scrap that happens to agree count as much as a complete copy,
+    // which flatters exactly the sections with least evidence behind them.
+    markCommentaries(perWitness);
+    // Counted by tablet, not by line: a long omen runs over several lines of
+    // one manuscript and they are still one witness.
+    const anyKey = Object.keys(perWitness)[0];
+    const positions = anyKey ? (perWitness[anyKey].positions || 0) : 0;
+    const tablets = tabletsOf(perWitness, positions);
+    // A commentary is measured and shown, but it does not score the section:
+    // counting it makes a section look inconsistent when what it really has is
+    // a commentary in it.
+    const commentaries = tablets.filter((t) => t.commentary).map((t) => t.siglum);
+    const measures = tablets.filter((t) => t.agreement != null && !t.commentary);
+    const scores = measures.map((t) => t.agreement);
+    const weight = measures.reduce((a, t) => a + (t.judged || 0), 0);
+    const mean = weight
+      ? measures.reduce((a, t) => a + t.agreement * (t.judged || 0), 0) / weight
+      : null;
+    const flat = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
+    const coverage = positions && measures.length
+      ? measures.reduce((a, t) => a + (t.coverage || 0), 0) / measures.length : null;
+    const worst = scores.length ? Math.min.apply(null, scores) : null;
+    const divergent = measures.filter((t) => t.wantsVariant).map((t) => t.siglum);
+    const omitting = tablets.filter((t) => t.omitted.length).map((t) => t.siglum);
+
+    sections.push({
+      n, text, basis, perWitness,
+      variants: readings.length,
+      tablets,
+      witnesses: tablets.length,
+      witnessLines: kept.length,
+      measured: scores.length,
+      mean, flat, worst, weight, coverage, positions, divergent, omitting, commentaries,
+      // A section with one witness cannot be inconsistent; say so rather than
+      // scoring it 100% and letting it top the table on no evidence.
+      thin: scores.length < 2,
+    });
+  }
+
+  statsRun = { sections, at: new Date() };
+  paintStats(statsRun);
+}
+
+// The same measurements read the other way: not which sections are agreed
+// about, but which witnesses agree. A tablet that disagrees everywhere is
+// either a different recension or transliterated against a different
+// convention, and both are worth knowing before composing anything.
+function witnessSummary(sections) {
+  const by = new Map();
+  for (const s of sections) {
+    for (const key of Object.keys(s.perWitness || {})) {
+      const siglum = key.split('|')[0];
+      const v = s.perWitness[key];
+      if (!by.has(siglum)) by.set(siglum,
+        { siglum, commentary: isCommentaryWitness(siglum), lines: 0, scored: [], weight: 0,
+          sum: 0, words: 0, of: 0, omits: 0, differs: 0, flagged: [] });
+      const w = by.get(siglum);
+      w.lines++;
+      if (v.agreement != null) {
+        w.scored.push(v.agreement);
+        // Each line counts for what survives of it, not equally.
+        w.weight += v.judged || 0;
+        w.sum += v.agreement * (v.judged || 0);
+      }
+      w.words += v.judged || 0;
+      w.of += v.positions || 0;
+      w.omits += v.omitted.length;
+      w.differs += v.differing.length;
+      // A section is named once however many of this tablet's lines it spans.
+      if (v.wantsVariant && w.flagged.indexOf(s.n) < 0) w.flagged.push(s.n);
+    }
+  }
+  const out = [...by.values()];
+  for (const w of out) {
+    w.mean = w.weight ? w.sum / w.weight : null;
+    w.coverage = w.of ? w.words / w.of : null;
+  }
+  return out.sort((a, b) => (a.mean == null ? 2 : a.mean) - (b.mean == null ? 2 : b.mean));
+}
+
+function witnessTable(sections) {
+  const rows = witnessSummary(sections);
+  if (!rows.length) return '<p class="report-empty">No witness could be measured.</p>';
+  let html = '<table class="report-table stats-table"><thead><tr>'
+    + '<th>Witness</th><th>Lines</th>'
+    + '<th title="Weighted by how much of each line survives">Agreement</th>'
+    + '<th title="Words preserved, against words in the readings">Covers</th>'
+    + '<th>Words omitted</th><th>Words differing</th><th>Flagged in</th></tr></thead><tbody>';
+  for (const w of rows) {
+    html += `<tr class="${w.commentary ? 'is-commentary-row' : (w.flagged.length ? 'is-divergent' : '')}">`
+      + `<td class="report-siglum">`
+      + `<a class="source-link" href="#" data-siglum="${escapeHtml(w.siglum)}" `
+      + `title="Open this tablet in the Source Text pane">${escapeHtml(w.siglum)}</a>`
+      + `${w.commentary ? '<span class="report-lineno">commentary</span>' : ''}</td>`
+      + `<td class="report-nums">${w.lines}</td>`
+      + `<td>${agreementBar(w.mean)}</td>`
+      + `<td class="report-nums"><span class="cover"><span class="cover-num">${w.words}/${w.of}</span>`
+      + `<span class="cover-pct">${w.coverage == null ? '—' : Math.round(w.coverage * 100) + '%'}</span></span></td>`
+      + `<td class="report-nums">${w.omits || '<span class="report-dash">—</span>'}</td>`
+      + `<td class="report-nums">${w.differs || '<span class="report-dash">—</span>'}</td>`
+      + `<td class="report-verdict">${w.commentary
+        ? '<span class="report-thin">not counted</span>'
+        : (w.flagged.length ? escapeHtml('§' + w.flagged.join(', §')) : '')}</td>`
+      + '</tr>';
+  }
+  return html + '</tbody></table>';
+}
+
+// Every site, period and type the project's manuscripts.json knows about.
+// One tablet, once — however many of its lines a section covers.
+//
+// A long omen runs over several lines of a manuscript, and each of those lines
+// is aligned to the reading separately because that is what a line is. But they
+// are one witness: counting AO.6450 six times in a section makes twenty-six
+// "witnesses" out of nine tablets, weights that tablet six-fold in the score,
+// and prints its name six times in the divergent column.
+//
+// Merging is not a matter of averaging the lines. Each line covers a different
+// stretch of the reading, so the tablet's coverage is the union of what its
+// lines reach, and a position is only omitted by the tablet when none of its
+// lines has it.
+function tabletsOf(perWitness, positions) {
+  const by = new Map();
+  for (const key of Object.keys(perWitness || {})) {
+    const siglum = key.split('|')[0];
+    const v = perWitness[key];
+    if (!by.has(siglum)) {
+      by.set(siglum, {
+        siglum, lines: 0, commentary: false,
+        covered: new Set(), differing: new Set(), claimedOmitted: new Set(),
+        agree: 0, judged: 0,
+      });
+    }
+    const t = by.get(siglum);
+    t.lines++;
+    if (v.commentary) t.commentary = true;
+    for (const p of Object.values(v.alignment || {})) t.covered.add(p);
+    for (const p of (v.differing || [])) t.differing.add(p);
+    for (const p of (v.omitted || [])) t.claimedOmitted.add(p);
+    if (v.agreement != null && v.judged) {
+      t.judged += v.judged;
+      t.agree += v.agreement * v.judged;
+    }
+  }
+
+  const out = [];
+  for (const t of by.values()) {
+    // A line may report a position omitted that another line of the same tablet
+    // supplies. The tablet omits it only if none of them has it.
+    const omitted = [...t.claimedOmitted].filter((p) => !t.covered.has(p)).sort((a, b) => a - b);
+    out.push({
+      siglum: t.siglum,
+      lines: t.lines,
+      commentary: t.commentary,
+      judged: t.judged,
+      positions,
+      agreement: t.judged ? t.agree / t.judged : null,
+      coverage: positions ? Math.min(1, t.covered.size / positions) : null,
+      differing: [...t.differing].sort((a, b) => a - b),
+      omitted,
+      thinEvidence: t.judged > 0 && t.judged < 5,
+      // The same rule the compositor uses, not a copy of its numbers. This
+      // read 'judged >= 5 && agree/judged < 0.75' and drifted out of step the
+      // moment the compositor learned to weigh how much a witness preserves.
+      wantsVariant: window.Compositor && Compositor.wantsOwnVariant
+        ? Compositor.wantsOwnVariant(t.judged, t.agree, (t.differing || []).length,
+            t.positions ? t.judged / t.positions : null)
+        : (t.judged >= 5 && (t.agree / t.judged) < 0.75),
+    });
+  }
+  return out;
+}
+
+function statsScopeOptions() {
+  const list = (manuscriptsMeta && manuscriptsMeta.manuscripts) || [];
+  const sel = (kind, value) => (statsScope.kind === kind && statsScope.value === value ? ' selected' : '');
+  let html = `<option value="all|"${statsScope.kind === 'all' ? ' selected' : ''}>Every witness</option>`;
+  for (const kind of ['provenance', 'period', 'type']) {
+    const values = [...new Set(list.map((m) => m[kind]).filter(Boolean))].sort();
+    if (values.length < 2) continue;
+    html += `<optgroup label="By ${kind}">`;
+    for (const v of values) html += `<option value="${escapeHtml(kind + '|' + v)}"${sel(kind, v)}>${escapeHtml(v)}</option>`;
+    html += '</optgroup>';
+  }
+  const sigla = list.map((m) => (m.file || '').replace(/\.txt$/, '')).filter(Boolean).sort();
+  if (sigla.length > 1) {
+    html += '<optgroup label="One manuscript">';
+    for (const s of sigla) html += `<option value="${escapeHtml('witness|' + s)}"${sel('witness', s)}>${escapeHtml(s)}</option>`;
+    html += '</optgroup>';
+  }
+  return html;
+}
+
+function statsSortValue(s, mode) {
+  if (mode === 'section') return s.n;
+  if (mode === 'witnesses') return -s.witnesses;
+  return s.mean == null ? 2 : s.mean;   // least consistent first
+}
+
+let statsSort = 'consistency';
+// Measuring one site, period or manuscript on its own: the same question the
+// scope picker asks of a single section, asked of the whole edition.
+let statsScope = { kind: 'all' };
+let statsView = 'sections';
+
+function paintStats(run) {
+  const sections = run.sections;
+  if (!sections.length) { statsTabEl.innerHTML = statsPlaceholder('No sections to measure yet.'); return; }
+
+  const solid = sections.filter((s) => !s.thin && s.mean != null);
+  const totalWeight = solid.reduce((a, s) => a + (s.weight || 0), 0);
+  const overall = totalWeight
+    ? solid.reduce((a, s) => a + s.mean * (s.weight || 0), 0) / totalWeight : null;
+  const flagged = sections.filter((s) => s.divergent.length);
+
+  const sorted = sections.slice().sort((a, b) => statsSortValue(a, statsSort) - statsSortValue(b, statsSort));
+
+  let html = '<div class="stats-head">'
+    + '<div class="report-counts">'
+    + `<span class="report-count"><b>${sections.length}</b> sections</span>`
+    + `<span class="report-count"><b>${solid.length}</b> with two or more tablets</span>`
+    + (overall != null ? '<span class="report-count is-done" title="Each witness counted in'
+        + ' proportion to how much of its line survives"><b>' + Math.round(overall * 100)
+        + '%</b> agreement, weighted by evidence</span>' : '')
+    + (flagged.length ? `<span class="report-count is-bad"><b>${flagged.length}</b> with a divergent witness</span>` : '')
+    + '</div>'
+    + '<div class="stats-controls">'
+    + '<label>Scope <select id="stats-scope">' + statsScopeOptions() + '</select></label>'
+    + '<span class="stats-views">'
+      + `<button type="button" class="stats-view${statsView === 'sections' ? ' is-on' : ''}" data-view="sections">By section</button>`
+      + `<button type="button" class="stats-view${statsView === 'witnesses' ? ' is-on' : ''}" data-view="witnesses">By witness</button>`
+    + '</span>'
+    + '<label>Sort <select id="stats-sort">'
+    + `<option value="consistency"${statsSort === 'consistency' ? ' selected' : ''}>Least consistent first</option>`
+    + `<option value="section"${statsSort === 'section' ? ' selected' : ''}>By section</option>`
+    + `<option value="witnesses"${statsSort === 'witnesses' ? ' selected' : ''}>Most witnesses first</option>`
+    + '</select></label>'
+    + '<button type="button" id="stats-refresh">Measure again</button>'
+    + '<button type="button" id="stats-save">Save a copy</button>'
+    + `<span class="stats-stamp">measured ${escapeHtml(run.at.toLocaleTimeString())}</span>`
+    + '</div></div>';
+
+  if (statsView === 'witnesses') {
+    const body = html + witnessTable(sections);
+    statsTabEl.innerHTML = body;
+    wireStatsControls(run, body);
+    wireSourceLinks(statsTabEl);
+    return;
+  }
+
+  html += '<table class="report-table stats-table"><thead><tr>'
+    + '<th class="stats-fold"></th><th>§</th><th>Reading</th><th>Witnesses</th><th>Agreement</th>'
+    + '<th title="Mean share of the reading each witness preserves">Covers</th>'
+    + '<th title="Commentaries are shown but not scored">Comm.</th>'
+    + '<th>Omitting</th><th>Divergent</th></tr></thead><tbody>';
+  for (const s of sorted) {
+    const tone = s.thin ? '' : s.mean == null ? '' : s.mean >= 0.9 ? '' : s.mean >= 0.75 ? ' class="is-mid"' : ' class="is-divergent"';
+    html += `<tr${tone} data-section="${s.n}">`
+      + `<td class="stats-fold" data-fold="${s.n}" title="Show every witness of this section">▸</td>`
+      + `<td class="report-siglum">§${s.n}${s.variants > 1 ? `<span class="report-lineno">+${s.variants - 1}</span>` : ''}</td>`
+      + `<td class="stats-text">${renderAtf((s.text || '').slice(0, 70))}${(s.text || '').length > 70 ? '…' : ''}`
+      + (s.basis === 'composed' ? '<span class="stats-basis">no reading yet — composed</span>' : '')
+      + '</td>'
+      + `<td class="report-nums">${s.witnesses}`
+      + `${s.witnessLines > s.witnesses ? `<span class="report-dash"> in ${s.witnessLines} lines</span>` : ''}`
+      + `${s.measured < s.witnesses ? `<span class="report-dash"> · ${s.measured} legible</span>` : ''}</td>`
+      + `<td>${s.thin ? '<span class="agree-none">too few</span>' : agreementBar(s.mean)}</td>`
+      + `<td class="report-nums">${s.coverage == null ? '<span class="report-dash">—</span>'
+        : Math.round(s.coverage * 100) + '%'}</td>`
+      + `<td class="report-nums">${(s.commentaries || []).length
+        || '<span class="report-dash">—</span>'}</td>`
+      + `<td class="report-nums">${s.omitting.length || '<span class="report-dash">—</span>'}</td>`
+      + `<td class="report-verdict">${s.divergent.length ? escapeHtml(s.divergent.join(', ')) : ''}</td>`
+      + '</tr>';
+    // The same per-witness table the reports show, folded away until asked
+    // for — the summary is for scanning, this is for looking.
+    html += `<tr class="stats-detail hidden" data-detail="${s.n}"><td colspan="9">`
+      + positionStrip(s.text || '')
+      + witnessRows(s.perWitness)
+      + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  statsTabEl.innerHTML = html;
+  wireStatsControls(run, html);
+  wireSourceLinks(statsTabEl);
+  // The row opens the section — the whole row shows a hand, so the whole row
+  // had better do the obvious thing. Unfolding is the caret's job, and only
+  // the caret's, which is why it is a cell of its own.
+  statsTabEl.querySelectorAll('tbody tr[data-section]').forEach((tr) => {
+    tr.addEventListener('click', (e) => {
+      const fold = e.target.closest ? e.target.closest('.stats-fold') : null;
+      if (fold) {
+        const detail = statsTabEl.querySelector(`tr[data-detail="${tr.dataset.section}"]`);
+        if (!detail) return;
+        const open = detail.classList.toggle('hidden') === false;
+        tr.classList.toggle('is-open', open);
+        fold.textContent = open ? '▾' : '▸';
+        return;
+      }
+      goToSection(tr.dataset.section);
+    });
+  });
+}
+
+// Controls shared by both views: which view, how sorted, measure again, save.
+function wireStatsControls(run, html) {
+  statsTabEl.querySelectorAll('.stats-view').forEach((b) => {
+    b.addEventListener('click', () => { statsView = b.dataset.view; paintStats(run); });
+  });
+  const scopeEl = document.getElementById('stats-scope');
+  if (scopeEl) scopeEl.addEventListener('change', () => {
+    const parts = String(scopeEl.value).split('|');
+    statsScope = parts[0] === 'all' ? { kind: 'all' } : { kind: parts[0], value: parts.slice(1).join('|') };
+    renderStatsTab(true);   // a different scope is a different measurement
+  });
+  const sortEl = document.getElementById('stats-sort');
+  if (sortEl) sortEl.addEventListener('change', () => { statsSort = sortEl.value; paintStats(run); });
+  const refreshEl = document.getElementById('stats-refresh');
+  if (refreshEl) refreshEl.addEventListener('click', () => renderStatsTab(true));
+  const saveEl = document.getElementById('stats-save');
+  if (saveEl) saveEl.addEventListener('click', () => {
+    lastComposeReport = {
+      title: statsView === 'witnesses' ? 'The witnesses of this edition' : 'Consistency of the edition',
+      html,
+      name: 'statistics-' + statsView,
+    };
+    saveComposeReport();
+  });
+}
+
+// Open a witness in the Source Text pane, and put the line in question on
+// screen. A siglum in a table is a reference to a tablet; being able to read
+// the tablet is the point of naming it.
+// Every siglum printed in a table is a link to its tablet. Called after any
+// innerHTML that may contain them — the statistics tables and the reports.
+function wireSourceLinks(root) {
+  if (!root) return;
+  root.querySelectorAll('.source-link').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();   // a stats row also opens its section
+      // The Source pane is always on screen, so there is no tab to switch to
+      // and no reason to take the reader out of the table they were reading.
+      hideComposeReport();
+      openSource(a.dataset.siglum, a.dataset.src || '');
+    });
+  });
+}
+
+function openSource(siglum, sourceLine) {
+  // Manuscripts are keyed by "ms-<filename>" and the entries carry no id of
+  // their own, so the key is the id — taking it off the object gives undefined.
+  const id = Object.keys(manuscripts).find((k) => manuscripts[k].siglum === siglum);
+  if (!id) return false;
+  const ms = manuscripts[id];
+  loadManuscript(id);
+  if (sourceLine && aceEditor) {
+    // Find the reading's own line in the file rather than counting rows: a
+    // manuscript's line numbers are its own and need not match the file's.
+    // Matched by hand rather than by regex — a siglum or line number carrying a
+    // regex character would otherwise have to be escaped, and quietly is not.
+    const rows = String(ms.content || '').split('\n');
+    const want = String(sourceLine) + '.';
+    const at = rows.findIndex((row) => {
+      const t = row.trim();
+      if (t.charAt(0) !== '§') return false;
+      const sp = t.indexOf(' ');
+      return sp > 0 && t.slice(sp + 1).trim().indexOf(want) === 0;
+    });
+    if (at >= 0) {
+      aceEditor.gotoLine(at + 1, 0, true);
+      aceEditor.focus();
+    }
+  }
+  return true;
+}
+
+// Switch to the score and put the section on screen.
+function goToSection(n) {
+  const tab = document.querySelector('.pane-tab[data-tab="score"]');
+  if (tab) tab.click();
+  const el = scorePanel.querySelector(`.score-line[data-line="${n}"]`);
+  if (el) {
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.add('score-line-found');
+    setTimeout(() => el.classList.remove('score-line-found'), 1500);
+  }
+}
+
+// ---- Overlays: asking, and reporting ------------------------------------
+//
+// Composing replaces an editor's work, so it asks first; and what it found is
+// comparative — who agrees, who omits, who has gone their own way — which wants
+// a table and a colour rather than a paragraph in an alert box.
+
+const composeReportEl = document.getElementById('compose-report');
+const composeReportBody = document.getElementById('compose-report-body');
+const composeReportTitle = document.getElementById('compose-report-title');
+const composeReportClose = document.getElementById('compose-report-close');
+const composeReportFoot = document.getElementById('compose-report-foot');
+
+// The report as it stands, so it can be saved or reopened without recomputing.
+let lastComposeReport = null;
+
+function hideComposeReport() {
+  if (composeReportEl) composeReportEl.classList.add('hidden');
+  // The report is closed over a score it may have just changed. Repainting
+  // costs nothing and guarantees the page matches the state behind it.
+  if (typeof renderScore === 'function' && typeof scorePanel !== 'undefined' && scorePanel) {
+    try { renderScore(); } catch (_) { /* the report closing must not fail */ }
+  }
+  if (composeReportResolve) { const r = composeReportResolve; composeReportResolve = null; r(false); }
+}
+let composeReportResolve = null;
+
+if (composeReportClose) composeReportClose.addEventListener('click', hideComposeReport);
+if (composeReportEl) composeReportEl.addEventListener('click', (e) => {
+  if (e.target === composeReportEl) hideComposeReport();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && composeReportEl && !composeReportEl.classList.contains('hidden')) {
+    hideComposeReport();
+  }
+});
+
+// A confirm that can show the thing it is asking about. Resolves false on
+// Escape, the ✕, or a click outside — the same as saying no.
+// `onReady` runs once the body is on the page, for an overlay that needs its
+// own listeners — the lemma picker's search box, for instance. The body is
+// left in the DOM after the answer, so a caller can still read what was
+// ticked.
+function askOverlay(title, blocks, confirmLabel, danger, onReady) {
+  if (!composeReportEl) return Promise.resolve(false);
+  composeReportTitle.textContent = title;
+  composeReportBody.innerHTML = blocks.join('');
+  composeReportFoot.innerHTML =
+    '<button type="button" id="ask-no">Cancel</button>' +
+    `<button type="button" id="ask-yes" class="btn-primary${danger ? ' is-danger' : ''}">` +
+    `${escapeHtml(confirmLabel)}</button>`;
+  composeReportFoot.classList.remove('hidden');
+  composeReportEl.classList.remove('hidden');
+  return new Promise((resolve) => {
+    composeReportResolve = resolve;
+    const done = (answer) => {
+      composeReportResolve = null;
+      composeReportEl.classList.add('hidden');
+      composeReportFoot.classList.add('hidden');
+      resolve(answer);
+    };
+    document.getElementById('ask-yes').addEventListener('click', () => done(true));
+    document.getElementById('ask-no').addEventListener('click', () => done(false));
+    document.getElementById('ask-yes').focus();
+    if (typeof onReady === 'function') {
+      try { onReady(); } catch (err) { console.warn('overlay setup failed', err); }
+    }
+  });
+}
+
+function showComposeReport(title, blocks, saveName) {
+  if (!composeReportEl) return;
+  composeReportTitle.textContent = title;
+  composeReportBody.innerHTML = blocks.join('');
+  lastComposeReport = { title, html: blocks.join(''), name: saveName || 'compose-report' };
+  composeReportFoot.innerHTML = '<button type="button" id="report-copy">Copy</button>'
+    + '<button type="button" id="report-save">Save a copy</button>'
+    + '<button type="button" id="report-ok" class="btn-primary">Close</button>';
+  composeReportFoot.classList.remove('hidden');
+  composeReportEl.classList.remove('hidden');
+  wireSourceLinks(composeReportBody);
+  document.getElementById('report-ok').addEventListener('click', hideComposeReport);
+  document.getElementById('report-save').addEventListener('click', saveComposeReport);
+  document.getElementById('report-copy').addEventListener('click', copyComposeReport);
+}
+
+// The report as plain text, on the clipboard. An overlay you cannot get the
+// words out of is no use when the words are an error message someone else
+// needs to read.
+async function copyComposeReport() {
+  const btn = document.getElementById('report-copy');
+  const title = (composeReportTitle && composeReportTitle.textContent) || '';
+  const body = (composeReportBody && composeReportBody.innerText) || '';
+  const NL2 = String.fromCharCode(10);
+  const text = title + NL2 + '-'.repeat(Math.max(3, title.length)) + NL2 + NL2 + body;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) btn.textContent = 'Copied';
+  } catch (_) {
+    // No clipboard permission, or an insecure origin. Select it instead so
+    // Ctrl+C still works.
+    const range = document.createRange();
+    range.selectNodeContents(composeReportBody);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    if (btn) btn.textContent = 'Selected — press Ctrl+C';
+  }
+  if (btn) setTimeout(() => { btn.textContent = 'Copy'; }, 3000);
+}
+
+// Keep a copy. Into the project folder when there is one, so the report sits
+// beside the edition it describes; otherwise as a download.
+async function saveComposeReport() {
+  if (!lastComposeReport) return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const doc = '<!doctype html><meta charset="utf-8">'
+    + `<title>${escapeHtml(lastComposeReport.title)}</title>`
+    + '<style>' + composeReportStyles() + '</style>'
+    + `<h1>${escapeHtml(lastComposeReport.title)}</h1>`
+    + `<p class="report-stamp">${escapeHtml(new Date().toLocaleString())}</p>`
+    + lastComposeReport.html;
+  const name = lastComposeReport.name + '-' + stamp + '.html';
+  const btn = document.getElementById('report-save');
+  try {
+    if (dirHandle) {
+      const written = await FileSystem.writeProjectFile(dirHandle, name, doc);
+      if (btn) btn.textContent = 'Saved as ' + written;
+      return;
+    }
+  } catch (_) { /* fall through to the download */ }
+  const url = URL.createObjectURL(new Blob([doc], { type: 'text/html;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
+  if (btn) btn.textContent = 'Downloaded';
+}
+
+// The report's own styles, inlined so a saved copy still reads correctly with
+// nothing else beside it.
+function composeReportStyles() {
+  const wanted = ['.report-', '.agree', '.pos-strip'];
+  let out = 'body{font:14px/1.6 system-ui,sans-serif;margin:2rem auto;max-width:52rem;color:#333}'
+    + 'h1{font-size:1.2rem}.report-stamp{color:#666;font-size:.8rem;margin-top:-.5rem}';
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try { rules = sheet.cssRules; } catch (_) { continue; }   // cross-origin
+    for (const rule of rules || []) {
+      if (rule.selectorText && wanted.some((w) => rule.selectorText.indexOf(w) >= 0)
+          && rule.selectorText.indexOf('dark-mode') < 0) {
+        out += rule.cssText;
+      }
+    }
+  }
+  return out;
+}
+
+// ---- Report pieces ------------------------------------------------------
+
+// How much of the reading a witness actually speaks to. Agreement without
+// this is half a fact: four surviving words that all match agree 100% with a
+// twelve-word reading.
+function coverageCell(v) {
+  if (v.positions == null || !v.positions) return '<span class="report-dash">—</span>';
+  const pct = Math.round((v.coverage || 0) * 100);
+  return `<span class="cover"><span class="cover-num">${v.judged}/${v.positions}</span>`
+    + `<span class="cover-pct${v.thinEvidence ? ' is-thin' : ''}">${pct}%</span></span>`;
+}
+
+function agreementBar(share) {
+  if (share == null) return '<span class="agree-none">no overlap</span>';
+  const pct = Math.round(share * 100);
+  const tone = share >= 0.9 ? 'high' : share >= 0.75 ? 'mid' : 'low';
+  return '<span class="agree"><span class="agree-track">'
+    + `<span class="agree-fill is-${tone}" style="width:${pct}%"></span></span>`
+    + `<span class="agree-pct">${pct}%</span></span>`;
+}
+
+function readingBlock(label, text, before) {
+  let html = `<div class="report-reading"><span class="report-label">${escapeHtml(label)}</span>`
+    + `<span class="report-text">${renderAtf(text)}</span></div>`;
+  if (before && before.trim() && before.trim() !== String(text).trim()) {
+    html += '<details class="report-before"><summary>It replaced</summary>'
+      + `<div class="report-text is-old">${renderAtf(before)}</div></details>`;
+  }
+  return html;
+}
+
+// The reading with a number under every word, so "omits 5, 6, 7" can be read
+// off rather than counted out on the screen.
+function positionStrip(text) {
+  const words = positionWords(text);
+  let html = '<div class="pos-strip">';
+  for (const t of words) {
+    if (t.divider) {
+      html += `<span class="pos-strip-word is-divider">${escapeHtml(t.text)}`
+        + `<span class="pos-strip-num">${t.pos}</span></span>`;
+      continue;
+    }
+    const c = positionColor(t.pos);
+    html += `<span class="pos-strip-word" style="color:${c.fg};background:${c.bg}">`
+      + `<span>${renderAtf(t.text)}</span><span class="pos-strip-num">${t.pos}</span></span>`;
+  }
+  return html + '</div>';
+}
+
+// Every witness of the section, not only the ones filed under this reading —
+// the others voted on its shared material and their agreement is the evidence
+// for it. `mine` says which belong here.
+function witnessRows(perWitness, mine) {
+  const keys = Object.keys(perWitness || {});
+  if (!keys.length) return '<p class="report-empty">No witness could be measured against this reading.</p>';
+  const owned = mine ? new Set(mine) : null;
+  let html = '<table class="report-table"><thead><tr>'
+    + '<th>Witness</th><th></th><th>Agreement</th><th title="How much of the reading this'
+    + ' witness preserves">Covers</th><th>Omits</th><th>Differs at</th><th></th>'
+    + '</tr></thead><tbody>';
+  for (const k of keys) {
+    const v = perWitness[k];
+    const parts = k.split('|');
+    const isMine = !owned || owned.has(k);
+    html += `<tr class="${v.wantsVariant && !v.commentary ? 'is-divergent ' : ''}`
+      + `${v.commentary ? 'is-commentary-row ' : ''}${isMine ? '' : 'is-other'}">`
+      + `<td class="report-siglum"><a class="source-link" href="#" data-siglum="${escapeHtml(parts[0])}" `
+      + `data-src="${escapeHtml(parts[1] || '')}" title="Open this tablet in the Source Text pane">`
+      + `${escapeHtml(parts[0])}</a><span class="report-lineno">${escapeHtml(parts[1] || '')}</span></td>`
+      + `<td class="report-owner">${v.commentary ? 'commentary'
+        : (isMine ? '' : 'other reading')}</td>`
+      + `<td>${agreementBar(v.agreement)}</td>`
+      + `<td class="report-nums">${coverageCell(v)}</td>`
+      + `<td class="report-nums">${v.omitted.length ? escapeHtml(v.omitted.join(', ')) : '<span class="report-dash">—</span>'}</td>`
+      + `<td class="report-nums">${v.differing.length ? escapeHtml(v.differing.join(', ')) : '<span class="report-dash">—</span>'}</td>`
+      + `<td class="report-verdict">${v.commentary ? '<span class="report-thin">not counted — a commentary</span>'
+        : v.wantsVariant ? 'wants its own variant'
+        : v.thinEvidence ? '<span class="report-thin">too little preserved to judge</span>' : ''}</td>`
+      + '</tr>';
+  }
+  return html + '</tbody></table>';
+}
+
+// Where the reading as written parts company with the best-attested form.
+// This is the report an editor wants after choosing against the majority: not
+// a correction, a record of what the choice costs in attestation.
+function divergenceBlock(current, majority) {
+  const a = positionWords(current).filter((t) => t.pos != null);
+  const b = positionWords(majority).filter((t) => t.pos != null);
+  const rows = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const mine = a[i] ? a[i].text : null;
+    const most = b[i] ? b[i].text : null;
+    if (mine === most) continue;
+    rows.push(`<tr><td class="report-nums">${i}</td>`
+      + `<td class="report-text">${mine == null ? '<span class="report-dash">—</span>' : renderAtf(mine)}</td>`
+      + `<td class="report-text">${most == null ? '<span class="report-dash">—</span>' : renderAtf(most)}</td></tr>`);
+  }
+  if (!rows.length) {
+    return noteBlock('The reading as written is the best-attested form at every position.', 'good');
+  }
+  return '<h4 class="report-heading">Where this reading departs from the best attested</h4>'
+    + '<table class="report-table report-diverge"><thead><tr><th>Position</th>'
+    + '<th>As written</th><th>Best attested</th></tr></thead><tbody>'
+    + rows.join('') + '</tbody></table>';
+}
+
+// What just happened to the score, in one line, at the top of every report.
+// Every outcome wears the same footer, so "not composed" and "composed" were
+// telling each other apart only by a word in the title — and the difference
+// between them is whether the omen changed.
+function outcomeBanner(kind, label, detail) {
+  const words = {
+    changed: [label + ' was replaced', 'is-changed'],
+    added:   [label + ' was written', 'is-changed'],
+    kept:    [label + ' was NOT changed', 'is-kept'],
+    none:    ['Nothing was composed', 'is-kept'],
+    sent:    [label + ' was sent to eBL', 'is-changed'],
+    notsent: [label + ' was NOT sent', 'is-kept'],
+  }[kind] || ['', 'is-kept'];
+  return `<div class="report-outcome ${words[1]}">`
+    + `<strong>${escapeHtml(words[0])}</strong>`
+    + (detail ? `<span>${escapeHtml(detail)}</span>` : '')
+    + '</div>';
+}
+
+// An error exactly as it came back. Not shortened: the useful part of a server
+// refusal is usually the end of it.
+function rawBlock(text) {
+  return `<pre class="report-raw">${escapeHtml(String(text == null ? '' : text))}</pre>`;
+}
+
+// A reported line and column, shown against the row it names with a caret
+// under it. A bare "line 4, col 2" is unreadable when the row is a witness
+// line eighty characters wide.
+function pointAt(text, line, column) {
+  const rows = String(text == null ? '' : text).split(String.fromCharCode(10));
+  const row = rows[(line || 1) - 1];
+  if (row == null) return '';
+  const col = Math.max(1, Math.min(column || 1, row.length + 1));
+  return row + String.fromCharCode(10) + ' '.repeat(col - 1) + '^';
+}
+
+function noteBlock(text, tone) {
+  return `<p class="report-note${tone ? ' is-' + tone : ''}">${escapeHtml(text)}</p>`;
+}
+
+// ---- Sending the alignment ------------------------------------------------
+//
+// Positions mode records which word of a witness answers to which word of the
+// reading. That is exactly what eBL stores per token, and what its hover
+// follows — but POST /lines cannot carry it, because that sends plain ATF and
+// eBL re-parses, keeping an alignment only where a token happens to pair with
+// an unchanged one. Exporting one edited line of EAE 56 took its aligned tokens
+// from 58 to 18 for that reason.
+//
+// POST /alignment takes the WHOLE chapter, nested line -> variant -> manuscript.
+// So every line has to be in the payload: the ones aligned here from what this
+// project knows, and the rest exactly as eBL already holds them.
+//
+// A word aligned to a word it differs from is a variant — the witness reads
+// something else there. eBL keeps that on the token itself, so a difference does
+// not have to become a whole separate reading.
+
+// One token, in the shape eBL's own editor sends. The variant is flattened:
+// `variant` is its value, with `type` and `language` beside it, empty when none.
+function alignmentToken(value, alignment, variant, type, language) {
+  return {
+    value,
+    alignment: alignment == null ? null : alignment,
+    variant: variant || '',
+    type: variant ? (type || 'Word') : '',
+    language: variant ? (language || 'AKKADIAN') : '',
+  };
+}
+
+// A manuscript line as eBL already holds it, unchanged.
+function carriedAlignment(m) {
+  const alignment = (m.atfTokens || []).map((t) => (t.alignable
+    ? alignmentToken(t.value, t.alignment, (t.variant && t.variant.value) || '',
+        t.type, t.language)
+    : { value: t.value }));
+  // Carried, but not carried blindly: a line already holding a word as both
+  // omitted and aligned would go straight back in that state, and eBL cannot
+  // save it. Sending the alignment is the moment that can be repaired.
+  const claimed = new Set(alignment.map((t) => t.alignment).filter((a) => a != null));
+  return {
+    alignment,
+    omittedWords: (m.omittedWords || []).filter((o) => !claimed.has(o)),
+  };
+}
+
+// A manuscript line from this project's own alignment.
+//
+// eBL's token list and ours are not the same list — theirs includes everything
+// on the line, ours only the words that can answer to a position. The two are
+// paired, and each of eBL's alignable tokens takes the position its partner
+// holds here.
+//
+// Equal lengths pair in order: both are tokenizations of the same line, so slot
+// N is slot N even where the transliteration differs — a witness reading GANBA
+// where this project reads GAN₂.BA is still the same slot, and that difference
+// is what a token variant records.
+//
+// Unequal lengths mean the two disagree about where a word ends — a bracket
+// falling inside a sign name splits one of ours in two ([{iti} BARA₂] against
+// {iti}BAR]A₂). Those are matched by their signs instead, and whatever fails to
+// pair is simply left unaligned. Nothing here discards the whole line: one
+// disagreement used to cost every alignment on it.
+function localAlignment(m, w, positions, omitted, convert) {
+  const ours = witnessWords(w.content).filter((t) => t.index != null);
+  const theirs = (m.atfTokens || []).filter((t) => t.alignable);
+  if (!ours.length || !theirs.length) return null;
+
+  const C = window.Compositor;
+  const mine = new Array(theirs.length).fill(null);
+  if (theirs.length === ours.length) {
+    for (let i = 0; i < theirs.length; i++) mine[i] = ours[i];
+  } else if (C && convert) {
+    const asToken = (text) => C.tokenize(String(text == null ? '' : text), convert)[0]
+      || { text: String(text), key: '', blank: true };
+    const pairs = C.align(theirs.map((t) => asToken(t.value)), ours.map((t) => asToken(t.text)));
+    for (const pair of pairs) {
+      if (pair[0] != null && pair[1] != null) mine[pair[0]] = ours[pair[1]];
+    }
+  } else {
+    return null;
+  }
+
+  const map = alignmentFor(w.__lineNum, w.siglum + '|' + w.sourceLine);
+
+  // Worked out first, then emitted, because a word of the reading can only be
+  // claimed once and that cannot be known while still walking left to right.
+  let next = 0;
+  const plan = (m.atfTokens || []).map((t) => {
+    if (!t.alignable) return { t, at: null, partner: null, same: false };
+    const partner = mine[next++];
+    const at = partner ? map[partner.index] : null;
+    if (at == null) return { t, at: null, partner: null, same: false };
+    const reading = positions[at];
+    // Paired but not equal: the witness reads something else here, and that is
+    // what a token variant is for.
+    const same = reading != null && C
+      && C.compareWords(reading, partner.text, convert) !== 'different';
+    return { t, at, partner, same };
+  });
+
+  // A commentary quotes the same word twice — ṣal-mat stands in the lemma and
+  // again in the explanation — and both halves match the one word the reading
+  // has. eBL refuses a line where two tokens claim one word, which held back
+  // the alignment of the whole chapter. So the better claim keeps the word and
+  // the repeat goes out unaligned: the quotation that agrees with the reading
+  // is the one that is really pointing at it.
+  const best = new Map();
+  plan.forEach((p, i) => {
+    if (p.at == null) return;
+    const held = best.get(p.at);
+    if (held == null) { best.set(p.at, i); return; }
+    if (p.same && !plan[held].same) best.set(p.at, i);
+  });
+  let doubled = 0;
+  plan.forEach((p, i) => {
+    if (p.at == null || best.get(p.at) === i) return;
+    p.at = null;
+    p.partner = null;
+    doubled++;
+  });
+
+  const claimed = new Set();
+  const alignment = plan.map((p) => {
+    if (!p.t.alignable) return { value: p.t.value };
+    if (p.at == null) return alignmentToken(p.t.value, null, '', p.t.type, p.t.language);
+    claimed.add(p.at);
+    return alignmentToken(p.t.value, p.at, p.same ? '' : clean(p.partner.text),
+      p.t.type, p.t.language);
+  });
+
+  // A word cannot be both absent from a witness and pointed at by one of its
+  // tokens. eBL stores the two side by side and refuses to save a line that
+  // claims both, which leaves the line uneditable in its own editor.
+  return { alignment, omittedWords: omitted.filter((o) => !claimed.has(o)), doubled };
+}
+
+function clean(text) {
+  return String(text || '').replace(/[#?!*[\]⸢⸣]/g, '');
+}
+
+// Build the whole-chapter alignment payload, and count what it changes.
+//
+// Returns { payload, summary } — the summary is what the editor is shown before
+// anything is sent, because this replaces every line's alignment at once.
+async function buildAlignmentPayload(chapter) {
+  const conv = await ensureAtfConverter();
+  const convert = (t) => { try { return conv.convertLine(t).codes; } catch (_) { return []; } };
+  const { scoreLines } = buildScore();
+  if (!manuscriptsMeta) {
+    manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
+  }
+  // Newly added sources need a row here, or their alignment has no id to go to.
+  manuscriptsMeta = EblClient.reconcileManuscripts(manuscriptsMeta,
+    Object.values(manuscripts).map((m) => (/\.txt$/.test(m.siglum) ? m.siglum : m.siglum + '.txt')));
+
+  // eBL numbers its manuscripts; the score knows them by file.
+  const idByMuseum = {};
+  for (const m of (chapter.manuscripts || [])) idByMuseum[m.museumNumber] = m.id;
+  const fileById = {};
+  for (const m of ((manuscriptsMeta && manuscriptsMeta.manuscripts) || [])) {
+    const id = idByMuseum[m.museumNumber];
+    if (id != null) fileById[id] = m.file || '';
+  }
+  // Compared without the extension: the score knows a witness by its file name,
+  // manuscripts.json sometimes by the bare siglum, and the two must still meet.
+  const bare = (x) => String(x || '').replace(/\.txt$/, '');
+
+  const summary = { lines: 0, fromHere: [], tokens: 0, aligned: 0, variants: 0,
+    omitted: 0, unmatched: [], doubled: [] };
+
+  const payload = (chapter.lines || []).map((L) => {
+    const sec = parseInt(L.number, 10);
+    const local = lineAlignments[sec];
+    const readings = variantsFor(sec);
+    const rows = (scoreLines[sec] || []).filter((w) => w.type === 'line');
+    let touched = false;
+
+    const out = L.variants.map((v, vi) => v.manuscripts.map((m) => {
+      const file = fileById[m.manuscriptId];
+      const reading = readings[vi];
+      // Only this project's own alignment replaces what eBL holds; everything
+      // else goes back exactly as it came.
+      const w = (file && local && reading)
+        ? rows.find((x) => bare(x.siglum) === bare(file)
+            && String(x.sourceLine) === String(m.number) && (x.variant || 0) === vi)
+        : null;
+      const map = w ? (local[w.siglum + '|' + w.sourceLine] || null) : null;
+      if (!w || !map || !Object.keys(map).length) {
+        // Worth saying out loud when this project holds an alignment for the
+        // witness and it still goes back unchanged. The usual cause is that
+        // eBL has moved the witness to another variant: the positions here
+        // index this project's reading, so writing them against a different
+        // reconstruction would point every word at the wrong word.
+        if (file && local) {
+          const elsewhere = rows.find((x) => bare(x.siglum) === bare(file)
+            && String(x.sourceLine) === String(m.number) && (x.variant || 0) !== vi);
+          const held = elsewhere && local[elsewhere.siglum + '|' + elsewhere.sourceLine];
+          if (held && Object.keys(held).length) {
+            summary.unmatched.push('§' + L.number + ' ' + eblSiglumOf(chapter, m.manuscriptId)
+              + ' ' + m.number + ': eBL has it under reading ' + (vi + 1)
+              + ', this project under reading ' + ((elsewhere.variant || 0) + 1));
+          }
+        }
+        const kept = carriedAlignment(m);
+        summary.tokens += kept.alignment.length;
+        summary.aligned += kept.alignment.filter((t) => t.alignment != null).length;
+        summary.omitted += kept.omittedWords.length;
+        return kept;
+      }
+      w.__lineNum = sec;
+      const words = positionWords(reading.text || '');
+
+      // An alignment index means a position in eBL's reconstruction, not in
+      // ours. Where the two readings have the same number of tokens the indices
+      // carry over, but whether a witness word is a VARIANT has to be judged
+      // against the word eBL actually holds there — otherwise K.3547's KIMIN
+      // goes out as a variant of GANBA when eBL's own position 12 is KIMIN.
+      const theirWords = (v.reconstructionTokens || []).map((t) => t.value);
+      if (theirWords.length !== words.length) {
+        summary.unmatched.push('§' + L.number + ' — the reading here has ' + words.length
+          + ' tokens, eBL has ' + theirWords.length + '; send the line first');
+        const kept = carriedAlignment(m);
+        summary.tokens += kept.alignment.length;
+        summary.aligned += kept.alignment.filter((t) => t.alignment != null).length;
+        summary.omitted += kept.omittedWords.length;
+        return kept;
+      }
+      const byPos = {};
+      theirWords.forEach((t, i) => { byPos[i] = t; });
+      const tally = alignmentTally(sec, w, words);
+      const built = localAlignment(m, w, byPos, tally.omitted, convert);
+      if (!built) {
+        // Our line and eBL's are not the same line. Leave theirs alone and say
+        // why — a bare reference tells an editor nothing about what to do.
+        const oursWords = witnessWords(w.content).filter((t) => t.index != null).length;
+        const theirWordsCount = (m.atfTokens || []).filter((t) => t.alignable).length;
+        const why = !theirWordsCount
+          ? 'eBL holds no alignable word on that line — it is all traces and breaks there'
+          : !oursWords
+            ? 'this line has no word that can take a position — a gloss, or all breaks'
+            : 'this line and the one eBL holds could not be matched word for word ('
+              + oursWords + ' here, ' + theirWordsCount + ' on eBL)';
+        summary.unmatched.push('§' + L.number + ' ' + w.siglum + ' ' + w.sourceLine
+          + ' — ' + why);
+        const kept = carriedAlignment(m);
+        summary.tokens += kept.alignment.length;
+        summary.aligned += kept.alignment.filter((t) => t.alignment != null).length;
+        summary.omitted += kept.omittedWords.length;
+        return kept;
+      }
+      touched = true;
+      if (built.doubled) {
+        summary.doubled.push('§' + L.number + ' ' + w.siglum + ' ' + w.sourceLine
+          + ' — ' + built.doubled + ' repeated quotation'
+          + (built.doubled === 1 ? '' : 's') + ' left unaligned');
+      }
+      summary.tokens += built.alignment.length;
+      summary.aligned += built.alignment.filter((t) => t.alignment != null).length;
+      summary.variants += built.alignment.filter((t) => t.variant).length;
+      summary.omitted += built.omittedWords.length;
+      return built;
+    }));
+
+    if (touched) { summary.fromHere.push(L.number); }
+    summary.lines++;
+    return out;
+  });
+
+  return { payload, summary };
+}
+
+// What this project's alignment says about one section, for the send preview.
+//
+// Worth showing next to the ATF, because sending a line and sending its
+// alignment are two different requests. POST /lines carries plain ATF, eBL
+// rebuilds the tokens from it, and most of what it held for that line goes —
+// so this is a picture of what has to be sent again afterwards.
+async function alignmentPreview(lineNum) {
+  const local = lineAlignments[lineNum] || null;
+  const readings = variantsFor(lineNum);
+  const { scoreLines } = buildScore();
+  const rows = (scoreLines[lineNum] || []).filter((w) => w.type === 'line');
+  if (!rows.length) return { blocks: [], placed: 0 };
+
+  // Named the way the ATF above names them. The abbreviations are cached by
+  // the time the artifact has been built, so this costs nothing here.
+  let sigla = {};
+  try { sigla = await EblAtf.buildEblSiglumMap(manuscriptsMeta, EblClient) || {}; }
+  catch (_) { sigla = {}; }
+  const named = (w) => sigla[String(w.siglum || '').replace(/\.txt$/, '')] || w.siglum;
+
+  // Grouped by the witnesses, not by the readings. A witness sitting on a
+  // reading that does not exist yet still goes out in the ATF, so it has to be
+  // accounted for here rather than quietly left out.
+  const groups = new Map();
+  for (const w of rows) {
+    const vi = w.variant || 0;
+    if (!groups.has(vi)) groups.set(vi, []);
+    groups.get(vi).push(w);
+  }
+  const order = [...groups.keys()].sort((a, b) => a - b);
+  const width = Math.max.apply(null, rows.map((w) => String(named(w)).length).concat([6]));
+
+  const out = [];
+  const legend = [];
+  let placedTotal = 0;
+  let markedTotal = 0;
+
+  for (const vi of order) {
+    const reading = readings[vi] || null;
+    const text = (reading && reading.text) || '';
+    const words = positionWords(text);
+    // Where eBL will show a ‡: a word some witness either reads differently
+    // or has not got at all. Worth knowing before sending, because it is the
+    // one thing in the published line that is not in the reading itself.
+    const marks = new Map();
+    const mark = (pos, why) => {
+      if (!marks.has(pos)) marks.set(pos, []);
+      marks.get(pos).push(why);
+    };
+    if (order.length > 1) {
+      out.push('Reading ' + (vi + 1) + (text ? ': ' + text : ': (no reading here yet)'));
+    }
+    for (const w of groups.get(vi)) {
+      const map = (local && local[w.siglum + '|' + w.sourceLine]) || null;
+      const tokens = witnessWords(w.content).filter((t) => t.index != null);
+      const placed = tokens.filter((t) => map && map[t.index] != null);
+      placedTotal += placed.length;
+      const tally = (map && text) ? alignmentTally(lineNum, w, words)
+        : { omitted: [], differing: [] };
+      const byPos = {};
+      for (const t of placed) byPos[map[t.index]] = t.text;
+      for (const pos of tally.omitted) mark(pos, named(w) + ' omits it');
+      for (const pos of (tally.differing || [])) {
+        mark(pos, named(w) + ' reads ' + (byPos[pos] || '?'));
+      }
+      const head = String(named(w)).padEnd(width) + '  ' + String(w.sourceLine).padStart(4) + '.  ';
+      out.push(head + (placed.length
+        ? placed.length + ' of ' + tokens.length + ' words placed'
+          + (tally.omitted.length ? ',  omits ' + tally.omitted.join(', ') : '')
+        : (!text ? 'no reading to place against'
+          : tokens.length ? 'nothing placed' : 'nothing to place')));
+      if (placed.length) {
+        out.push(' '.repeat(head.length)
+          + placed.map((t) => t.text + '→' + map[t.index]).join('   '));
+      }
+    }
+    out.push('');
+    const numbered = words.filter((t) => t.pos != null);
+    if (numbered.length) {
+      const block = [(order.length > 1 ? 'Reading ' + (vi + 1) + ':  ' : '')
+        + numbered.map((t) => t.pos + ':' + t.text
+            + (marks.has(t.pos) ? '‡' : '')).join('   ')];
+      for (const pos of [...marks.keys()].sort((a, b) => a - b)) {
+        block.push('   ‡ ' + pos + ' ' + ((words.find((t) => t.pos === pos) || {}).text || '')
+          + ' — ' + marks.get(pos).join('; '));
+        markedTotal++;
+      }
+      legend.push(block.join(String.fromCharCode(10)));
+    }
+  }
+
+  return {
+    placed: placedTotal,
+    blocks: [
+      '<details class="export-preview-wrap"' + (placedTotal ? ' open' : '') + '>'
+        + '<summary>Alignment held here — ' + (placedTotal
+          ? placedTotal + ' word' + (placedTotal === 1 ? '' : 's') + ' placed'
+            + (markedTotal ? ', ' + markedTotal + ' will carry ‡' : '')
+          : 'nothing placed yet') + '</summary>'
+        + '<pre class="export-preview">' + escapeHtml(out.join(String.fromCharCode(10)).trim()
+          + String.fromCharCode(10) + String.fromCharCode(10)
+          + (markedTotal
+              ? 'positions in the reading — ‡ is where eBL will show a mark:'
+              : 'positions in the reading:') + String.fromCharCode(10)
+          + legend.join(String.fromCharCode(10) + String.fromCharCode(10)))
+        + '</pre></details>',
+      placedTotal
+        ? noteBlock('This goes as a second request, straight after the line. eBL rebuilds'
+            + ' the tokens from the ATF above and clears most of what it held, so the'
+            + ' alignment is put back at once — and because eBL replaces a whole chapter’s'
+            + ' alignment in one go, every other line is sent back exactly as it stands'
+            + ' on eBL now.', 'warn')
+        : noteBlock('No positions are held for this section. Compose it, or number the words'
+            + ' in Positions mode, and the alignment can be sent after the line.'),
+    ],
+  };
+}
+
+// ---- What has been sent, and whether it still matches -------------------
+//
+// A mark per section saying it is on eBL and unchanged since. It is not kept
+// by hooking every edit — there are too many ways to change a line, and one
+// missed hook leaves a section claiming to be sent when it is not. Instead the
+// content is fingerprinted at the moment it goes, and the mark holds only
+// while the fingerprint still matches. Editing anything the export would carry
+// clears it by itself, including an edit made in another session.
+
+// Everything about a section that sending it would put on eBL.
+//
+// Three definitions have existed, and old records were written under the older
+// ones. `version` reproduces them exactly so a stored fingerprint can still be
+// recognised — including a mistake: versions 1 and 2 joined with control
+// characters that got into the string literals by accident, and every
+// fingerprint of that era was computed with them.
+//
+//   1  readings, witnesses, translation
+//   2  and the alignment, and every lemma
+//   3  and the alignment, but only the lemmas a person confirmed
+//
+// Version 3 exists because version 2 was unusable: prefill writes a machine
+// lemma onto every word of every section, so the moment the dictionary ran,
+// all ninety marks turned amber at once. A suggestion nobody has confirmed is
+// not sent to eBL either, so it has no business deciding whether a section
+// still matches what was sent.
+const SENT_FINGERPRINT_VERSION = 3;
+
+function sectionContent(lineNum, version) {
+  const v = version || SENT_FINGERPRINT_VERSION;
+  const RS = v < 3 ? String.fromCharCode(31) : '';
+  const parts = [];
+
+  for (const r of variantsFor(lineNum)) {
+    parts.push('R', r.text || '', r.note || '', (r.parallels || []).join(RS));
+  }
+  const { scoreLines } = buildScore();
+  for (const w of (scoreLines[lineNum] || [])) {
+    if (w.type !== 'line') continue;
+    parts.push('W', w.siglum, String(w.sourceLine), w.content || '',
+      String(w.variant || 0), (w.continuation || []).join(RS));
+  }
+  parts.push('T', translationLines[lineNum] || '');
+
+  if (v >= 2) {
+    // Sending a section carries its alignment, so moving a word's position
+    // changes what eBL would receive. Serialised in a fixed order: object key
+    // order is not something to rely on when the answer must not change on
+    // its own.
+    const align = lineAlignments[lineNum] || {};
+    for (const key of Object.keys(align).sort()) {
+      const map = align[key] || {};
+      parts.push('A', key);
+      for (const i of Object.keys(map).sort((a, b) => Number(a) - Number(b))) {
+        parts.push(i + ':' + map[i]);
+      }
+    }
+
+    const lemmas = lemmaChoices[lineNum] || {};
+    for (const vi of Object.keys(lemmas).sort((a, b) => Number(a) - Number(b))) {
+      const slot = lemmas[vi] || {};
+      const rows = [];
+      for (const pos of Object.keys(slot).sort((a, b) => Number(a) - Number(b))) {
+        const held = slot[pos];
+        const ids = Array.isArray(held) ? held : ((held && held.ids) || []);
+        // Version 3 counts only what a person confirmed. An array with no
+        // marker is an old record, which was always a person's choice.
+        const by = Array.isArray(held) ? 'hand' : ((held && held.by) || 'hand');
+        if (v >= 3 && by !== 'hand') continue;
+        rows.push(pos + ':' + ids.join('+'));
+      }
+      // The marker only if something survives the filter. Pushing it first put
+      // an empty "L 0" into every section the moment prefill ran, which changed
+      // every fingerprint and turned every mark amber — for lemmas that are not
+      // even sent.
+      if (rows.length) parts.push('L', vi, ...rows);
+    }
+  }
+
+  return parts.join(v < 3 ? String.fromCharCode(30) : '|');
+}
+
+// FNV-1a. Short, stable, and enough to notice a change — this is not guarding
+// against anyone forging a match, only against a section quietly drifting away
+// from what was sent.
+function fingerprint(text) {
+  let h = 0x811c9dc5;
+  const s = String(text == null ? '' : text);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+// never    nothing has been sent from here
+// sent     sent, and the section still reads as it did
+// changed  sent, then edited
+function sentState(lineNum) {
+  const rec = exportedSections[lineNum];
+  if (!rec || !rec.fingerprint) return 'never';
+  return rec.fingerprint === fingerprint(sectionContent(lineNum)) ? 'sent' : 'changed';
+}
+
+// Repaint one line's mark without rebuilding the score.
+//
+// Editing a reading deliberately does not re-render — the caret would be
+// destroyed on every keystroke — so the class the header was given at render
+// time cannot update on its own. That is why a section edited after being sent
+// stayed green: the fingerprint had changed, but nothing had asked it.
+//
+// Debounced, because it runs on every keystroke and the fingerprint rebuilds
+// the score to see what the section holds.
+const sentMarkTimers = {};
+function refreshSentMark(lineNum) {
+  clearTimeout(sentMarkTimers[lineNum]);
+  sentMarkTimers[lineNum] = setTimeout(() => {
+    const line = document.querySelector(`.score-line[data-line="${lineNum}"]`);
+    if (!line) return;
+    const state = sentState(lineNum);
+    const header = line.querySelector('.score-line-header');
+    if (header && !header.classList.contains('is-variant')) {
+      header.classList.remove('sent-never', 'sent-sent', 'sent-changed');
+      header.classList.add('sent-' + state);
+    }
+    const mark = line.querySelector('.line-sent');
+    if (mark) {
+      mark.classList.remove('is-never', 'is-sent', 'is-changed');
+      mark.classList.add('is-' + state);
+      mark.textContent = state === 'never' ? '·' : '✓';
+      mark.title = sentTitle(lineNum);
+    }
+  }, 250);
+}
+
+// Bring marks written under an older fingerprint up to date.
+//
+// Whenever the fingerprint learns to watch something new, every record written
+// before it mismatches — and "all ninety turned amber" is indistinguishable
+// from ninety real edits. So a record is re-affirmed only when it still matches
+// under the definition it was written with: that says the section was current
+// when it was last looked at and has not changed since. One that was already
+// amber stays amber. Either way it is stamped, so this runs once.
+function migrateSentMarks() {
+  let restored = 0, kept = 0;
+  for (const key of Object.keys(exportedSections)) {
+    const rec = exportedSections[key];
+    if (!rec) continue;
+    const was = rec.v || 1;
+    if (was >= SENT_FINGERPRINT_VERSION) continue;
+    const lineNum = Number(key);
+    if (!Number.isFinite(lineNum)) { rec.v = SENT_FINGERPRINT_VERSION; continue; }
+    if (rec.fingerprint === fingerprint(sectionContent(lineNum, was))) {
+      rec.fingerprint = fingerprint(sectionContent(lineNum));
+      restored++;
+    } else {
+      kept++;   // it had already been edited; leave it saying so
+    }
+    rec.v = SENT_FINGERPRINT_VERSION;
+  }
+  if (restored || kept) {
+    console.log('sent marks brought forward: ' + restored + ' still current, '
+      + kept + ' already edited');
+  }
+  return { restored, kept };
+}
+
+function markSent(lineNum, parts) {
+  exportedSections[lineNum] = {
+    fingerprint: fingerprint(sectionContent(lineNum)),
+    at: new Date().toISOString(),
+    parts: parts || ['line'],
+    // Which definition of the fingerprint this was written under. Without
+    // it, changing what the fingerprint covers turns every mark amber and
+    // there is no way to tell that from real edits.
+    v: SENT_FINGERPRINT_VERSION,
+  };
+}
+
+function sentTitle(lineNum) {
+  const rec = exportedSections[lineNum];
+  const state = sentState(lineNum);
+  if (state === 'never') {
+    return 'Not sent to eBL from here yet. Click to say it is already there;'
+      + ' shift-click to carry the mark down from the last one.';
+  }
+  const when = rec && rec.at ? new Date(rec.at).toLocaleString() : 'earlier';
+  const what = (rec && rec.parts && rec.parts.length) ? rec.parts.join(', ') : 'line';
+  return state === 'sent'
+    ? 'Sent to eBL (' + what + ') on ' + when + ', and unchanged since'
+    : 'Sent to eBL (' + what + ') on ' + when + ', and edited since — send it again';
+}
+
+// ---- Lemmas ---------------------------------------------------------------
+
+function lemmaSlot(lineNum, vi) {
+  const line = lemmaChoices[lineNum] || (lemmaChoices[lineNum] = {});
+  return line[vi] || (line[vi] = {});
+}
+
+// What a word carries, and who put it there.
+//
+//   hand  a person chose it
+//   auto  the dictionary filled it in and nobody has looked yet
+//
+// The difference is the whole point of prefilling: a chapter can be lemmatized
+// in one pass and then read through, and the reader has to be able to see at a
+// glance which words are still only a guess. Older projects stored a bare array
+// with no such distinction; those count as hand, because at the time the only
+// way a lemma got there was someone choosing it.
+function lemmaEntryAt(lineNum, vi, pos) {
+  const held = ((lemmaChoices[lineNum] || {})[vi] || {})[pos];
+  if (!held) return null;
+  if (Array.isArray(held)) return held.length ? { ids: held.slice(), by: 'hand' } : null;
+  const ids = Array.isArray(held.ids) ? held.ids : [];
+  return ids.length ? { ids: ids.slice(), by: held.by === 'auto' ? 'auto' : 'hand' } : null;
+}
+
+function lemmasAt(lineNum, vi, pos) {
+  const e = lemmaEntryAt(lineNum, vi, pos);
+  return e ? e.ids : [];
+}
+
+function setLemmasAt(lineNum, vi, pos, ids, by) {
+  if (typeof refreshSentMark === 'function') refreshSentMark(lineNum);
+  const slot = lemmaSlot(lineNum, vi);
+  if (!ids || !ids.length) delete slot[pos];
+  else slot[pos] = { ids: ids.slice(), by: by === 'auto' ? 'auto' : 'hand' };
+}
+
+// How a word stands: confirmed, still only suggested, or nothing at all.
+function lemmaState(lineNum, vi, pos, text) {
+  const e = lemmaEntryAt(lineNum, vi, pos);
+  if (e) return e.by;
+  if (window.Lemmatizer && Lemmatizer.loaded() && Lemmatizer.skippable(text)) return 'skip';
+  return 'none';
+}
+
+// How many words of one section carry a lemma.
+function lemmasHeldFor(lineNum) {
+  const line = lemmaChoices[lineNum] || {};
+  let n = 0;
+  for (const variant of Object.values(line)) n += Object.keys(variant || {}).length;
+  return n;
+}
+
+// Counts for the whole project, by who put each lemma there.
+function lemmaCount() {
+  let hand = 0, auto = 0;
+  for (const line of Object.values(lemmaChoices)) {
+    for (const variant of Object.values(line || {})) {
+      for (const held of Object.values(variant || {})) {
+        const by = Array.isArray(held) ? 'hand' : (held && held.by === 'auto' ? 'auto' : 'hand');
+        if (by === 'auto') auto++; else hand++;
+      }
+    }
+  }
+  return { hand, auto, total: hand + auto };
+}
+
+// Does this word open its line?
+//
+// Not only the first position. A reading beginning "[...] DIŠ" or "[DIŠ" has
+// its DIŠ standing where the omen starts, whatever the break before it counts
+// as — so anything before it that carries no signs does not push it out of
+// first place. That is what makes it šumma rather than ana.
+function opensTheLine(words, pos) {
+  for (const t of words) {
+    if (t.pos == null || t.pos >= pos) continue;
+    if (t.divider) continue;
+    if (window.Lemmatizer && Lemmatizer.skippable(t.text)) continue;
+    return false;   // a real word stands before it
+  }
+  return true;
+}
+
+// What the dictionary would put on a word, base plus whatever is written onto
+// the end of it. Returns [] when it has nothing to say.
+// Every bound ending written onto a word, innermost first — the order eBL
+// keeps them in on the token.
+function endingIdsOf(word) {
+  const ending = Lemmatizer.suffixOf(word);
+  if (!ending) return [];
+  if (ending.chain && ending.chain.length) return ending.chain.slice();
+  const ids = [];
+  if (ending.also) ids.push(ending.also.id);
+  ids.push(ending.id);
+  return ids;
+}
+
+function suggestLemmasFor(word, context) {
+  if (!window.Lemmatizer || !Lemmatizer.loaded()) return [];
+  if (Lemmatizer.skippable(word)) return [];
+  const ids = [];
+  // A reading this project has settled is taken whole. It may name more than
+  // one lemma — UTU.È is ṣītu and šamšu, one writing for two words — and only
+  // taking the first would quietly drop half the phrase.
+  const settled = Lemmatizer.glossaryFor(word);
+  if (settled) {
+    ids.push(...settled);
+  } else {
+    const best = Lemmatizer.candidates(word, 1, context);
+    if (best.length) ids.push(best[0].id);
+  }
+  // A word can carry more than two endings — a verb, its ventive and an
+  // enclitic are three — so take the whole chain where there is one.
+  for (const id of endingIdsOf(word)) if (ids.indexOf(id) < 0) ids.push(id);
+  return ids;
+}
+
+// Re-run the dictionary over its own earlier guesses.
+//
+// prefillLemmas never overwrites what is already there — that is what keeps it
+// safe to run again. But it means a lemma filled in before the dictionary
+// learned something stays wrong for ever: every line-initial DIŠ prefilled
+// before the reading layer existed still says ana, and no amount of prefilling
+// will change it.
+//
+// This walks the suggestions and only the suggestions. A lemma somebody chose
+// is never touched, whatever the dictionary now thinks.
+function refreshSuggestions(from, apply) {
+  const { scoreLines } = buildScore();
+  const sections = Object.keys(scoreLines).map(Number)
+    .filter((n) => Number.isFinite(n) && (from == null || n >= from))
+    .sort((a, b) => a - b);
+
+  const changes = [];
+  for (const lineNum of sections) {
+    variantsFor(lineNum).forEach((reading, vi) => {
+      const words = positionWords(reading.text || '');
+      for (const t of words) {
+        if (t.pos == null || t.divider) continue;
+        const held = lemmaEntryAt(lineNum, vi, t.pos);
+        if (!held || held.by !== 'auto') continue;      // only the machine's own
+        const now = suggestLemmasFor(t.text, { initial: opensTheLine(words, t.pos) });
+        if (!now.length) continue;
+        if (now.join('+') === held.ids.join('+')) continue;
+        changes.push({ lineNum, vi, pos: t.pos, word: t.text,
+                       was: held.ids.slice(), now });
+      }
+    });
+  }
+  if (apply) {
+    for (const c of changes) setLemmasAt(c.lineNum, c.vi, c.pos, c.now, 'auto');
+  }
+  return changes;
+}
+
+// Offer it, showing what would change before anything does.
+async function offerRefreshSuggestions(from) {
+  try { await Lemmatizer.load(); } catch (_) { return; }
+  const changes = refreshSuggestions(from, false);
+  if (!changes.length) {
+    setStatus('connected', 'Every suggestion already matches the dictionary');
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+    return;
+  }
+  const lines = changes.slice(0, 40).map((c) => '§' + c.lineNum
+    + (c.vi ? variantLetterOf(c.vi) : '') + '  word ' + c.pos + '  ' + c.word
+    + '   ' + (c.was.join('+') || 'none') + '  →  ' + c.now.join('+'));
+
+  const ok = await askOverlay('Refresh the suggestions?', [
+    '<div class="report-outcome is-kept">'
+      + '<strong>' + escapeHtml(changes.length + ' suggestion'
+          + (changes.length === 1 ? '' : 's') + ' would change') + '</strong>'
+      + '<span>' + escapeHtml('Nothing chosen by hand is touched.') + '</span>'
+      + '</div>',
+    rawBlock(lines.join(String.fromCharCode(10))
+      + (changes.length > 40 ? String.fromCharCode(10) + '…and '
+         + (changes.length - 40) + ' more' : '')),
+    noteBlock('These were filled in by an earlier version of the dictionary. Only'
+      + ' lemmas still marked as suggestions are affected.'),
+  ], 'Refresh ' + changes.length, false);
+  if (!ok) return;
+
+  refreshSuggestions(from, true);
+  await saveScoreDataToFile();
+  keepScoreInView(renderScore);
+  setStatus('connected', changes.length + ' suggestion(s) refreshed');
+  setTimeout(() => setStatus('connected', 'Ready'), 5000);
+}
+
+// ---- this project's own dictionary -----------------------------------------
+//
+// The general dictionary knows what IGI can mean. It cannot know that in EAE 56
+// it is always amāru, because that is a decision about this edition and not a
+// fact about Akkadian. Recorded here, it is made once instead of on every line,
+// and it outranks everything the shipped index would otherwise offer.
+//
+// It lives in score-data.json beside the lemmas themselves, and it can be
+// carried to the next project: the readings an editor settles for one text are
+// usually the same ones they will settle for the next.
+let projectGlossary = {};
+
+function applyProjectGlossary() {
+  try { Lemmatizer.setGlossary(projectGlossary); } catch (_) { /* not loaded yet */ }
+}
+
+// Teach the project a reading. The word is keyed the way the lemmatizer keys
+// everything, so IGI, igi and {d}IGI all land on one entry.
+async function teachProjectLemma(word, ids) {
+  const key = Lemmatizer.glossaryKey(word);
+  if (!key || !ids || !ids.length) return null;
+  projectGlossary[key] = ids.slice();
+  applyProjectGlossary();
+  await saveScoreDataToFile();
+  return key;
+}
+
+async function forgetProjectLemma(key) {
+  if (!(key in projectGlossary)) return false;
+  delete projectGlossary[key];
+  applyProjectGlossary();
+  await saveScoreDataToFile();
+  return true;
+}
+
+// How many words in the score an entry actually answers. A project entry
+// reaches every line at once, and that is worth being able to see.
+function glossaryReach(key) {
+  let n = 0;
+  const { scoreLines } = buildScore();
+  const sections = Object.keys(scoreLines).map(Number).filter(Number.isFinite);
+  for (const lineNum of sections) {
+    variantsFor(lineNum).forEach((reading) => {
+      for (const t of positionWords(reading.text || '')) {
+        if (t.pos == null || t.divider) continue;
+        const probe = Lemmatizer.glossaryKey(t.text) || '';
+        if (probe === key || probe.split('-')[0] === key) n++;
+      }
+    });
+  }
+  return n;
+}
+
+function glossaryRows() {
+  return Object.keys(projectGlossary).sort().map((key) => ({
+    key,
+    ids: projectGlossary[key],
+    reach: glossaryReach(key),
+  }));
+}
+
+// The dictionary as a file, so it can start the next project already knowing
+// what this one decided.
+function exportProjectGlossary() {
+  const payload = {
+    kind: 'cuneiform-scorer project dictionary',
+    project: projectId || '',
+    savedAt: new Date().toISOString(),
+    entries: projectGlossary,
+  };
+  const name = (projectId || 'project') + '-dictionary.json';
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return name;
+}
+
+// Merged, not replaced: a dictionary brought from another project adds what it
+// knows without discarding what this one has already settled. Where both have
+// an opinion the one already here wins, since it was made about this text.
+async function importProjectGlossary(text) {
+  let data = null;
+  try { data = JSON.parse(text); } catch (_) { return { error: 'That file is not JSON.' }; }
+  const entries = (data && (data.entries || data)) || {};
+  if (typeof entries !== 'object') return { error: 'No dictionary entries in that file.' };
+  let added = 0, kept = 0, skipped = 0;
+  for (const form of Object.keys(entries)) {
+    const held = entries[form];
+    const ids = (Array.isArray(held) ? held : (held && held.ids) || [])
+      .filter((id) => Lemmatizer.known(id));
+    const key = Lemmatizer.glossaryKey(form);
+    if (!key || !ids.length) { skipped++; continue; }
+    if (projectGlossary[key]) { kept++; continue; }
+    projectGlossary[key] = ids;
+    added++;
+  }
+  if (added) {
+    applyProjectGlossary();
+    await saveScoreDataToFile();
+  }
+  return { added, kept, skipped };
+}
+
+// The manager. Deliberately here rather than in Settings: Settings is another
+// page and does not hold this project's folder, and this edits the same file
+// the score itself is saved in.
+function openGlossaryManager() {
+  const rows = glossaryRows();
+  const APOS = String.fromCharCode(8217);
+  const body = rows.length
+    ? '<table class="gloss-table"><thead><tr><th>Written</th><th>Read as</th>'
+      + '<th>Words</th><th></th></tr></thead><tbody>'
+      + rows.map((r) => '<tr><td class="gloss-form">'
+          + escapeHtml(r.key.toUpperCase().replace(/-/g, '.')) + '</td>'
+          + '<td>' + escapeHtml(r.ids.join(' + ')) + '</td>'
+          + '<td class="gloss-reach">' + r.reach + '</td>'
+          + '<td><button type="button" class="gloss-drop" data-key="'
+          + escapeHtml(r.key) + '">Remove</button></td></tr>').join('')
+      + '</tbody></table>'
+    : noteBlock('This project has settled no readings of its own yet. Choose a lemma'
+        + ' on any word and use the mark beside it to record that reading for the'
+        + ' whole project.');
+
+  showComposeReport('This project' + APOS + 's dictionary', [
+    outcomeBanner(rows.length ? 'kept' : 'skipped',
+      rows.length + ' reading' + (rows.length === 1 ? '' : 's'),
+      'recorded for this edition, ahead of the general dictionary'),
+    body,
+    '<div class="gloss-add">'
+      + '<input id="gloss-word" placeholder="written form, e.g. IGI" spellcheck="false">'
+      + '<input id="gloss-ids" placeholder="lemma, e.g. amaru I" spellcheck="false">'
+      + '<button type="button" id="gloss-save" class="btn-primary">Record</button></div>',
+    noteBlock('A reading recorded for IGI also answers IGI-ir and IGI-MEŠ: a'
+      + ' phonetic complement or a plural marker does not make it another word.'),
+    '<div class="gloss-file">'
+      + '<button type="button" id="gloss-export">Export for another project</button>'
+      + '<button type="button" id="gloss-import">Import a dictionary</button>'
+      + '<input type="file" id="gloss-file" accept="application/json,.json" hidden></div>',
+  ], 'project-dictionary');
+
+  const bodyEl = document.getElementById('compose-report-body');
+  if (!bodyEl) return;
+
+  for (const btn of bodyEl.querySelectorAll('.gloss-drop')) {
+    btn.addEventListener('click', async () => {
+      await forgetProjectLemma(btn.dataset.key);
+      keepScoreInView(renderScore);
+      openGlossaryManager();
+    });
+  }
+
+  const save = document.getElementById('gloss-save');
+  if (save) save.addEventListener('click', async () => {
+    const word = ((document.getElementById('gloss-word') || {}).value || '').trim();
+    const typed = ((document.getElementById('gloss-ids') || {}).value || '').trim();
+    const ids = [];
+    for (const piece of typed.split('+').map((s) => s.trim()).filter(Boolean)) {
+      if (Lemmatizer.known(piece)) { ids.push(piece); continue; }
+      const found = Lemmatizer.search(piece, 1);
+      if (found.length) ids.push(found[0].id);
+    }
+    if (!word || !ids.length) {
+      setStatus('error', 'A written form, and a lemma the dictionary knows');
+      setTimeout(() => setStatus('connected', 'Ready'), 4000);
+      return;
+    }
+    await teachProjectLemma(word, ids);
+    keepScoreInView(renderScore);
+    openGlossaryManager();
+  });
+
+  const out = document.getElementById('gloss-export');
+  if (out) out.addEventListener('click', () => {
+    const name = exportProjectGlossary();
+    setStatus('connected', 'Saved ' + name);
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  });
+
+  const pick = document.getElementById('gloss-import');
+  const file = document.getElementById('gloss-file');
+  if (pick && file) {
+    pick.addEventListener('click', () => file.click());
+    file.addEventListener('change', async () => {
+      const f = file.files && file.files[0];
+      if (!f) return;
+      const done = await importProjectGlossary(await f.text());
+      if (done.error) {
+        setStatus('error', done.error);
+        setTimeout(() => setStatus('connected', 'Ready'), 5000);
+        return;
+      }
+      keepScoreInView(renderScore);
+      setStatus('connected', done.added + ' added, ' + done.kept + ' already settled here');
+      setTimeout(() => setStatus('connected', 'Ready'), 5000);
+      openGlossaryManager();
+    });
+  }
+}
+
+// Fill in every word the dictionary can place, leaving anything already there
+// alone. Nothing here overwrites a decision — a word someone has chosen keeps
+// what they chose, and a word the dictionary cannot place stays empty rather
+// than being given a wrong answer to tidy the display.
+// `only` is one section; `{ from }` is that section and everything after it.
+function prefillLemmas(only) {
+  const all = Object.keys(buildScore().scoreLines).map(Number)
+    .filter(Number.isFinite).sort((a, b) => a - b);
+  const sections = (only && typeof only === 'object' && only.from != null)
+    ? all.filter((n) => n >= only.from)
+    : (only != null ? [only] : all);
+  let filled = 0, blank = 0;
+  for (const lineNum of sections) {
+    const readings = variantsFor(lineNum);
+    readings.forEach((reading, vi) => {
+      const words = positionWords(reading.text || '');
+      for (const t of words) {
+        if (t.pos == null || t.divider) continue;
+        if (lemmaEntryAt(lineNum, vi, t.pos)) continue;
+        if (Lemmatizer.skippable(t.text)) continue;
+        // Where a word sits can settle what it is: the DIŠ that opens an
+        // omen is šumma, the same sign elsewhere is not.
+        const ids = suggestLemmasFor(t.text, { initial: opensTheLine(words, t.pos) });
+        if (ids.length) { setLemmasAt(lineNum, vi, t.pos, ids, 'auto'); filled++; }
+        else blank++;
+      }
+    });
+  }
+  return { filled, blank };
+}
+
+// The whole chapter's lemmatization, in the shape POST …/lemmatization wants.
+//
+// One token for every reconstruction token and every manuscript token, in eBL's
+// own order — the same indexing the alignment uses, dividers included. A token
+// with no lemma is sent as a bare value, which is how eBL sends them too.
+//
+// A witness word takes the lemma of the reading word it is aligned to. That is
+// not a guess: the alignment says those two words are the same word of the text,
+// so if the reading word is dubbu, so is the witness's spelling of it. Words
+// eBL holds no alignment for keep whatever lemma they already carry.
+// `opts.includeSuggested` decides whether the dictionary's own guesses go.
+//
+// This matters more than it looks. POST …/lemmatization replaces the WHOLE
+// chapter, and prefill fills every section — so sending the lemmas of one
+// omen sends the machine's guesses for all ninety with it. A section nobody
+// has opened arrives on eBL fully lemmatized by a dictionary lookup.
+//
+// So the default is to send only what a person confirmed. A suggestion left
+// out is not lost: eBL keeps whatever it already had for that word.
+async function buildLemmatizationPayload(chapter, opts) {
+  const includeSuggested = !!(opts && opts.includeSuggested);
+  const summary = { lines: 0, fromHere: [], tokens: 0, lemmatized: 0,
+                    inherited: 0, kept: 0, unknown: [], broken: 0,
+                    mismatched: [], mismatchedSections: [], losing: [],
+                    suggested: 0, withheld: 0 };
+
+  // eBL types [...] as a Word, but refuses to lemmatize one: a token made of
+  // broken-away and unknown signs has no word in it to name. Sending one is a
+  // 422 that names the token and rejects the whole chapter.
+  //
+  // The witnesses are where this bites. A witness word takes the lemma of the
+  // reading word it is aligned to, and a break aligned to a real word would
+  // inherit that word's lemma without anyone choosing it.
+  const isBreak = (value) => (window.Lemmatizer
+    ? Lemmatizer.skippable(value)
+    : !String(value == null ? '' : value).replace(/[\[\]().x…\s⸢⸣]/g, ''));
+
+  const payload = (chapter.lines || []).map((L) => {
+    const sec = parseInt(L.number, 10);
+    const mine = lemmaChoices[sec] || null;
+    let touched = false;
+
+    // Sending a line replaces the whole chapter line, variants and all, with
+    // what this project holds. Where eBL has readings this project does not,
+    // that is not a correction — it is a deletion, and it has to be said out
+    // loud before anyone agrees to send twenty of them.
+    const readingsHere = variantsFor(sec).filter((r) => (r.text || '').trim()).length;
+    const readingsThere = (L.variants || []).length;
+    if (readingsThere > readingsHere && mine && Object.keys(mine).length) {
+      summary.losing.push('§' + L.number + ' — eBL has ' + readingsThere
+        + ' readings, this project has ' + readingsHere
+        + '; sending the line drops the extra ' + (readingsThere - readingsHere));
+    }
+
+    const variants = (L.variants || []).map((v, vi) => {
+      // A lemma is stored against a position in THIS project's reading, and
+      // sent against eBL's reconstruction token at the same index. Those are
+      // only the same word while the two readings have the same tokens — and
+      // when they do not, a lemma lands on whatever eBL happens to hold there.
+      // That is how ana I ended up on a [...]: not a wrong lemma, a lemma on
+      // the wrong word.
+      const readingHere = variantsFor(sec)[vi];
+      const oursCount = readingHere ? positionWords(readingHere.text || '')
+        .filter((t) => t.pos != null).length : 0;
+      const theirsCount = (v.reconstructionTokens || []).length;
+      const aligned = !mine || !readingHere || oursCount === theirsCount;
+      if (!aligned && mine && mine[vi] && Object.keys(mine[vi]).length) {
+        summary.mismatched.push('§' + L.number + (vi ? ' reading ' + (vi + 1) : '')
+          + ' — the reading here has ' + oursCount + ' tokens, eBL has ' + theirsCount
+          + '; send the line first');
+        if (summary.mismatchedSections.indexOf(sec) < 0) summary.mismatchedSections.push(sec);
+      }
+
+      // The reading. Positions count every reconstruction token, so the index
+      // here is the index the editor sees in Positions mode.
+      const byPos = {};
+      const reconstruction = (v.reconstructionTokens || []).map((t, i) => {
+        if (isBreak(t.value)) { summary.broken++; return { value: t.value }; }
+        const chosenHere = aligned ? lemmaEntryAt(sec, vi, i) : null;
+        if (chosenHere && chosenHere.by === 'auto') summary.suggested++;
+        // A suggestion nobody has looked at is not an edition.
+        const entry = (chosenHere && chosenHere.by === 'auto' && !includeSuggested)
+          ? null : chosenHere;
+        if (chosenHere && !entry) summary.withheld++;
+        const ids = entry ? entry.ids : null;
+        summary.tokens++;
+        if (ids && ids.length) {
+          touched = true;
+          summary.lemmatized++;
+          byPos[i] = ids;
+          for (const id of ids) {
+            if (window.Lemmatizer && Lemmatizer.loaded() && !Lemmatizer.known(id)) {
+              summary.unknown.push('§' + L.number + ' word ' + i + ': ' + id);
+            }
+          }
+          return { value: t.value, uniqueLemma: ids.slice() };
+        }
+        // Nothing chosen here, so whatever eBL holds stays.
+        const held = (t.uniqueLemma || []);
+        if (held.length) { summary.kept++; return { value: t.value, uniqueLemma: held.slice() }; }
+        return { value: t.value };
+      });
+
+      const manuscripts = (v.manuscripts || []).map((m) => (m.atfTokens || []).map((t) => {
+        summary.tokens++;
+        if (isBreak(t.value)) { summary.broken++; return { value: t.value }; }
+        const at = t.alignment;
+        const inherited = (at != null && byPos[at]) ? byPos[at] : null;
+        if (inherited) { summary.inherited++; return { value: t.value, uniqueLemma: inherited.slice() }; }
+        const held = (t.uniqueLemma || []);
+        if (held.length) { summary.kept++; return { value: t.value, uniqueLemma: held.slice() }; }
+        return { value: t.value };
+      }));
+
+      return { reconstruction, manuscripts };
+    });
+
+    if (touched) summary.fromHere.push(L.number);
+    summary.lines++;
+    return variants;
+  });
+
+  return { payload, summary };
+}
+
+// Anything eBL will refuse, or that would leave its reader broken.
+//
+// A lemma id eBL cannot resolve is the dangerous one: its chapter view
+// dereferences the dictionary lookup without a guard, so an unknown id does not
+// fail the save — it breaks the page afterwards. Every id is checked against
+// the shipped dictionary first.
+function lemmatizationProblems(chapter, payload) {
+  const out = [];
+  (chapter.lines || []).forEach((L, li) => {
+    (L.variants || []).forEach((v, vi) => {
+      const built = (payload[li] || [])[vi];
+      if (!built) return;
+      const n = (v.reconstructionTokens || []).length;
+      // A lemma on a break is a 422 that rejects the whole chapter, so it is
+      // worth naming here even though the builder no longer emits one.
+      const breaks = (value) => (window.Lemmatizer ? Lemmatizer.skippable(value) : false);
+      built.reconstruction.forEach((t, i) => {
+        if (t.uniqueLemma && t.uniqueLemma.length && breaks(t.value)) {
+          out.push('§' + L.number + ' word ' + i + ': ' + t.value
+            + ' is a break and cannot carry a lemma');
+        }
+      });
+      built.manuscripts.forEach((tokens, mi) => tokens.forEach((t) => {
+        if (t.uniqueLemma && t.uniqueLemma.length && breaks(t.value)) {
+          out.push('§' + L.number + ' '
+            + eblSiglumOf(chapter, ((v.manuscripts || [])[mi] || {}).manuscriptId)
+            + ': ' + t.value + ' is a break and cannot carry a lemma');
+        }
+      }));
+      if (built.reconstruction.length !== n) {
+        out.push('§' + L.number + ': ' + built.reconstruction.length
+          + ' reading tokens sent, eBL has ' + n);
+      }
+      (v.manuscripts || []).forEach((m, mi) => {
+        const got = (built.manuscripts[mi] || []).length;
+        const want = (m.atfTokens || []).length;
+        if (got !== want) {
+          out.push('§' + L.number + ' ' + eblSiglumOf(chapter, m.manuscriptId)
+            + ': ' + got + ' tokens sent, eBL has ' + want);
+        }
+      });
+    });
+  });
+  return out;
+}
+
+function lemmaTitle(state, ids) {
+  if (state === 'skip') return 'Nothing to lemmatize here';
+  if (state === 'none') return 'No lemma. Click to choose one.';
+  const what = ids.join(' + ');
+  return state === 'auto'
+    ? what + ' — suggested by the dictionary, not yet confirmed. Click to confirm or change.'
+    : what + ' — confirmed. Click to change.';
+}
+
+// Which words of a reading eBL will mark with a ‡, worked out the way eBL
+// works it out: a word some witness either reads differently or has not got.
+//
+// Shown in the score itself, not only in the send preview — it is a fact about
+// the edition, and the point of it is to see the published line before it is
+// published.
+function daggerPositions(lineNum, vi, reading) {
+  const marks = new Map();
+  const words = positionWords(reading.text || '');
+  const { scoreLines } = buildScore();
+  for (const w of (scoreLines[lineNum] || [])) {
+    if (w.type !== 'line' || (w.variant || 0) !== vi) continue;
+    const map = (lineAlignments[lineNum] || {})[w.siglum + '|' + w.sourceLine];
+    if (!map || !Object.keys(map).length) continue;
+    const tally = alignmentTally(lineNum, w, words);
+    const toks = witnessWords(w.content).filter((t) => t.index != null);
+    const byPos = {};
+    for (const t of toks) if (map[t.index] != null) byPos[map[t.index]] = t.text;
+    const note = (pos, why) => {
+      if (!marks.has(pos)) marks.set(pos, []);
+      marks.get(pos).push(why);
+    };
+    for (const pos of tally.omitted) note(pos, displaySiglum(w.siglum) + ' omits it');
+    for (const pos of (tally.differing || [])) {
+      note(pos, displaySiglum(w.siglum) + ' reads ' + (byPos[pos] || '?'));
+    }
+  }
+  return marks;
+}
+
+// The line as eBL will print it: the reading with a ‡ on every word some
+// witness reads otherwise or has not got.
+//
+// Its own row, not the reading itself. The reading is contenteditable, and a ‡
+// put inside it would be typed over, and would be read back by writeReading
+// into the text that goes to eBL — the marker is eBL's, derived from the
+// alignment, and must never become part of the reconstruction.
+function daggerLine(lineNum, vi, reading, marks) {
+  if (!marks || !marks.size) return '';
+  const words = positionWords(reading.text || '');
+  const shown = words.map((t) => {
+    if (t.pos == null) return renderAtf(t.text);
+    if (!marks.has(t.pos)) return renderAtf(t.text);
+    return `<span class="ebl-marked" title="${escapeHtml(marks.get(t.pos).join('; '))}">`
+      + `${renderAtf(t.text)}<span class="ebl-dagger">‡</span></span>`;
+  }).join(' ');
+  return `<div class="ebl-line" data-line="${lineNum}" data-variant="${vi}"`
+    + ` title="How eBL will print this line">${shown}</div>`;
+}
+
+// The lemmas of a reading, each under the word it belongs to.
+//
+// Shown whether or not Lemmas mode is on, because a lemma is part of the
+// edition and not a mode of working on it. The word is repeated above its
+// lemma rather than the lemmas being listed on their own: a bare row of ids
+// reads as a column of unrelated words, and the only thing that makes it
+// legible is seeing which word each one answers to.
+//
+// It sits outside the reading rather than inside it — the reading is
+// contenteditable in the ordinary view, and anything put in there is typed
+// into.
+function lemmaStrip(lineNum, vi, reading) {
+  const words = positionWords(reading.text || '');
+  const cells = [];
+  let any = false;
+  for (const t of words) {
+    if (t.pos == null || t.divider) continue;
+    const state = lemmaState(lineNum, vi, t.pos, t.text);
+    if (state === 'skip') continue;
+    const ids = lemmasAt(lineNum, vi, t.pos);
+    if (ids.length) any = true;
+    cells.push(`<span class="lem-pair is-${state}">`
+      + `<span class="lem-pair-word">${renderAtf(t.text)}</span>`
+      + `<span class="lem-pair-id">${escapeHtml(ids.length ? ids.join(' + ') : '·')}</span>`
+      + '</span>');
+  }
+  if (!any) return '';
+  return `<div class="lemma-strip" data-line="${lineNum}" data-variant="${vi}">`
+    + cells.join('') + '</div>';
+}
+
+// Open the lemma picker on one word, in place.
+//
+// A list of our own rather than a <datalist>: a datalist decides for itself how
+// many rows to show and cannot be scrolled to a chosen height, and its
+// behaviour differs between browsers. Ten rows is enough to see the field
+// without burying the line being read, and the rest is a scroll away.
+//
+// The list is anchored to the word, so the eye does not have to travel to find
+// out what it is choosing for.
+const LEMMA_ROWS_SHOWN = 10;
+
+async function openLemmaDropdown(el) {
+  if (!el || el.querySelector('input')) return;
+  const lineNum = parseInt(el.dataset.line, 10);
+  const vi = parseInt(el.dataset.variant, 10) || 0;
+  const pos = parseInt(el.dataset.pos, 10);
+  if (!Number.isFinite(lineNum) || !Number.isFinite(pos)) return;
+
+  try { await Lemmatizer.load(); } catch (_) { return; }
+
+  const reading = variantsFor(lineNum)[vi];
+  if (!reading) return;
+  const words = positionWords(reading.text || '');
+  const word = (words.find((t) => t.pos === pos) || {}).text || '';
+  const held = lemmasAt(lineNum, vi, pos);
+
+  // An ending written onto the word is kept whatever the base becomes: it is a
+  // fact about the spelling, not a reading of it.
+  const endingIds = endingIdsOf(word);
+  // A word may be more than one lemma. UTU.È is one writing for ṣīt šamši, and
+  // both halves belong on the token, so the box holds them joined by a + and
+  // gives them back the same way.
+  const base = held.filter((id) => endingIds.indexOf(id) < 0).join(' + ');
+  const settled = Lemmatizer.glossaryFor(word);
+  const suggestions = Lemmatizer.candidates(word, 60, { initial: opensTheLine(words, pos) })
+    .filter((c) => !(settled && settled.indexOf(c.id) >= 0))
+    .map((c) => ({ id: c.id, guide: c.guide, how: c.exact ? '' : c.how }));
+  if (settled) {
+    suggestions.unshift({
+      id: settled.join(' + '),
+      guide: settled.map((id) => Lemmatizer.guideWord(id) || '').filter(Boolean).join(' + '),
+      how: 'this project reads it so',
+    });
+  }
+
+  const idHtml = el.querySelector('.lem-id');
+  const previous = idHtml ? idHtml.outerHTML : '';
+  if (idHtml) {
+    idHtml.outerHTML = '<span class="lem-edit">'
+      + '<input class="lem-input" value="' + escapeHtml(base) + '"'
+      + ' placeholder="lemma" autocomplete="off" spellcheck="false">'
+      + '<span class="lem-list" role="listbox"></span></span>';
+  }
+  const input = el.querySelector('.lem-input');
+  const list = el.querySelector('.lem-list');
+  if (!input || !list) return;
+
+  let rows = suggestions;
+  let active = -1;
+  const PIN = String.fromCharCode(167);   // §, the mark the score already uses
+
+  const paint = () => {
+    list.innerHTML = rows.length
+      ? rows.map((r, i) => '<span class="lem-option' + (i === active ? ' is-active' : '')
+          + '" data-i="' + i + '" role="option">'
+          + '<span class="lem-option-id">' + escapeHtml(r.id) + '</span>'
+          + '<span class="lem-option-guide">' + escapeHtml(r.guide || '') + '</span>'
+          + (r.how ? '<span class="lem-option-how">' + escapeHtml(r.how) + '</span>' : '')
+          // Choosing settles this word; the mark settles the whole project.
+          + '<span class="lem-pin" data-pin="' + i + '" title="Read '
+          + escapeHtml(word) + ' this way everywhere in this project">' + PIN + '</span>'
+          + '</span>').join('')
+      : '<span class="lem-option is-empty">nothing matches that</span>';
+    const on = list.querySelector('.is-active');
+    if (on) on.scrollIntoView({ block: 'nearest' });
+  };
+
+  const commit = (id, teach) => {
+    // Only a lemma the dictionary knows may be stored. An id eBL cannot resolve
+    // does not fail the save — it breaks the chapter page afterwards.
+    const chosen = [];
+    const typed = String(id == null ? input.value : id).trim();
+    // Several lemmas on one word are written with a +, the way the project
+    // dictionary records them.
+    for (const piece of typed.split('+').map((x) => x.trim()).filter(Boolean)) {
+      if (Lemmatizer.known(piece)) { chosen.push(piece); continue; }
+      const found = Lemmatizer.search(piece, 1);
+      if (found.length) chosen.push(found[0].id);
+    }
+    if (typed && !chosen.length) { close(false); return; }
+    const ids = chosen.slice();
+    for (const e of endingIds) if (ids.indexOf(e) < 0) ids.push(e);
+    setLemmasAt(lineNum, vi, pos, chosen.length ? ids : [], 'hand');
+    // Recorded for the project, the reading answers this word everywhere it is
+    // written, on lines not yet looked at as well as this one.
+    if (teach && chosen.length) {
+      teachProjectLemma(word, chosen).then(() => {
+        setStatus('connected', word + ' ' + String.fromCharCode(8594) + ' '
+          + chosen.join(' + ') + ', for the whole project');
+        setTimeout(() => setStatus('connected', 'Ready'), 4000);
+      });
+    } else {
+      saveScoreDataToFile();
+    }
+    close(false);
+  };
+
+  let closed = false;
+  function close(restore) {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('mousedown', onOutside, true);
+    if (restore && previous) {
+      const edit = el.querySelector('.lem-edit');
+      if (edit) edit.outerHTML = previous;
+    } else {
+      renderScore();
+    }
+  }
+
+  const onOutside = (e) => { if (!el.contains(e.target)) close(true); };
+  document.addEventListener('mousedown', onOutside, true);
+
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const q = input.value.trim();
+      rows = q ? Lemmatizer.search(q, 60).map((r) => ({ id: r.id, guide: r.guide, how: '' }))
+               : suggestions;
+      active = rows.length ? 0 : -1;
+      paint();
+    }, 120);
+  });
+
+  // The next word to tag, as coordinates rather than as an element: committing
+  // rebuilds the score, so anything held by reference is gone by the time it
+  // would be used.
+  const neighbour = (dir) => {
+    const all = [...document.querySelectorAll('.lem-word')].filter((x) =>
+      !x.classList.contains('is-divider') && !x.classList.contains('is-skip'));
+    const at = all.indexOf(el);
+    const to = at < 0 ? null : all[at + dir];
+    return to ? { line: to.dataset.line, variant: to.dataset.variant, pos: to.dataset.pos } : null;
+  };
+
+  const openAt = (where) => {
+    if (!where) return;
+    const next = [...document.querySelectorAll('.lem-word')].find((x) =>
+      x.dataset.line === where.line && x.dataset.variant === where.variant
+      && x.dataset.pos === where.pos);
+    if (next) openLemmaDropdown(next);
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); active = Math.min(active + 1, rows.length - 1); paint(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); active = Math.max(active - 1, 0); paint(); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      // Ctrl-Enter records the reading for the project, the same as the §
+      // beside the row: the hands are already on the keyboard by then.
+      commit(active >= 0 && rows[active] ? rows[active].id : null, e.ctrlKey || e.metaKey);
+    } else if (e.key === 'Tab') {
+      // Tab takes what is in the box and moves to the next word, which is the
+      // whole of the work: read the suggestion, accept it or change it, move
+      // on. Accepting counts as confirming — that is what going through them
+      // one by one means, and it is the difference between a dictionary lookup
+      // and an edition.
+      e.preventDefault();
+      const where = neighbour(e.shiftKey ? -1 : 1);
+      commit(active >= 0 && rows[active] ? rows[active].id : null);
+      // After the re-render, not before it.
+      setTimeout(() => openAt(where), 0);
+    } else if (e.key === 'Escape') { e.preventDefault(); close(true); }
+  });
+
+  list.addEventListener('mousedown', (e) => {
+    const pin = e.target.closest ? e.target.closest('.lem-pin') : null;
+    if (pin) {
+      e.preventDefault();
+      const r = rows[Number(pin.dataset.pin)];
+      if (r) commit(r.id, true);
+      return;
+    }
+    const row = e.target.closest ? e.target.closest('.lem-option') : null;
+    if (!row || row.classList.contains('is-empty')) return;
+    e.preventDefault();   // keep the input focused through the click
+    const r = rows[Number(row.dataset.i)];
+    if (r) commit(r.id);
+  });
+
+  paint();
+  input.focus();
+  input.select();
+}
+
+// Send the chapter's lemmas.
+async function exportLemmatization() {
+  const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+  if (!target) {
+    showComposeReport('Lemmas', [noteBlock('No eBL chapter is configured. Set one in Settings.', 'bad')]);
+    return;
+  }
+  const ts = EblClient.tokenStatus();
+  if (!ts.hasToken || ts.invalid || ts.expired || !ts.hasWriteTexts) {
+    showComposeReport('Lemmas', [noteBlock('This needs an eBL token with write:texts.', 'bad')]);
+    return;
+  }
+
+  if (!await askAboutUncurated(null, 'the lemmas')) return;
+
+  setStatus('connected', 'Reading the chapter...');
+  let chapter, built;
+  try {
+    await Lemmatizer.load();
+    chapter = await EblClient.getChapter(target);
+    built = await buildLemmatizationPayload(chapter);
+  } catch (err) {
+    setStatus('connected', 'Ready');
+    showComposeReport('Lemmas', [noteBlock(String(err && err.message || err), 'bad')]);
+    return;
+  }
+  setStatus('connected', 'Ready');
+
+  // Reassigned when the blocking lines are sent and the chapter re-read.
+  let s = built.summary;
+  if (!s.fromHere.length) {
+    showComposeReport('Lemmas — nothing to send', [
+      outcomeBanner('none', 'The chapter', 'No word has been given a lemma here yet.'),
+      noteBlock('Turn on Lemmas and click a word of a reading to choose one.'),
+    ]);
+    return;
+  }
+
+  // Sections whose reading no longer matches eBL's carry lemmas that cannot
+  // be placed. Sending their lines is what makes them placeable, so the offer
+  // is made here rather than left as an instruction in a report.
+  if (s.mismatchedSections.length) {
+    const go = await askOverlay('Send those lines first?', [
+      outcomeBanner('notsent', 'Lemmas', s.mismatchedSections.length + ' section(s) hold'
+        + ' lemmas that cannot be sent yet.'),
+      noteBlock('This project and eBL do not agree on how many words these readings'
+        + ' have, so a lemma would land on the wrong word. Sending each line replaces'
+        + ' the reading on eBL with the one here, after which the lemmas fit.', 'warn'),
+      rawBlock(s.mismatched.slice(0, 30).join(String.fromCharCode(10))),
+      noteBlock('Each is its own request; one refusal does not stop the rest.'),
+      s.losing.length ? noteBlock(s.losing.length + ' of these would DELETE readings'
+        + ' eBL holds and this project does not. A line export replaces the whole'
+        + ' chapter line, variants and all.', 'bad') : '',
+      s.losing.length ? rawBlock(s.losing.slice(0, 20).join(String.fromCharCode(10))) : '',
+      noteBlock('Checking the ATF first takes roughly a second and a half per'
+        + ' section — about ' + Math.max(1, Math.round(s.mismatchedSections.length * 1.5))
+        + ' seconds here — before anything is sent.'),
+    ], 'Send ' + s.mismatchedSections.length + ' line(s), then the lemmas', true);
+    if (go) {
+      const run = await sendLinesFor(target, s.mismatchedSections, 'Lemmas');
+      setStatus('connected', 'Reading the chapter again…');
+      try {
+        chapter = await EblClient.getChapter(target);
+        built = await buildLemmatizationPayload(chapter);
+        s = built.summary;
+      } catch (err) {
+        setStatus('connected', 'Ready');
+        showComposeReport('Lemmas', [
+          outcomeBanner('changed', 'The lines', run.sent.length + ' line(s) went, but the'
+            + ' chapter could not be read back.'),
+          rawBlock(String(err && err.message || err)),
+        ], 'lemma-lines');
+        return;
+      }
+      setStatus('connected', 'Ready');
+      if (run.unchecked) {
+        const anyway = await askOverlay('The ATF could not be checked', [
+          outcomeBanner('changed', 'The lines', run.sent.length + ' line(s) were sent'
+            + ' without being checked here first.'),
+          noteBlock('The local validator did not answer: ' + run.unchecked
+            + '. eBL checks each line itself and refuses a bad one on its own, so'
+            + ' nothing is broken by this — but this app did not verify them.', 'warn'),
+          noteBlock('Carry on to the lemmas?'),
+        ], 'Carry on', false);
+        if (!anyway) return;
+      }
+      if (run.refused.length) {
+        const carryOn = await askOverlay('Some lines were refused', [
+          outcomeBanner(run.sent.length ? 'changed' : 'notsent', 'The lines',
+            run.sent.length + ' sent, ' + run.refused.length + ' refused.'),
+          rawBlock(run.refused.slice(0, 20).join(String.fromCharCode(10))),
+          noteBlock('The refused sections keep their old reading on eBL, so their lemmas'
+            + ' still cannot be sent. Carry on with the rest?'),
+        ], 'Carry on', false);
+        if (!carryOn) return;
+      }
+    }
+  }
+
+  const problems = lemmatizationProblems(chapter, built.payload)
+    .concat(s.unknown.map((u) => u + '  (not in the dictionary)'));
+  if (problems.length) {
+    showComposeReport('Lemmas — not sent', [
+      outcomeBanner('notsent', 'The chapter', problems.length + ' problem'
+        + (problems.length === 1 ? '' : 's') + '. Nothing was sent.'),
+      noteBlock('A lemma eBL cannot resolve does not fail the save — it breaks the'
+        + ' chapter page afterwards, so it is refused here.', 'bad'),
+      rawBlock(problems.slice(0, 30).join(String.fromCharCode(10))),
+    ], 'lemma-problems');
+    return;
+  }
+
+  const ok = await askOverlay('Send the lemmas?', [
+    s.suggested ? noteBlock(s.suggested + ' of these came from the dictionary and'
+      + ' nobody has confirmed them. They are NOT being sent — eBL keeps whatever it'
+      + ' already holds for those words. Run this again from the omen export if you'
+      + ' want them.', 'warn') : '',
+    '<div class="report-counts">'
+      + '<span class="report-count is-done"><b>' + s.lemmatized + '</b> words lemmatized here</span>'
+      + '<span class="report-count"><b>' + s.inherited + '</b> witness words inheriting</span>'
+      + '<span class="report-count"><b>' + s.kept + '</b> kept as eBL has them</span>'
+      + '</div>',
+    noteBlock('A witness word takes the lemma of the reading word it is aligned to.'
+      + ' Align a section first and its witnesses come with it.'),
+    noteBlock('This replaces the lemmas of every line at once, so the lines not'
+      + ' lemmatized here go back exactly as they stand on eBL.', 'warn'),
+    noteBlock('From here: §' + s.fromHere.join(', §')),
+  ], 'Send', true);
+  if (!ok) return;
+
+  setStatus('connected', 'Sending the lemmas...');
+  try {
+    await EblClient.postLemmatization(target, built.payload);
+  } catch (err) {
+    setStatus('connected', 'Ready');
+    const detail = (err instanceof EblClient.EblError && err.validationErrors)
+      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
+          .join(String.fromCharCode(10))
+      : (err.rawBody || err.message || String(err));
+    showComposeReport('Lemmas were not sent', [
+      outcomeBanner('notsent', 'The chapter', 'eBL refused the payload.'),
+      rawBlock(String(detail).slice(0, 1200)),
+    ], 'lemma-error');
+    return;
+  }
+
+  setStatus('connected', 'Lemmas sent');
+  setTimeout(() => setStatus('connected', 'Ready'), 5000);
+  showComposeReport('Lemmas sent', [
+    outcomeBanner('sent', 'The chapter', s.lemmatized + ' word'
+      + (s.lemmatized === 1 ? '' : 's') + ' lemmatized, ' + s.inherited
+      + ' carried to the witnesses.'),
+    noteBlock('Reload eBL to see them — the chapter page is cached.'),
+  ], 'lemmas');
+}
+
+// What this section's lemmas say, for the send preview.
+//
+// Every word is listed with the lemma it carries and who put it there, because
+// a prefilled chapter goes out with the dictionary's guesses in it unless
+// somebody has looked. Reading this list before pressing Send is the moment
+// where "I never chose Adaru" is supposed to become visible.
+async function lemmaPreview(lineNum) {
+  const readings = variantsFor(lineNum);
+  const { scoreLines } = buildScore();
+  if (!(scoreLines[lineNum] || []).length) return { blocks: [], held: 0 };
+
+  try { await Lemmatizer.load(); } catch (_) { /* ids still list, just without glosses */ }
+
+  const rows = [];
+  let held = 0, hand = 0, auto = 0, blank = 0;
+
+  readings.forEach((reading, vi) => {
+    const words = positionWords(reading.text || '').filter((t) => t.pos != null && !t.divider);
+    if (!words.length) return;
+    if (readings.length > 1) rows.push('Reading ' + (vi + 1));
+    for (const t of words) {
+      const state = lemmaState(lineNum, vi, t.pos, t.text);
+      if (state === 'skip') continue;
+      const ids = lemmasAt(lineNum, vi, t.pos);
+      if (ids.length) {
+        held++;
+        if (state === 'hand') hand++; else auto++;
+      } else {
+        blank++;
+      }
+      const gloss = ids.map((id) => {
+        const g = window.Lemmatizer && Lemmatizer.loaded() ? Lemmatizer.guideWord(id) : '';
+        return id + (g ? ' (' + g + ')' : '');
+      }).join(' + ');
+      rows.push('  ' + String(t.pos).padStart(3) + '  ' + t.text.padEnd(18)
+        + (ids.length ? gloss : '—').padEnd(46)
+        + (state === 'hand' ? 'confirmed' : state === 'auto' ? 'suggested' : ''));
+    }
+    rows.push('');
+  });
+
+  if (!held && !blank) return { blocks: [], held: 0 };
+
+  return {
+    held,
+    blocks: [
+      '<details class="export-preview-wrap"' + (auto ? ' open' : '') + '>'
+        + '<summary>Lemmas held here — ' + held + ' word' + (held === 1 ? '' : 's')
+        + (auto ? ', ' + auto + ' still only suggested' : '')
+        + (blank ? ', ' + blank + ' with none' : '') + '</summary>'
+        + '<pre class="export-preview">' + escapeHtml(rows.join(String.fromCharCode(10)).trim())
+        + '</pre></details>',
+      auto
+        ? noteBlock(auto + ' of these came from the dictionary and nobody has confirmed'
+            + ' them. They will be sent exactly as they stand — check the list above if'
+            + ' that is not what you want.', 'warn')
+        : noteBlock('Every lemma here was chosen by hand.'),
+    ],
+  };
+}
+
+// Which sections still carry lemmas nobody has looked at.
+//
+// Prefill fills every word of every section, so "has lemmas" says nothing about
+// whether anyone agreed with them. This is the difference between an edition
+// and a dictionary lookup, and it is the thing to be asked about before either
+// goes to eBL.
+function uncuratedSections(only) {
+  const out = [];
+  const sections = only != null ? [only]
+    : Object.keys(lemmaChoices).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  for (const lineNum of sections) {
+    const line = lemmaChoices[lineNum] || {};
+    let auto = 0, hand = 0;
+    for (const vi of Object.keys(line)) {
+      const slot = line[vi] || {};
+      for (const pos of Object.keys(slot)) {
+        const held = slot[pos];
+        const by = Array.isArray(held) ? 'hand' : ((held && held.by) || 'hand');
+        if (by === 'auto') auto++; else hand++;
+      }
+    }
+    if (auto) out.push({ lineNum, auto, hand });
+  }
+  return out;
+}
+
+// Mark every suggestion in these sections as confirmed.
+function curateSections(list) {
+  let n = 0;
+  for (const { lineNum } of list) {
+    const line = lemmaChoices[lineNum] || {};
+    for (const vi of Object.keys(line)) {
+      const slot = line[vi] || {};
+      for (const pos of Object.keys(slot)) {
+        const held = slot[pos];
+        if (Array.isArray(held) || !held || held.by !== 'auto') continue;
+        held.by = 'hand';
+        n++;
+      }
+    }
+  }
+  return n;
+}
+
+// Ask before sending: these sections hold lemmas the dictionary chose and
+// nobody has confirmed. Taking them marks them as yours, and they go with the
+// rest. Declining leaves them behind — eBL keeps whatever it already had.
+//
+// Returns true to carry on, false to stop.
+async function askAboutUncurated(only, what) {
+  const list = uncuratedSections(only);
+  if (!list.length) return true;
+
+  const words = list.reduce((a, s) => a + s.auto, 0);
+  const lines = list.slice(0, 40).map((s) => '§' + s.lineNum + '   '
+    + s.auto + ' suggested' + (s.hand ? ',  ' + s.hand + ' confirmed' : ''));
+
+  const take = await askOverlay('Lemmas nobody has confirmed', [
+    outcomeBanner('kept', list.length + ' section' + (list.length === 1 ? '' : 's'),
+      words + ' word' + (words === 1 ? '' : 's') + ' the dictionary chose on its own.'),
+    rawBlock(lines.join(String.fromCharCode(10))
+      + (list.length > 40 ? String.fromCharCode(10) + '…and ' + (list.length - 40) + ' more' : '')),
+    noteBlock('Sending ' + what + ' replaces the lemmas of the WHOLE chapter, so this'
+      + ' asks about every section, not only the one being sent.', 'warn'),
+    noteBlock('Take them: they are marked as yours and go with the rest.'
+      + ' Leave them: they stay here and eBL keeps whatever it already holds.'),
+  ], 'Take all ' + words, false);
+
+  if (take) {
+    const n = curateSections(list);
+    await saveScoreDataToFile();
+    keepScoreInView(renderScore);
+    setStatus('connected', n + ' suggestion(s) marked as yours');
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
+  return true;
+}
+
+// The third part of sending one section: put its lemmas back.
+//
+// Like alignment, eBL has no per-line endpoint — POST …/lemmatization replaces
+// the whole chapter's — so every line is rebuilt and sent together, with every
+// line but this one going back exactly as eBL holds it.
+//
+// It runs after the alignment, and not by accident: a witness word takes the
+// lemma of the reading word it is aligned to, so the alignment has to be on eBL
+// before the chapter is read for the lemma payload, or the witnesses inherit
+// nothing.
+//
+// Never throws. The line and the alignment are already committed by the time
+// this runs.
+async function sendLemmasFor(target, label, includeSuggested) {
+  setStatus('connected', label + ' — sending the lemmas…');
+  try {
+    await Lemmatizer.load();
+    const chapter = await EblClient.getChapter(target);
+    const built = await buildLemmatizationPayload(chapter, { includeSuggested });
+
+    const problems = lemmatizationProblems(chapter, built.payload)
+      .concat(built.summary.unknown.map((u) => u + '  (not in the dictionary)'));
+    if (problems.length) return { problems };
+
+    await EblClient.postLemmatization(target, built.payload);
+    return { sent: true, summary: built.summary };
+  } catch (err) {
+    const detail = (err instanceof EblClient.EblError && err.validationErrors)
+      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
+          .join(String.fromCharCode(10))
+      : (err.rawBody || err.message || String(err));
+    return { failed: String(detail) };
+  }
+}
+
+// How that went, as blocks for the report the line export already shows.
+function lemmaOutcome(r) {
+  if (!r) return [];
+  if (r.skipped) return [noteBlock(r.skipped)];
+  if (r.failed) {
+    return [
+      '<h4 class="report-heading">The lemmas did not go</h4>',
+      noteBlock('The line and its alignment are on eBL. The lemmas were refused —'
+        + ' try Export › Send the lemmas again.', 'bad'),
+      rawBlock(String(r.failed).slice(0, 1200)),
+    ];
+  }
+  if (r.problems) {
+    return [
+      '<h4 class="report-heading">The lemmas were held back</h4>',
+      noteBlock(r.problems.length + ' problem' + (r.problems.length === 1 ? '' : 's')
+        + '. A lemma eBL cannot resolve does not fail the save — it breaks the'
+        + ' chapter page afterwards, so nothing was sent.', 'bad'),
+      rawBlock(r.problems.slice(0, 20).join(String.fromCharCode(10))),
+    ];
+  }
+  const s = r.summary || { lemmatized: 0, inherited: 0, kept: 0 };
+  const out = [
+    '<h4 class="report-heading">Lemmas</h4>',
+    '<div class="report-counts">'
+      + '<span class="report-count is-done"><b>' + s.lemmatized + '</b> words lemmatized</span>'
+      + '<span class="report-count"><b>' + s.inherited + '</b> carried to the witnesses</span>'
+      + '<span class="report-count"><b>' + s.kept + '</b> kept as eBL has them</span>'
+      + '</div>',
+  ];
+  if (s.withheld) {
+    out.push(noteBlock(s.withheld + ' suggested lemma(s) across the chapter were NOT'
+      + ' sent — the dictionary proposed them and nobody has confirmed them. Tick'
+      + ' the box under “Its lemmas” to include them.'));
+  }
+  if (s.mismatched && s.mismatched.length) {
+    out.push(noteBlock(s.mismatched.length + ' section(s) hold lemmas that were not'
+      + ' sent: this project and eBL do not agree on how many words the reading has,'
+      + ' so a lemma would land on the wrong word. Send those lines first.', 'warn'));
+    out.push(rawBlock(s.mismatched.slice(0, 12).join(String.fromCharCode(10))));
+  }
+  return out;
+}
+
+// The second half of sending one section: put its alignment back.
+//
+// eBL has no per-line alignment endpoint — POST …/alignment replaces the whole
+// chapter's — so this rebuilds every line and sends them together. Every line
+// but this one goes back exactly as eBL holds it, so the effect is confined to
+// the section just sent (and to repairing any line eBL is holding in a state
+// its own editor cannot save).
+//
+// The chapter is read again first, and that is not optional: the line was just
+// replaced, so eBL has re-tokenized it, and an alignment built against the
+// chapter as it looked beforehand would index tokens that no longer exist.
+//
+// Never throws. The line is already committed by the time this runs, and a
+// failure here has to be reportable next to a success there.
+async function sendAlignmentFor(target, label) {
+  setStatus('connected', label + ' — sending the alignment…');
+  try {
+    const chapter = await EblClient.getChapter(target);
+    const before = countAlignedTokens(chapter);
+    const built = await buildAlignmentPayload(chapter);
+
+    const problems = alignmentProblems(chapter, built.payload);
+    if (problems.length) return { problems, before };
+
+    await EblClient.postAlignment(target, built.payload);
+
+    let after = null;
+    try { after = countAlignedTokens(await EblClient.getChapter(target)); } catch (_) { /* not fatal */ }
+    return { sent: true, before, after, summary: built.summary };
+  } catch (err) {
+    const detail = (err instanceof EblClient.EblError && err.validationErrors)
+      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
+          .join(String.fromCharCode(10))
+      : (err.rawBody || err.message || String(err));
+    return { failed: String(detail) };
+  }
+}
+
+// How that went, as blocks for the report the line export already shows.
+function alignmentOutcome(r) {
+  if (!r) return [];
+  if (r.skipped) return [noteBlock(r.skipped)];
+  if (r.failed) {
+    return [
+      '<h4 class="report-heading">The line went, the alignment did not</h4>',
+      noteBlock('The line is on eBL. The alignment was refused, so the words on that'
+        + ' line are not paired to the reading yet — try Export › Alignment again.', 'bad'),
+      rawBlock(String(r.failed).slice(0, 1200)),
+    ];
+  }
+  if (r.problems) {
+    return [
+      '<h4 class="report-heading">The line went, the alignment was held back</h4>',
+      noteBlock(r.problems.length + ' line' + (r.problems.length === 1 ? '' : 's')
+        + ' eBL would refuse, so nothing was sent rather than leaving a line its own'
+        + ' editor cannot save.', 'bad'),
+      rawBlock(r.problems.slice(0, 20).join(String.fromCharCode(10))),
+    ];
+  }
+  const s = r.summary || { aligned: 0, variants: 0, unmatched: [] };
+  const out = [
+    '<h4 class="report-heading">Alignment</h4>',
+    '<div class="report-counts">'
+      + '<span class="report-count"><b>' + r.before + '</b> aligned before</span>'
+      + '<span class="report-count is-done"><b>' + (r.after == null ? '?' : r.after)
+      + '</b> aligned now</span>'
+      + (s.variants ? '<span class="report-count"><b>' + s.variants + '</b> token variants</span>' : '')
+      + '</div>',
+  ];
+  if (s.unmatched && s.unmatched.length) {
+    out.push(noteBlock(s.unmatched.length + ' witness(es) hold positions here that could not be'
+      + ' sent, because eBL keeps them under a different reading of their line.', 'warn'));
+    out.push(rawBlock(s.unmatched.slice(0, 10).join(String.fromCharCode(10))));
+  }
+  if (s.doubled && s.doubled.length) {
+    out.push(noteBlock('A commentary may quote the same word twice, and the reading has it'
+      + ' once. eBL allows one token to point at a word, so the quotation that agrees with'
+      + ' the reading keeps it and the repeat went out unaligned.'));
+    out.push(rawBlock(s.doubled.slice(0, 10).join(String.fromCharCode(10))));
+  }
+  return out;
+}
+
+// Would sending this list renumber anything eBL already holds? The comparison
+// itself lives in the client, because Settings asks the same question before it
+// registers a manuscript.
+async function manuscriptIdChanges(target, sending) {
+  let held = [];
+  try {
+    const chapter = await EblClient.getChapter(target);
+    held = chapter.manuscripts || [];
+  } catch (_) {
+    return [];   // a chapter that cannot be read has nothing to disagree with
+  }
+  if (!held.length) return [];
+  return EblClient.compareManuscripts(held, sending).moved.map((m) =>
+    m.museumNumber + ' — eBL has it as manuscript ' + m.from
+    + ', this would send it as ' + m.to);
+}
+
+// Everything eBL will refuse, found before it is sent.
+//
+// The rules are not documented anywhere this app can read, so they are the ones
+// its own stored data obeys: an index names a reconstruction word that exists,
+// no two tokens of a line claim the same word, and a word is never both omitted
+// and aligned. A line breaking the last one cannot be saved in eBL's own
+// editor afterwards — the error names the manuscript and leaves the editor
+// stuck — so it is worth refusing here.
+function alignmentProblems(chapter, payload) {
+  const out = [];
+  (chapter.lines || []).forEach((L, li) => {
+    (L.variants || []).forEach((v, vi) => {
+      const toks = v.reconstructionTokens || [];
+      const n = toks.length;
+      (v.manuscripts || []).forEach((m, mi) => {
+        const built = ((payload[li] || [])[vi] || [])[mi];
+        if (!built) return;
+        const at = '§' + L.number + ' ' + eblSiglumOf(chapter, m.manuscriptId)
+          + ' ' + (m.number == null ? '' : m.number) + ': ';
+        const claimed = new Map();
+        for (const t of (built.alignment || [])) {
+          const a = t.alignment;
+          if (a == null) continue;
+          if (!(typeof a === 'number' && a >= 0 && a < n)) {
+            out.push(at + 'points at word ' + a + ', but the reading has '
+              + n + ' word' + (n === 1 ? '' : 's'));
+            continue;
+          }
+          claimed.set(a, (claimed.get(a) || 0) + 1);
+        }
+        for (const [a, count] of claimed) {
+          if (count > 1) out.push(at + 'word ' + a + ' (' + (toks[a] || {}).value
+            + ') is claimed by ' + count + ' tokens');
+        }
+        for (const o of (built.omittedWords || [])) {
+          if (!(typeof o === 'number' && o >= 0 && o < n)) {
+            out.push(at + 'omits word ' + o + ', which the reading does not have');
+          } else if (claimed.has(o)) {
+            out.push(at + 'word ' + o + ' (' + (toks[o] || {}).value
+              + ') is both omitted and aligned');
+          }
+        }
+      });
+    });
+  });
+  return out;
+}
+
+function eblSiglumOf(chapter, id) {
+  const m = (chapter.manuscripts || []).find((x) => x.id === id);
+  if (!m) return 'ms' + id;
+  const part = (x) => (x && typeof x === 'object' ? (x.abbreviation || '') : (x || ''));
+  return (part(m.provenance) + part(m.period) + part(m.type)
+    + (m.siglumDisambiguator || '')) || ('ms' + id);
+}
+
+// Show what it would do, then send it if asked.
+async function exportAlignment() {
+  const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+  if (!target) {
+    showComposeReport('Alignment', [noteBlock('No eBL chapter is configured. Set one in Settings.', 'bad')]);
+    return;
+  }
+  const ts = EblClient.tokenStatus();
+  if (!ts.hasToken || ts.invalid || ts.expired || !ts.hasWriteTexts) {
+    showComposeReport('Alignment', [noteBlock('This needs an eBL token with write:texts.', 'bad')]);
+    return;
+  }
+
+  setStatus('connected', 'Reading the chapter…');
+  let chapter, built;
+  try {
+    chapter = await EblClient.getChapter(target);
+    built = await buildAlignmentPayload(chapter);
+  } catch (err) {
+    setStatus('connected', 'Ready');
+    showComposeReport('Alignment', [noteBlock(String(err && err.message || err), 'bad')]);
+    return;
+  }
+  setStatus('connected', 'Ready');
+
+  const before = countAlignedTokens(chapter);
+  const s = built.summary;
+  if (!s.fromHere.length) {
+    showComposeReport('Alignment — nothing to send', [
+      outcomeBanner('none', 'The chapter', 'No section has been aligned in Positions mode yet.'),
+      noteBlock('Align a section first: turn on Positions and give the witness words their'
+        + ' numbers, or compose a reading, which fills them in.'),
+    ]);
+    return;
+  }
+
+  const problems = alignmentProblems(chapter, built.payload);
+  if (problems.length) {
+    showComposeReport('Alignment — not sent', [
+      outcomeBanner('notsent', 'The chapter', problems.length + ' line'
+        + (problems.length === 1 ? '' : 's') + ' eBL would refuse. Nothing was sent.'),
+      noteBlock('Each of these would leave the line unsaveable in eBL’s own editor.', 'bad'),
+      rawBlock(problems.slice(0, 40).join(String.fromCharCode(10))),
+      problems.length > 40 ? noteBlock('…and ' + (problems.length - 40) + ' more.') : '',
+    ], 'alignment-problems');
+    return;
+  }
+
+  const ok = await askOverlay('Send the alignment?', [
+    '<div class="report-counts">'
+      + `<span class="report-count is-done"><b>${s.fromHere.length}</b> section(s) from here</span>`
+      + `<span class="report-count"><b>${s.lines - s.fromHere.length}</b> sent back unchanged</span>`
+      + `<span class="report-count"><b>${s.aligned}</b> aligned tokens</span>`
+      + (s.variants ? `<span class="report-count is-done"><b>${s.variants}</b> token variants</span>` : '')
+      + `<span class="report-count"><b>${s.omitted}</b> omitted words</span>`
+      + '</div>',
+    noteBlock('eBL holds ' + before + ' aligned tokens now; this payload carries ' + s.aligned
+      + '. It replaces the alignment of every line at once, so the sections not aligned here'
+      + ' are being sent back exactly as they came.', 'warn'),
+    noteBlock('Aligned from here: §' + s.fromHere.join(', §')),
+    s.unmatched.length ? '<h4 class="report-heading">' + s.unmatched.length
+      + ' witness(es) aligned here but left unchanged</h4>' : '',
+    s.unmatched.length ? rawBlock(s.unmatched.slice(0, 20).join(String.fromCharCode(10))) : '',
+    s.unmatched.length ? noteBlock('These hold positions in this project, but eBL keeps them'
+      + ' under a different reading of the line. Their positions count words in this'
+      + ' project’s reading, so sending them would point each word at the wrong one.'
+      + ' Split the line here the way eBL has it, or move the witness, and they will go.', 'warn') : '',
+    s.unmatched.length
+      ? noteBlock(s.unmatched.length + ' witness line(s) left as eBL has them: '
+          + s.unmatched.slice(0, 6).join('; ')
+          + (s.unmatched.length > 6 ? '; …' : ''), 'warn')
+      : '',
+  ], 'Send', true);
+  if (!ok) return;
+
+  setStatus('connected', 'Sending the alignment…');
+  try {
+    await EblClient.postAlignment(target, built.payload);
+  } catch (err) {
+    setStatus('connected', 'Ready');
+    const detail = (err instanceof EblClient.EblError && err.validationErrors)
+      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message).join('\n')
+      : (err.rawBody || err.message || String(err));
+    showComposeReport('Alignment was not sent', [
+      outcomeBanner('none', 'The chapter', 'eBL refused the payload. Nothing was changed.'),
+      noteBlock('What eBL said, in full:', 'bad'),
+      rawBlock(detail),
+    ], 'alignment-error');
+    return;
+  }
+
+  // Read it back: the only way to know what eBL kept.
+  let after = null;
+  try { after = countAlignedTokens(await EblClient.getChapter(target)); } catch (_) { /* not fatal */ }
+  setStatus('connected', 'Alignment sent');
+  setTimeout(() => setStatus('connected', 'Ready'), 5000);
+
+  showComposeReport('Alignment sent', [
+    outcomeBanner('changed', 'The chapter', 'Read back from eBL after sending.'),
+    '<div class="report-counts">'
+      + `<span class="report-count"><b>${before}</b> aligned before</span>`
+      + `<span class="report-count is-done"><b>${after == null ? '?' : after}</b> aligned now</span>`
+      + `<span class="report-count"><b>${s.variants}</b> token variants sent</span>`
+      + '</div>',
+    noteBlock(after != null && after < s.aligned
+      ? 'eBL kept fewer than were sent. Some tokens it did not consider alignable, or the'
+        + ' reading changed under them.'
+      : 'Sent from §' + s.fromHere.join(', §') + '.'),
+  ], 'alignment');
+}
+
+function countAlignedTokens(chapter) {
+  let n = 0;
+  for (const L of (chapter.lines || [])) {
+    for (const v of L.variants) for (const m of v.manuscripts) {
+      for (const t of (m.atfTokens || [])) if (t.alignment != null) n++;
+    }
+  }
+  return n;
+}
+
+// ---- Compose a reading from its witnesses --------------------------------
+//
+// Never automatic. Composing replaces text an editor may have weighed for a
+// long time, so it runs only when asked — from the "+" menu on one reading, or
+// from "Compose all" for the project — and both ask first.
+//
+// What it writes: the reading itself, and the alignment behind it, so Positions
+// mode opens already filled in rather than blank.
+
+async function composeReading(lineNum, vi, scope) {
+  if (!window.Compositor) return { error: 'compositor.js did not load' };
+  let convert;
+  try {
+    const conv = await ensureAtfConverter();
+    convert = (t) => conv.convertLine(t).codes;
+  } catch (err) {
+    return { error: 'the sign table could not be loaded: ' + (err.message || err) };
+  }
+
+  const { scoreLines } = buildScore();
+  const rows = (scoreLines[lineNum] || []).filter((w) => w.type === 'line');
+  const asW = (w) => ({ key: w.siglum + '|' + w.sourceLine, atf: w.content });
+  const group = rows.filter((w) => (w.variant || 0) === vi).map(asW);
+  if (!group.length) return { skipped: 'no witnesses' };
+
+  // The main reading is the section's text, so EVERY witness of the section
+  // attests its shared material — including the ones filed under a variant,
+  // which deviate only where they deviate. Counting only the main reading's
+  // own witnesses dropped "ina KUR DU₃.A-BI" from §1 the moment K.2246 moved
+  // to §1b, though both tablets plainly have it.
+  //
+  // A variant is composed from its own witnesses alone: it exists precisely
+  // to say something else, so the majority must not talk it out of that.
+  // Scope narrows who is asked, not who is shown. A Nineveh composition is
+  // still measured against every witness afterwards, because the point of
+  // making one is to see how the others stand to it.
+  const eligible = vi === 0 ? rows : rows.filter((w) => (w.variant || 0) === vi);
+  const scoped = eligible.filter((w) => inScope(w, scope));
+  // Commentaries do not vote — unless they are what was asked for. Choosing
+  // "Commentary" by type, or one commentary by name, is a deliberate request
+  // to compose from them, and refusing would be answering a different question.
+  const askedForCommentary = !!scope && ((scope.kind === 'type' && scope.value === 'Commentary')
+    || (scope.kind === 'witness' && isCommentaryWitness(scope.value)));
+  const speaking = askedForCommentary
+    ? scoped : scoped.filter((w) => !isCommentaryWitness(w.siglum));
+  const setAside = scoped.length - speaking.length;
+  const voters = speaking.map(asW);
+  const inGroup = new Set(group.map((w) => w.key));
+  if (!voters.length) {
+    return { skipped: setAside
+      ? 'the only witnesses here are commentaries, which do not compose the text'
+      : 'no witness matches that selection' };
+  }
+
+  // One witness is not a composition. Asked for anyway — "follow K.2246" —
+  // its own line becomes the reading, which is a decision the editor has just
+  // made rather than a majority anyone counted.
+  if (voters.length === 1 && scope && scope.kind !== 'all') {
+    const text = readingFromWitness(voters[0].atf);
+    if (!text) return { skipped: 'that witness preserves nothing legible here' };
+    writeReading(lineNum, vi, text);
+    const a = Compositor.alignToReading(text, rows.map(asW), convert);
+    if (!lineAlignments[lineNum]) lineAlignments[lineNum] = {};
+    for (const key of Object.keys(a.perWitness)) {
+      if (inGroup.has(key)) lineAlignments[lineNum][key] = a.perWitness[key].alignment;
+    }
+    return {
+      text, followed: voters[0].key.split('|')[0],
+      perWitness: markCommentaries(a.perWitness),
+      mine: Object.keys(a.perWitness).filter((k) => inGroup.has(k)),
+      voters: 1, scope,
+    };
+  }
+
+  // One voter is a transcription, not a composition: there is nothing to
+  // weigh. But a lone witness can still be aligned to a reading someone
+  // already wrote, which is the ordinary case for a variant.
+  const existing = (readReading(lineNum, vi) || '').trim();
+  if (voters.length < 2) {
+    if (!existing) return { skipped: 'one witness and no reading to align it to' };
+    const a = Compositor.alignToReading(existing, group, convert);
+    if (!lineAlignments[lineNum]) lineAlignments[lineNum] = {};
+    for (const key of Object.keys(a.perWitness)) {
+      lineAlignments[lineNum][key] = a.perWitness[key].alignment;
+    }
+    return { alignedOnly: true, text: existing, perWitness: markCommentaries(a.perWitness) };
+  }
+
+  const r = Compositor.composeSection(voters, convert);
+  if (!r || !r.text.trim()) return { skipped: 'nothing legible' };
+
+  writeReading(lineNum, vi, r.text);
+  // Measured against everyone, whoever was asked.
+  const measured = (scope && scope.kind !== 'all')
+    ? Compositor.alignToReading(r.text, rows.map(asW), convert).perWitness
+    : r.perWitness;
+  if (!lineAlignments[lineNum]) lineAlignments[lineNum] = {};
+  // Only this reading's own witnesses get an alignment against it. A
+  // variant's witness voted here but answers to its own reading.
+  for (const key of Object.keys(measured)) {
+    if (inGroup.has(key)) lineAlignments[lineNum][key] = measured[key].alignment;
+  }
+  // Every witness comes back, not only this reading's own: the others voted
+  // on its shared material, and their agreement is the evidence for it.
+  return {
+    text: r.text,
+    perWitness: markCommentaries(measured),
+    mine: Object.keys(measured).filter((k) => inGroup.has(k)),
+    voters: voters.length,
+    setAside,
+    scope,
+  };
+}
+
+// Report on a reading without touching it.
+//
+// The case this exists for: an editor has chosen a reading the witnesses do not
+// most attest — a lectio difficilior, a form the majority corrupted, a spelling
+// the house style prefers. That is a decision, not a mistake, and it should be
+// possible to see exactly what it costs in attestation without the app
+// offering to overwrite it.
+//
+// Nothing here writes. Not the reading, not the alignments.
+async function analyseReading(lineNum, vi) {
+  const label = '§' + lineNum + variantLetterOf(vi);
+  if (!window.Compositor) {
+    showComposeReport(label, [noteBlock('compositor.js did not load.', 'bad')]);
+    return;
+  }
+  const current = (readReading(lineNum, vi) || '').trim();
+  if (!current) {
+    showComposeReport(label, [noteBlock('There is no reading here yet to report on.', 'warn')]);
+    return;
+  }
+
+  let convert;
+  setStatus('connected', label + ' — measuring…');
+  try {
+    const conv = await ensureAtfConverter();
+    convert = (t) => conv.convertLine(t).codes;
+  } catch (err) {
+    setStatus('connected', 'Ready');
+    showComposeReport(label, [noteBlock('The sign table could not be loaded: ' + (err.message || err), 'bad')]);
+    return;
+  }
+
+  const { scoreLines } = buildScore();
+  const rows = (scoreLines[lineNum] || []).filter((w) => w.type === 'line');
+  const asW = (w) => ({ key: w.siglum + '|' + w.sourceLine, atf: w.content });
+  const all = rows.map(asW);
+  const mine = rows.filter((w) => (w.variant || 0) === vi).map((w) => w.siglum + '|' + w.sourceLine);
+  setStatus('connected', 'Ready');
+
+  if (!all.length) {
+    showComposeReport(label, [noteBlock('This section has no witnesses.', 'warn')]);
+    return;
+  }
+
+  // How every witness of the section stands against the reading as written.
+  const measured = Compositor.alignToReading(current, all, convert);
+  markCommentaries(measured.perWitness);
+  // And what the witnesses on their own would have produced, for the comparison.
+  const majority = all.length >= 2 ? Compositor.composeSection(all, convert) : null;
+
+  const blocks = [
+    readingBlock(label, current, null),
+    positionStrip(current),
+    noteBlock('Measured against ' + all.length + ' witness'
+      + (all.length === 1 ? '' : 'es') + ' of the section. Nothing was changed.'),
+  ];
+  if (majority && majority.text.trim()) {
+    blocks.push(divergenceBlock(current, majority.text));
+  } else {
+    blocks.push(noteBlock('Too little evidence to say what the best-attested form would be.', 'warn'));
+  }
+  blocks.push('<h4 class="report-heading">Every witness against this reading</h4>');
+  blocks.push(witnessRows(measured.perWitness, mine));
+  const ownSet = new Set(mine);
+  const flagged = Object.keys(measured.perWitness).filter((k) =>
+    ownSet.has(k) && measured.perWitness[k].differing.length
+    && !measured.perWitness[k].thinEvidence && !measured.perWitness[k].commentary);
+  if (flagged.length) {
+    blocks.push(await splitBlock(lineNum, vi, flagged, r.perWitness, r.text));
+  }
+
+  showComposeReport(label + ' — report', blocks, 'report-' + lineNum + variantLetterOf(vi));
+  wireSplitOffer();
+}
+
+// A reading made out of one witness's line: its own text, with the marks that
+// record how much is known stripped off, and its commentary left behind.
+function readingFromWitness(atf) {
+  const convert = positionConverter();
+  const C = window.Compositor;
+  let parts = C ? C.classify(atf).filter((t) => t.role === 'text').map((t) => t.text)
+               : String(atf || '').trim().split(/\s+/);
+  // A break is a statement that something is lost. It belongs on the tablet,
+  // never in a reading: carried across it becomes a word of the reading, takes
+  // a position, and shifts every witness numbered against it.
+  if (convert && C) parts = parts.filter((t) => C.isLegible(t, convert) || C.isDivider(t));
+  return parts.join(' ').replace(/[#?!*\[\]⸢⸣]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Split the witnesses that went their own way into variants of their own.
+//
+// The compositor can say a witness disagrees with the reading too often to be a
+// copy of it; only an editor can say that makes it a separate reading. So this
+// is offered by the report and never taken automatically — and once taken, the
+// main reading is composed again without them, because their votes were part of
+// what produced it.
+async function splitVariants(lineNum, vi, keys) {
+  // The same plan the offer showed, not a second grouping that might disagree
+  // with it. What was previewed is what gets written.
+  const reading = variantsFor(lineNum)[vi];
+  const plan = await planSplit(lineNum, vi, keys, reading ? reading.text : '');
+  if (!plan.length) return { made: [] };
+
+  const { scoreLines } = buildScore();
+  const byKey = new Map();
+  for (const w of (scoreLines[lineNum] || [])) {
+    if (w.type === 'line' && (w.variant || 0) === vi) byKey.set(w.siglum + '|' + w.sourceLine, w);
+  }
+
+  const made = [];
+  for (const group of plan) {
+    const rows = group.keys.map((k) => byKey.get(k)).filter(Boolean);
+    if (!group.text || !rows.length) continue;
+    await createVariant(lineNum, group.text, rows);
+    made.push({ text: group.text, witnesses: group.witnesses.slice() });
+  }
+  return { made };
+}
+
+// Split, then compose the main reading again from what is left, and report both.
+async function splitAndRecompose(lineNum, vi, keys) {
+  hideComposeReport();
+  setStatus('connected', '§' + lineNum + ' — splitting…');
+  const { made } = await splitVariants(lineNum, vi, keys);
+  if (!made.length) {
+    setStatus('connected', 'Ready');
+    showComposeReport('§' + lineNum + ' — nothing split',
+      [noteBlock('Those witnesses could not be moved. They may already sit under another reading.', 'warn')]);
+    return;
+  }
+  // Their votes helped make the reading that flagged them, so it has to be
+  // weighed again without them.
+  const r = await composeReading(lineNum, vi);
+  await saveScoreDataToFile();
+  markUnsaved();
+  renderScore();
+  setStatus('connected', made.length + ' variant' + (made.length === 1 ? '' : 's') + ' created');
+  setTimeout(() => setStatus('connected', 'Ready'), 4000);
+
+  const label = '§' + lineNum + variantLetterOf(vi);
+  const blocks = [];
+  if (r && r.text) {
+    blocks.push(noteBlock('Recomposed without them:'));
+    blocks.push(readingBlock(label, r.text, null));
+    blocks.push(positionStrip(r.text));
+  }
+  blocks.push('<h4 class="report-heading">' + made.length + ' new variant'
+    + (made.length === 1 ? '' : 's') + '</h4>');
+  for (let i = 0; i < made.length; i++) {
+    blocks.push(readingBlock('§' + lineNum + variantLetterOf(vi + 1 + i), made[i].text, null));
+    blocks.push(noteBlock('from ' + made[i].witnesses.join(', ')));
+  }
+  if (r && r.perWitness) blocks.push(witnessRows(r.perWitness, r.mine));
+  showComposeReport(label + ' — split', blocks, 'split-' + lineNum + variantLetterOf(vi));
+}
+
+// What the offer in the current report would split, held here rather than
+// serialised into an attribute. Nothing to escape, nothing to parse back.
+let pendingSplit = null;
+
+// What a split would produce, without producing it.
+//
+// The same grouping splitVariants uses — witnesses saying the same thing land
+// in one variant, not one each — so the offer shows the lines that would be
+// written rather than describing them. An editor deciding whether these are
+// separate readings needs to see the readings.
+async function planSplit(lineNum, vi, keys, readingText) {
+  const { scoreLines } = buildScore();
+  const byKey = new Map();
+  for (const w of (scoreLines[lineNum] || [])) {
+    if (w.type === 'line' && (w.variant || 0) === vi) byKey.set(w.siglum + '|' + w.sourceLine, w);
+  }
+  const chosen = keys.map((k) => byKey.get(k)).filter(Boolean);
+  if (!chosen.length) return [];
+
+  let signsOf = (t) => t;
+  try {
+    const conv = await ensureAtfConverter();
+    signsOf = (t) => { try { return conv.convertLine(t).codes.join(' '); } catch (_) { return t; } };
+  } catch (_) { /* group by text instead */ }
+
+  const groups = new Map();
+  for (const w of chosen) {
+    const text = readingFromWitness(w.content);
+    if (!text) continue;
+    const k = signsOf(text);
+    if (!groups.has(k)) groups.set(k, { text, witnesses: [], keys: [], signs: k });
+    groups.get(k).witnesses.push(w.siglum + ' ' + w.sourceLine);
+    groups.get(k).keys.push(w.siglum + '|' + w.sourceLine);
+  }
+
+  // A broken witness is not a reading of its own.
+  //
+  // Grouping by the whole line means a tablet that preserves half of it can
+  // never join one that preserves all of it, however completely the halves
+  // agree — so Rm-II.116, broken at the start, was being offered as a variant
+  // whose text began in the middle of the omen. A reconstruction that starts
+  // mid-sentence is not something to write.
+  //
+  // So a group whose signs run inside another's is folded into it, and one that
+  // runs inside the reading itself is dropped: it contradicts nothing, and
+  // belongs where it already is.
+  const within = (small, big) => small.length > 0 && big.indexOf(small) >= 0
+    && small.length < big.length;
+  const all = [...groups.values()];
+  const readingSigns = signsOf(readingText || '');
+
+  const kept = [];
+  for (const g of all) {
+    if (readingSigns && within(g.signs, readingSigns)) continue;   // agrees with the reading
+    const host = all.find((o) => o !== g && within(g.signs, o.signs));
+    if (host) {
+      host.witnesses.push(...g.witnesses);
+      host.keys.push(...g.keys);
+      continue;
+    }
+    kept.push(g);
+  }
+  return kept;
+}
+
+// Why each of these witnesses is being offered: the word it reads, against the
+// word this reading has there. A bare list of position numbers says a witness
+// differs; it does not say what about, which is the thing being decided.
+function splitReasons(lineNum, vi, perWitness, readingText, keys) {
+  const words = positionWords(readingText || '');
+  const at = {};
+  for (const t of words) if (t.pos != null) at[t.pos] = t.text;
+
+  const { scoreLines } = buildScore();
+  const byKey = new Map();
+  for (const w of (scoreLines[lineNum] || [])) {
+    if (w.type === 'line' && (w.variant || 0) === vi) byKey.set(w.siglum + '|' + w.sourceLine, w);
+  }
+
+  const out = [];
+  for (const k of keys) {
+    const v = perWitness[k];
+    if (!v || !v.differing || !v.differing.length) continue;
+    // alignment maps the witness's own word index to a position; turn it round.
+    const theirs = {};
+    const row = byKey.get(k);
+    if (row) {
+      const toks = witnessWords(row.content).filter((t) => t.index != null);
+      for (const [idx, pos] of Object.entries(v.alignment || {})) {
+        const t = toks[Number(idx)];
+        if (t) theirs[pos] = t.text;
+      }
+    }
+    const bits = v.differing.slice(0, 4).map((p) => (theirs[p]
+      ? theirs[p] + ' where the reading has ' + (at[p] == null ? '?' : at[p])
+      : 'differs at ' + p));
+    out.push(k.replace('|', ' ') + ' — ' + bits.join(';  ')
+      + (v.differing.length > 4 ? ';  and ' + (v.differing.length - 4) + ' more' : ''));
+  }
+  return out;
+}
+
+// The offer, as a block in the report.
+//
+// Each proposed reading is its own choice. Three witnesses reading three
+// different things produce three variants, and wanting only one of them is the
+// ordinary case — the other two may be damage, or the same reading spelled
+// differently, or simply not worth a line of their own yet.
+async function splitBlock(lineNum, vi, flagged, perWitness, readingText) {
+  const plan = await planSplit(lineNum, vi, flagged, readingText);
+  pendingSplit = { lineNum, vi, keys: flagged.slice(), plan };
+  const reasons = splitReasons(lineNum, vi, perWitness || {}, readingText, flagged);
+
+  let html = '<div class="report-offer">'
+    + `<p>${flagged.length} witness${flagged.length === 1 ? '' : 'es'} `
+    + `read${flagged.length === 1 ? 's' : ''} differently from this reading somewhere.</p>`
+    + '<p>A word that differs has nowhere to go in eBL except a variant of its'
+    + ' own — omittedWords can only say a word is absent, never that it is'
+    + ' another word. Whether these are separate readings is yours to say.</p>';
+
+  if (reasons.length) {
+    html += '<h4 class="report-heading">Why</h4>'
+      + '<pre class="report-raw">' + escapeHtml(reasons.join(String.fromCharCode(10))) + '</pre>';
+  }
+
+  if (plan.length) {
+    html += '<h4 class="report-heading">' + (plan.length === 1
+      ? 'What would be written' : 'Which of these to write') + '</h4>';
+    for (let i = 0; i < plan.length; i++) {
+      html += '<label class="split-preview">'
+        + '<input type="checkbox" class="split-pick" data-group="' + i + '" checked>'
+        + '<span class="split-preview-label">§' + lineNum + variantLetterOf(vi + 1 + i) + '</span>'
+        + '<span class="split-preview-body">'
+        + '<span class="split-preview-text">' + renderAtf(plan[i].text) + '</span>'
+        + '<span class="split-preview-from">from '
+        + escapeHtml(plan[i].witnesses.join(', ')) + '</span>'
+        + '</span></label>';
+    }
+    html += '<p class="report-note">The letters are given in order to whatever is'
+      + ' written, so leaving one out closes the gap rather than skipping a letter.'
+      + ' The reading above is composed again from whatever is left.</p>';
+  }
+
+  html += '<button type="button" id="split-variants"></button></div>';
+  return html;
+}
+
+// Wired after the report is painted, since the buttons are built with it.
+function wireSplitOffer() {
+  const btn = document.getElementById('split-variants');
+  if (!btn || !pendingSplit) return;
+  const job = pendingSplit;
+  const boxes = [...document.querySelectorAll('.split-pick')];
+
+  // Which witnesses the ticked readings account for. A group carries its own
+  // witnesses, so unticking one leaves them with the main reading rather than
+  // stranding them in a variant nobody asked for.
+  const chosenKeys = () => {
+    if (!boxes.length) return job.keys;
+    const keys = [];
+    for (const box of boxes) {
+      if (!box.checked) continue;
+      const g = job.plan[Number(box.dataset.group)];
+      if (g) keys.push(...g.keys);
+    }
+    return keys;
+  };
+
+  const label = () => {
+    const n = boxes.length ? boxes.filter((b) => b.checked).length : job.plan.length;
+    btn.disabled = n === 0;
+    btn.textContent = n === 0 ? 'Nothing selected'
+      : n === 1 ? 'Split into its own variant'
+      : 'Split into ' + n + ' variants';
+  };
+
+  for (const box of boxes) box.addEventListener('change', label);
+  label();
+
+  btn.addEventListener('click', () => {
+    const keys = chosenKeys();
+    if (!keys.length) return;
+    splitAndRecompose(job.lineNum, job.vi, keys);
+  });
+}
+
+
+// The report describes a change to the score. This checks the score actually
+// shows it, because a report that disagrees with the page is worse than no
+// report: it tells you the work was done when it was not. Returns null when
+// all is well, or what the score shows instead.
+// A reading can be written correctly and then undone a moment later, by a
+// stray event, a file reload, or another window holding the same project. The
+// synchronous check below cannot see that — it runs before the revert. So the
+// reading is watched for a second afterwards, and if it changes underneath us
+// the report says what it became and what put it there.
+function watchReadingSettles(lineNum, vi, text, label) {
+  const want = String(text || '').trim();
+  let checks = 0;
+  const timer = setInterval(() => {
+    checks++;
+    const now = String(readReading(lineNum, vi) || '').trim();
+    if (now !== want) {
+      clearInterval(timer);
+      console.error('[compose] ' + label + ' was reverted after being written.',
+        { wrote: want, became: now });
+      const body = document.getElementById('compose-report-body');
+      if (body) {
+        body.innerHTML = noteBlock(label + ' was composed and written, but something'
+          + ' changed it back ' + (checks * 200) + 'ms later. That is a bug outside the'
+          + ' compositor — most often a second window holding the same project, or the'
+          + ' file being reloaded from disk over the top.', 'bad')
+          + readingBlock('composed', want, null)
+          + readingBlock('became', now || '(empty)', null)
+          + body.innerHTML;
+      }
+      return;
+    }
+    if (checks >= 5) clearInterval(timer);
+  }, 200);
+}
+
+function readingShownMismatch(lineNum, vi, text) {
+  if (positionsOn(lineNum) || lemmasOn(lineNum)) return null;   // chips, not one string
+  const el = scorePanel.querySelector(
+    `.reconstructed-text[data-line="${lineNum}"][data-variant="${vi}"]`);
+  if (!el) return 'the score has no §' + lineNum + variantLetterOf(vi) + ' to show it in';
+  const shown = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+  const want = String(text || '').replace(/\s+/g, ' ').trim();
+  return shown === want ? null : (shown ? 'the score still shows: ' + shown : 'the score shows nothing there');
+}
+
+// One reading, with its report. The caller has already agreed to overwrite.
+async function composeOmen(lineNum, vi, scope) {
+  const label = '§' + lineNum + variantLetterOf(vi);
+  const before = readReading(lineNum, vi);
+  setStatus('connected', label + ' — composing…');
+  const r = await composeReading(lineNum, vi, scope);
+
+  if (r.error) {
+    setStatus('connected', 'Ready');
+    showComposeReport(label + ' — not composed', [
+      outcomeBanner('none', label, r.error),
+    ]);
+    return;
+  }
+  if (r.skipped) {
+    setStatus('connected', 'Ready');
+    showComposeReport(label + ' — not composed', [
+      outcomeBanner('none', label, r.skipped + '.'),
+      noteBlock('The score is exactly as it was.'), 
+    ]);
+    return;
+  }
+  if (r.alignedOnly) {
+    await saveScoreDataToFile();
+    markUnsaved();
+    renderScore();
+    setStatus('connected', label + ' aligned');
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+    showComposeReport(label + ' — aligned', [
+      outcomeBanner('kept', label, 'It has one witness, so only its alignment was filled in.'),
+      noteBlock('One witness, so the reading was left exactly as you wrote it and only the alignment was filled in.'),
+      readingBlock(label, r.text, null),
+      positionStrip(r.text),
+      witnessRows(r.perWitness),
+    ], 'aligned-' + lineNum + variantLetterOf(vi));
+    return;
+  }
+
+  await saveScoreDataToFile();
+  markUnsaved();
+  renderScore();
+
+  setStatus('connected', label + ' composed');
+  setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  const mismatch = readingShownMismatch(lineNum, vi, r.text);
+  const changed = String(before || '').trim() !== String(r.text || '').trim();
+  const blocks = [
+    outcomeBanner(String(before || '').trim() ? (changed ? 'changed' : 'kept') : 'added', label,
+      changed ? '' : 'The composed reading is word for word what was already there.'),
+    readingBlock(label, r.text, before),
+    positionStrip(r.text),
+  ];
+  if (mismatch) {
+    blocks.unshift(noteBlock('The reading was composed and written, but ' + mismatch
+      + '. Something is reverting it — please report this.', 'bad'));
+  }
+  if (r.followed) {
+    blocks.push(noteBlock('Follows ' + r.followed + '. Its own line is the reading — nothing'
+      + ' was weighed, so the table below says how the rest stand to that choice.', 'warn'));
+  } else if (r.setAside) {
+    blocks.push(noteBlock(r.setAside + ' commentar' + (r.setAside === 1 ? 'y was' : 'ies were')
+      + ' set aside: a commentary quotes the text to discuss it, so its wording'
+      + ' answers to the discussion. They are measured against the result below'
+      + ' but had no vote in it.'));
+  }
+  if (r.scope && r.scope.kind !== 'all') {
+    blocks.push(noteBlock('Composed from ' + scopeLabel(r.scope) + ' alone — ' + r.voters
+      + ' witness' + (r.voters === 1 ? '' : 'es') + ' weighed. Everyone else is measured'
+      + ' against the result but had no vote in it.', 'warn'));
+  }
+  const owned = (r.mine || Object.keys(r.perWitness)).length;
+  if (r.voters && r.voters > owned) {
+    blocks.push(noteBlock('Weighed ' + r.voters + ' witnesses of the section; ' + owned
+      + ' of them belong to this reading. The rest are shown too — they voted on'
+      + ' the material this reading shares with them.'));
+  }
+  blocks.push(witnessRows(r.perWitness, r.mine));
+  // Only this reading's own witnesses can be split off it; one already filed
+  // under another variant is somebody else's problem.
+  // A witness needs its own variant when it READS something else, not when
+  // it disagrees often enough. K.2246 agrees with 86% of §1 and still has
+  // GANBA GAL₂-ši where the reading has KIMIN ina-pu-uš — two words out of
+  // fourteen, and exactly why eBL files it as a variant of its own. Since a
+  // differing word has no home but a variant, any difference is grounds to
+  // offer one; the agreement figure stays in the table as the measure of how
+  // far apart they are.
+  const own = new Set(r.mine || Object.keys(r.perWitness));
+  const flagged = Object.keys(r.perWitness).filter((k) =>
+    own.has(k) && r.perWitness[k].differing.length && !r.perWitness[k].thinEvidence
+    && !r.perWitness[k].commentary);   // a commentary is not a reading of the text
+  if (flagged.length) {
+    blocks.push(await splitBlock(lineNum, vi, flagged, r.perWitness, r.text));
+  }
+  showComposeReport(label + ' — composed', blocks, 'compose-' + lineNum + variantLetterOf(vi));
+  watchReadingSettles(lineNum, vi, r.text, label);
+  wireSplitOffer();
+}
+
+// Every reading in the project. Counts what it would overwrite before asking,
+// because "regenerate" over a hand-made edition is not a small thing.
+async function composeAll() {
+  const { scoreLines } = buildScore();
+  const lineNums = Object.keys(scoreLines).map(Number).sort((a, b) => a - b);
+
+  const jobs = [];
+  for (const n of lineNums) {
+    const readings = variantsFor(n);
+    for (let vi = 0; vi < readings.length; vi++) {
+      const rows = (scoreLines[n] || []).filter((w) => w.type === 'line');
+      const group = rows.filter((w) => (w.variant || 0) === vi);
+      if (!group.length) continue;
+      const voters = vi === 0 ? rows.length : group.length;
+      const hadText = !!(readings[vi].text || '').trim();
+      // Too few to compose is still enough to align, as long as there is a
+      // reading to align against — which is how variants get their positions.
+      if (voters < 2 && !hadText) continue;
+      jobs.push({ n, vi, hadText, alignOnly: voters < 2 });
+    }
+  }
+  if (!jobs.length) {
+    showComposeReport('Nothing to compose', [
+      outcomeBanner('none', 'The project', 'No reading here has two or more witnesses.'),
+    ]);
+    return;
+  }
+
+  const alignOnly = jobs.filter((j) => j.alignOnly).length;
+  const composable = jobs.length - alignOnly;
+  const written = jobs.filter((j) => j.hadText && !j.alignOnly).length;
+  const ok = await askOverlay('Compose the whole project?', [
+    '<div class="report-counts">'
+      + '<span class="report-count is-done"><b>' + composable + '</b> to compose</span>'
+      + (written ? '<span class="report-count is-bad"><b>' + written + '</b> will be replaced</span>' : '')
+      + ((composable - written) ? '<span class="report-count"><b>' + (composable - written) + '</b> empty</span>' : '')
+      + (alignOnly ? '<span class="report-count"><b>' + alignOnly + '</b> aligned only</span>' : '')
+      + '</div>',
+    noteBlock(written
+      ? written + ' reading(s) already have text. Composing replaces it — there is no undo,'
+        + ' though the report can be saved before you decide.'
+      : 'No existing reading will be lost: every one of these is empty.',
+      written ? 'warn' : 'good'),
+    alignOnly ? noteBlock(alignOnly + ' reading(s) have a single witness. Those keep their text'
+      + ' and only get their alignment.') : '',
+    noteBlock('Alignments are written too, so Positions mode opens filled in.'),
+  ], 'Compose ' + composable, !!written);
+  if (!ok) return;
+
+  const btn = document.getElementById('compose-all-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Composing…'; }
+
+  let done = 0, aligned = 0, skipped = 0, failed = 0;
+  const flagged = [];
+  try {
+    for (const job of jobs) {
+      setStatus('connected', 'Composing §' + job.n + variantLetterOf(job.vi)
+        + ' (' + (done + skipped + failed + 1) + ' of ' + jobs.length + ')…');
+      const r = await composeReading(job.n, job.vi);
+      if (r.error) { failed++; continue; }
+      if (r.skipped) { skipped++; continue; }
+      if (r.alignedOnly) { aligned++; continue; }
+      done++;
+      for (const k of Object.keys(r.perWitness)) {
+        if (r.perWitness[k].wantsVariant) {
+          flagged.push('§' + job.n + variantLetterOf(job.vi) + '  ' + k.replace('|', ' ')
+            + '  ' + Math.round(r.perWitness[k].agreement * 100) + '%');
+        }
+      }
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Compose all'; }
+  }
+
+  await saveScoreDataToFile();
+  markUnsaved();
+  renderScore();
+  setStatus('connected', done + ' reading' + (done === 1 ? '' : 's') + ' composed');
+  setTimeout(() => setStatus('connected', 'Ready'), 5000);
+
+  const blocks = ['<div class="report-counts">'
+    + '<span class="report-count is-done"><b>' + done + '</b> composed</span>'
+    + (aligned ? '<span class="report-count"><b>' + aligned + '</b> aligned only</span>' : '')
+    + (skipped ? '<span class="report-count"><b>' + skipped + '</b> nothing legible</span>' : '')
+    + (failed ? '<span class="report-count is-bad"><b>' + failed + '</b> failed</span>' : '')
+    + '</div>'];
+  if (aligned) {
+    blocks.push(noteBlock('Readings with a single witness keep the text you wrote; only their'
+      + ' alignment was filled in.'));
+  }
+  if (flagged.length) {
+    blocks.push('<h4 class="report-heading">' + flagged.length
+      + ' witness' + (flagged.length === 1 ? '' : 'es')
+      + ' diverge enough to want their own variant</h4>');
+    blocks.push('<ul class="report-flagged">'
+      + flagged.map((f) => '<li>' + escapeHtml(f) + '</li>').join('')
+      + '</ul>');
+  } else {
+    blocks.push(noteBlock('No witness diverged far enough to want a variant of its own.'));
+  }
+  showComposeReport('Composed the project', blocks);
+}
+
+const composeAllBtn = document.getElementById('compose-all-btn');
+if (composeAllBtn) composeAllBtn.addEventListener('click', composeAll);
+
+// ---- Send one omen, from the score --------------------------------------
+//
+// The icon on a § header. Validates that section on its own against the eBL
+// grammar, then posts it — replacing the line if eBL already has it, adding it
+// if not. Nothing else in the chapter is touched either way.
+//
+// A rejected POST changes nothing on eBL, so the only irreversible step is a
+// successful one, which is why the confirm names what it is about to do.
+async function exportOmen(lineNum) {
+  if (!Number.isFinite(lineNum)) return;
+  const label = '§' + lineNum;
+  const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+  if (!target) {
+    showComposeReport(label + ' — not sent', [
+      outcomeBanner('notsent', label, 'No eBL chapter is configured for this project.'),
+      noteBlock('Set one in Settings, under eBL.'),
+    ]);
+    return;
+  }
+  const ts = EblClient.tokenStatus();
+  if (!ts.hasToken || ts.invalid || ts.expired || !ts.hasWriteTexts) {
+    showComposeReport(label + ' — not sent', [
+      outcomeBanner('notsent', label, 'This needs an eBL token with write:texts.'),
+      noteBlock('Token: ' + (!ts.hasToken ? 'none stored'
+        : ts.invalid ? 'not a readable JWT'
+        : ts.expired ? 'expired'
+        : 'valid, but without write:texts') + '. Paste a current one in Settings.', 'bad'),
+    ]);
+    return;
+  }
+
+  try {
+    setStatus('connected', label + ' — validating…');
+    const atf = await buildExportArtifact(lineNum);
+    if (!atf.trim()) {
+      setStatus('connected', 'Ready');
+      showComposeReport(label + ' — not sent', [
+        outcomeBanner('notsent', label, 'There is nothing here to send yet.'),
+      ]);
+      return;
+    }
+
+    // Named here rather than by a server. A stray non-breaking space is
+    // invisible on screen and eBL reports it as "No terminal matches ' '" at a
+    // column that looks like an ordinary space — which is nearly impossible to
+    // read. This runs whether or not a local validator is available.
+    const odd = EblAtf.oddCharacters(atf);
+    if (odd.length) {
+      setStatus('connected', 'Ready');
+      const where = odd.slice(0, 8).map((o) => {
+        const before = atf.slice(0, o.at);
+        const row = before.split(String.fromCharCode(10)).length;
+        const col = o.at - (before.lastIndexOf(String.fromCharCode(10)) + 1) + 1;
+        return 'Line ' + row + ', col ' + col + ': ' + o.code
+          + String.fromCharCode(10) + String.fromCharCode(10) + pointAt(atf, row, col);
+      }).join(String.fromCharCode(10) + String.fromCharCode(10));
+      showComposeReport(label + ' — not sent', [
+        outcomeBanner('notsent', label, odd.length + ' character(s) an ATF parser'
+          + ' cannot accept. Nothing was sent.'),
+        noteBlock('These look like ordinary spaces on screen. A contenteditable puts a'
+          + ' non-breaking space in where you typed a plain one. Retype the marked'
+          + ' position, or compose the reading again, and it will be cleaned.', 'bad'),
+        rawBlock(where),
+      ], 'export-' + lineNum);
+      return;
+    }
+
+    const problems = await validateAtfForExport(atf);
+    if (problems.length) {
+      setStatus('connected', 'Ready');
+      showComposeReport(label + ' — not sent', [
+        outcomeBanner('notsent', label, problems.length + ' ATF error'
+          + (problems.length === 1 ? '' : 's') + ' — nothing was sent.'),
+        rawBlock(problems.map((e) => {
+          const where = 'Line ' + (e.line == null ? '?' : e.line)
+            + (e.column == null ? '' : ', col ' + e.column) + ': ' + e.message;
+          const at = e.line == null ? '' : pointAt(atf, e.line, e.column);
+          return at ? where + String.fromCharCode(10) + String.fromCharCode(10) + at : where;
+        }).join(String.fromCharCode(10) + String.fromCharCode(10))),
+      ], 'export-' + lineNum);
+      return;
+    }
+    setStatus('connected', 'Ready');
+
+    const align = await alignmentPreview(lineNum);
+    // Asked before the send is described, because taking the suggestions
+    // changes what the description would say.
+    if (!await askAboutUncurated(null, 'lemmas')) return;
+    const lemmas = await lemmaPreview(lineNum);
+    const heldLemmas = lemmas.held;
+    const ok = await askOverlay('Send ' + label + ' to eBL?', [
+      noteBlock(target.genre + '/' + target.category + '/' + target.index + '/'
+        + target.stage + '/' + target.name),
+      '<details class="export-preview-wrap" open><summary>What will be sent</summary>'
+        + '<pre class="export-preview">' + escapeHtml(atf) + '</pre></details>',
+      noteBlock('Sent one after the other: the line, then its alignment, then its'
+        + ' lemmas — eBL takes each as its own request. The line is replaced if eBL'
+        + ' has it, added if not; no other line is touched.'),
+      ...align.blocks,
+      ...lemmas.blocks,
+      // Three requests, and each one is a decision. A reading may be worth
+      // sending while its alignment is still half done, or its lemmas still
+      // only the dictionary's guesses.
+      '<fieldset class="send-parts"><legend>What to send</legend>'
+        + '<label><input type="checkbox" checked disabled> The line</label>'
+        + '<label><input type="checkbox" id="send-alignment"'
+          + (align.placed ? ' checked' : ' disabled') + '> Its alignment'
+          + (align.placed ? ' (' + align.placed + ' words placed)' : ' — nothing to send')
+          + '</label>'
+        + '<label><input type="checkbox" id="send-lemmas"'
+          + (heldLemmas ? ' checked' : ' disabled') + '> Its lemmas'
+          + (heldLemmas ? ' (' + heldLemmas + ' words)' : ' — nothing to send')
+          + '</label>'
+        + '<label class="send-sub"><input type="checkbox" id="send-suggested">'
+          + ' … including the ones the dictionary suggested and nobody confirmed'
+          + '</label>'
+        + '</fieldset>',
+      heldLemmas
+        ? noteBlock('The lemmas go last, after the alignment — a witness word takes the'
+            + ' lemma of whatever it is aligned to.')
+        : noteBlock('No word of this section carries a lemma yet. Turn on Lemmas to'
+            + ' fill them in.'),
+      localValidatorAvailable ? '' : noteBlock('No local validator here, so the ATF was not'
+        + ' checked first — eBL will check it.', 'warn'),
+    ], 'Send ' + label, true);
+    if (!ok) return;
+
+    // Read back before anything is sent: the overlay body stays in the DOM.
+    const wantAlignment = !!(document.getElementById('send-alignment') || {}).checked;
+    const wantLemmas = !!(document.getElementById('send-lemmas') || {}).checked;
+    // Whole-chapter request: this decides for every section, not only this one.
+    const withSuggested = !!(document.getElementById('send-suggested') || {}).checked;
+
+    setStatus('connected', label + ' — sending the line…');
+    const res = await exportSingleLine(target, lineNum);
+    const what = res.inserted ? 'added to' : 'updated on';
+
+    // Step two. The line is already committed, so from here nothing may throw
+    // out of the whole export — a failed alignment is reported beside a
+    // succeeded line, never as though the line had failed too.
+    const realign = !wantAlignment
+      ? { skipped: align.placed
+          ? 'The alignment was left out of this send.'
+          : 'No positions are held for this section, so there was no alignment'
+            + ' to follow the line with.' }
+      : await sendAlignmentFor(target, label);
+
+    // Step three, after the alignment is on eBL: a witness word takes the
+    // lemma of whatever it is aligned to, so the order matters.
+    const lemmaWork = !wantLemmas
+      ? { skipped: heldLemmas
+          ? 'The lemmas were left out of this send.'
+          : 'No word of this section carries a lemma yet, so there was nothing'
+            + ' to follow the alignment with.' }
+      : await sendLemmasFor(target, label, withSuggested);
+
+    // The line is on eBL. What else went with it is recorded too, so the mark
+    // can say what was sent, not merely that something was.
+    const went = ['line'];
+    if (realign && realign.sent) went.push('alignment');
+    if (lemmaWork && lemmaWork.sent) went.push('lemmas');
+    markSent(lineNum, went);
+    await saveScoreDataToFile();
+    // Repaint, or the mark stays as it was until something else redraws.
+    keepScoreInView(renderScore);
+
+    setStatus('connected', label + ' ' + what + ' eBL');
+    setTimeout(() => setStatus('connected', 'Ready'), 5000);
+
+    const url = 'https://www.ebl.lmu.de/corpus/' + target.genre + '/' + target.category
+      + '/' + target.index + '/' + target.stage + '/' + target.name;
+    const blocks = [
+      outcomeBanner('sent', label,
+        res.inserted ? 'Added to the chapter (now ' + (res.chapterLines + 1) + ' lines).'
+                     : 'Replaced line ' + (res.index + 1) + ' of ' + res.chapterLines + '.'),
+    ];
+    if (res.warnings.length) {
+      blocks.push('<h4 class="report-heading">' + res.warnings.length + ' warning'
+        + (res.warnings.length === 1 ? '' : 's') + '</h4>');
+      blocks.push(rawBlock(res.warnings.join(String.fromCharCode(10) + String.fromCharCode(10))));
+    }
+    blocks.push(...alignmentOutcome(realign));
+    blocks.push(...lemmaOutcome(lemmaWork));
+    blocks.push(noteBlock('Reload eBL to see it — the chapter page is cached.'));
+    blocks.push('<p class="report-note"><a href="' + url + '" target="_blank" rel="noopener noreferrer">'
+      + 'View the chapter on eBL →</a></p>');
+    showComposeReport(label + ' — sent', blocks, 'export-' + lineNum);
+  } catch (err) {
+    setStatus('connected', 'Ready');
+    const detail = (err instanceof EblClient.EblError && err.validationErrors)
+      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
+          .join(String.fromCharCode(10))
+      : (err.rawBody || err.message || String(err));
+    showComposeReport(label + ' — not sent', [
+      outcomeBanner('notsent', label, 'eBL refused it. Nothing was changed.'),
+      noteBlock('What eBL said, in full:', 'bad'),
+      rawBlock(detail),
+      noteBlock('Press Copy below to send this on.'),
+    ], 'export-error-' + lineNum);
+  }
+}
+
+// ---- Replace one chapter line ------------------------------------------
+// POST /lines swaps a single line and leaves the rest of the chapter alone,
+// so lemmatization and alignment on every other line survive — and because
+// `edited` pairs old and new by index, eBL can carry them across on this line
+// too. That is the whole reason to prefer this over deleteAllLines + import.
+//
+// The chapter is read immediately before the write, for two reasons: `index`
+// is a position in eBL's line list as it stands right now, and the stored line
+// supplies everything this app cannot author — omittedWords above all. A stale
+// read would write the line into the wrong slot.
+// Everything a line export needs that comes from the chapter rather than from
+// here. Read once, because it is the same answer for every section in a range
+// and the chapter is several megabytes.
+async function lineExportContext(target) {
+  const chapter = await EblClient.getChapter(target);
+  const lines = chapter.lines || [];
+
+  if (!manuscriptsMeta) {
+    manuscriptsMeta = await FileSystem.readManuscriptsMeta(dirHandle) || { version: 1, manuscripts: [] };
+  }
+  // eBL's numeric manuscript id, matched on museum number — the local id in
+  // manuscripts.json is ours and need not agree with the chapter's.
+  const idByMuseumNumber = {};
+  for (const m of (chapter.manuscripts || [])) idByMuseumNumber[m.museumNumber] = m.id;
+  // Keyed both with and without the extension. A score entry's siglum is the
+  // file name ("K.2246.txt"), while manuscripts.json is often read stripped —
+  // and a lookup that misses drops the witness from the export in silence.
+  const manuscriptIdByFile = {};
+  for (const m of (manuscriptsMeta.manuscripts || [])) {
+    const file = m.file || '';
+    const id = idByMuseumNumber[m.museumNumber];
+    if (!file || id == null) continue;
+    manuscriptIdByFile[file] = id;
+    manuscriptIdByFile[file.replace(/\.txt$/, '')] = id;
+  }
+  return { chapter, lines, manuscriptIdByFile };
+}
+
+// One section, built against the chapter as it stands.
+function buildLineForExport(lineNum, ctx, scoreLines) {
+  const index = ctx.lines.findIndex((l) => String(l.number) === String(lineNum));
+
+  // What this project's own alignment says each witness leaves out. Measured
+  // against the reading being sent, so it is the answer eBL should get —
+  // whatever eBL happened to hold before.
+  const omittedByKey = {};
+  const readings = variantsFor(lineNum);
+  for (let vi = 0; vi < readings.length; vi++) {
+    const words = positionWords(readings[vi].text || '');
+    for (const w of (scoreLines[lineNum] || [])) {
+      if (w.type !== 'line' || (w.variant || 0) !== vi) continue;
+      const key = w.siglum + '|' + w.sourceLine;
+      const map = (lineAlignments[lineNum] || {})[key];
+      if (!map || !Object.keys(map).length) continue;   // never aligned: say nothing
+      omittedByKey[key] = alignmentTally(lineNum, w, words).omitted;
+    }
+  }
+
+  const built = EblAtf.buildChapterLine({
+    lineNum,
+    scoreLines,
+    reconstructedLines,
+    translationLines,
+    noteLines,
+    parallelLines,
+    variantLines,
+    manuscriptIdByFile,
+    omittedByKey,
+    existing: index < 0 ? null : ctx.lines[index],
+  });
+  return { built, index };
+}
+
+// Send a run of sections in one request.
+//
+// One POST rather than one per line: eBL takes a list of edits, and sending
+// them together means the chapter is read once and cannot shift underneath the
+// run. Every other line keeps its lemmatization and alignment, exactly as a
+// single-line update does.
+async function exportLineRange(target, nums) {
+  const ctx = await lineExportContext(target);
+  const { scoreLines } = buildScore();
+
+  const edited = [];
+  const newLines = [];
+  const results = [];
+  const warnings = [];
+
+  for (const lineNum of nums) {
+    const { built, index } = buildLineForExport(lineNum, ctx, scoreLines);
+    for (const w of (built.warnings || [])) warnings.push('§' + lineNum + ': ' + w);
+    if (index < 0) {
+      // Not on eBL yet. eBL appends new lines to the end, so a section that
+      // belongs in the middle would sit out of order — say so rather than let
+      // it be discovered later.
+      const higher = ctx.lines.filter((l) => parseInt(l.number, 10) > lineNum).length;
+      if (higher) {
+        warnings.push('§' + lineNum + ': eBL appends new lines to the end, so it now sits after '
+          + higher + ' higher-numbered line(s). Reorder it in eBL if that matters.');
+      }
+      newLines.push(built.line);
+      results.push({ lineNum, inserted: true, index: null });
+    } else {
+      edited.push({ index, line: built.line });
+      results.push({ lineNum, inserted: false, index });
+    }
+  }
+
+  if (!edited.length && !newLines.length) {
+    return { results: [], warnings, chapterLines: ctx.lines.length };
+  }
+  const payload = {};
+  if (edited.length) payload.edited = edited;
+  if (newLines.length) payload.newLines = newLines;
+  await EblClient.postLines(target, payload);
+  return { results, warnings, chapterLines: ctx.lines.length };
+}
+
+// One section. The range is the general case and this is the same path with a
+// single number, so the two cannot drift apart.
+async function exportSingleLine(target, lineNum) {
+  const res = await exportLineRange(target, [lineNum]);
+  const one = res.results[0] || { inserted: false, index: -1 };
+  return {
+    inserted: one.inserted,
+    index: one.index,
+    warnings: res.warnings,
+    chapterLines: res.chapterLines,
+  };
+}
+
 class ExportAborted extends Error {
   constructor(message, problems) {
     super(message);
@@ -7581,25 +12996,46 @@ class ExportAborted extends Error {
 // Run the ATF past the local validator. Returns [] when it is clean and also
 // when there is no validator to ask — browser mode cannot check, and refusing
 // to export on that basis would block the only mode that works there.
-async function validateAtfForExport(wireAtf) {
-  if (!localValidatorAvailable) return [];
+// Validate, and be able to say "I could not check" as distinct from "clean".
+//
+// Every path out of here used to answer with an empty problem list — no
+// validator, a 500, a timeout, a broken pipe — and a caller cannot tell that
+// apart from ATF that passed. That is how thirty-four unchecked lines went to
+// eBL looking as though they had been checked.
+async function validateAtfDetailed(wireAtf) {
+  if (!localValidatorAvailable) {
+    return { checked: false, problems: [], why: 'there is no local validator here' };
+  }
   try {
     const res = await fetch('/api/validate-atf', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ atf: wireAtf }),
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      return { checked: false, problems: [], why: 'the validator answered ' + res.status };
+    }
     const result = await res.json();
-    return result.valid ? [] : (result.errors || []);
-  } catch (_) {
-    return [];
+    if (result.available === false) {
+      return { checked: false, problems: [],
+        why: result.init_error || 'the validator is not available' };
+    }
+    return { checked: true, problems: result.valid ? [] : (result.errors || []) };
+  } catch (err) {
+    return { checked: false, problems: [], why: String(err && err.message || err) };
   }
+}
+
+// The older shape, for callers that only want the problems. A failure to check
+// still reads as no problems here — those callers say so themselves, from
+// localValidatorAvailable — but nothing new should use this.
+async function validateAtfForExport(wireAtf) {
+  return (await validateAtfDetailed(wireAtf)).problems;
 }
 
 async function runExport() {
   const target = projectConfig.ebl.target;
-  const atfText = reconAceEditor ? reconAceEditor.getValue() : reconOriginalAtf;
+  const atfText = exportArtifactAtf;
 
   exportGoBtn.disabled = true;
   exportCancelBtn.textContent = 'Close';
@@ -7615,6 +13051,8 @@ async function runExport() {
   };
 
   const mode = selectedExportMode();
+  const lineNum = mode === 'line' ? selectedExportLine() : null;
+  const rangeNums = mode === 'range' ? selectedExportRange() : null;
   const wireAtf = EblAtf.stripFormatting(atfText);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
@@ -7626,8 +13064,43 @@ async function runExport() {
   try {
     // Always validate first. On a replace this is the difference between a
     // clean swap and a chapter emptied for an import that then fails.
+    // The alignment carries no ATF, so there is nothing here to validate.
+    // The alignment carries no ATF and is not built from the artifact, so none
+    // of what follows applies to it: it reads the chapter, asks, and reports
+    // for itself.
+    if (mode === 'alignment') {
+      await exportAlignment();
+      return;
+    }
+
+    // Lemmas carry no ATF either, and answer for the whole chapter.
+    if (mode === 'lemmas') {
+      await exportLemmatization();
+      return;
+    }
+
+    // Line mode answers only for the row it sends, so it validates that row
+    // alone — an error in §37 is no reason to block a fix to §1. It also
+    // flushes in-view edits first, so what the artifact shows is what goes.
+    if (mode === 'line') {
+      if (lineNum == null) {
+        setStep('validate', 'error');
+        throw new ExportAborted('Type the section to update.', []);
+      }
+    }
+    if (mode === 'range') {
+      if (!rangeNums || !rangeNums.length) {
+        setStep('validate', 'error');
+        throw new ExportAborted(
+          'Type the first and last section. Nothing in that range is in this project.', []);
+      }
+    }
+
     setStep('validate', 'running');
-    const problems = await validateAtfForExport(wireAtf);
+    const problems = await validateAtfForExport(
+      mode === 'line' ? await buildSingleLineAtf(lineNum)
+      : mode === 'range' ? await buildSingleLineAtf(rangeNums)
+      : wireAtf);
     if (problems && problems.length) {
       setStep('validate', 'error');
       throw new ExportAborted(
@@ -7654,8 +13127,66 @@ async function runExport() {
     if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) {
       setStep('manuscripts', 'running');
       const eblMss = EblClient.toEblManuscripts(manuscriptsMeta);
+      const moved = await manuscriptIdChanges(target, eblMss);
+      if (moved.length) {
+        setStep('manuscripts', 'error');
+        throw new ExportAborted(
+          moved.length + ' manuscript' + (moved.length === 1 ? '' : 's')
+          + ' would change id — nothing was sent.', moved);
+      }
       await EblClient.postManuscripts(target, eblMss, []);
       setStep('manuscripts', 'done');
+    }
+
+    // A rejected POST changes nothing on eBL, so unlike replace mode there is
+    // no window in which the chapter sits emptied. No backup step for that
+    // reason — but the line eBL held is echoed into the result so a bad swap
+    // can be undone by hand.
+    if (mode === 'range') {
+      setStep('line', 'running');
+      const res = await exportLineRange(target, rangeNums);
+      setStep('line', 'done');
+
+      const url = `https://www.ebl.lmu.de/corpus/${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`;
+      const added = res.results.filter((r) => r.inserted).length;
+      let html = `Sent ${res.results.length} line${res.results.length === 1 ? '' : 's'}`
+        + ` (§${rangeNums[0]}–§${rangeNums[rangeNums.length - 1]})`
+        + (added ? `, ${added} of them new to the chapter` : '')
+        + '. Lines outside the range were left as they were. ';
+      if (res.warnings.length) {
+        html += `<br><br><strong>${res.warnings.length} warning`
+          + `${res.warnings.length === 1 ? '' : 's'}:</strong><br>`
+          + res.warnings.slice(0, 20).map((w) => escapeHtml(w)).join('<br>');
+      }
+      exportResultEl.classList.remove('hidden');
+      exportResultEl.classList.remove('failure');
+      exportResultEl.classList.add('success');
+      exportResultEl.innerHTML = html
+        + ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+      return;
+    }
+
+    if (mode === 'line') {
+      setStep('line', 'running');
+      const res = await exportSingleLine(target, lineNum);
+      setStep('line', 'done');
+
+      const url = `https://www.ebl.lmu.de/corpus/${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`;
+      let html = res.inserted
+        ? `Added §${lineNum} to the chapter (now ${res.chapterLines + 1} lines). `
+        : `Replaced §${lineNum} (line ${res.index + 1} of ${res.chapterLines}). `;
+      html += 'Every other line was left as it was. ';
+      if (res.warnings.length) {
+        html += `<br><br><strong>${res.warnings.length} warning` +
+          `${res.warnings.length === 1 ? '' : 's'}:</strong><br>` +
+          res.warnings.map((w) => escapeHtml(w)).join('<br>');
+      }
+      exportResultEl.classList.remove('hidden');
+      exportResultEl.classList.remove('failure');
+      exportResultEl.classList.add('success');
+      exportResultEl.innerHTML = html +
+        ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+      return;
     }
 
     if (mode === 'replace') {
@@ -7708,40 +13239,31 @@ async function runExport() {
           (e.line != null ? `Line ${e.line}: ` : '') +
           (e.column != null ? `col ${e.column}: ` : '') + e.message
         )).join('<br>');
-      applyValidationErrorsToAce(err.problems);
-      showReconStatus({
-        title: 'ATF errors — export stopped before sending',
-        items: err.problems.map((e) => ({ line: e.line, message: e.message })),
-        onItemClick: (it) => {
-          if (it.line != null) {
-            reconAceEditor.gotoLine(it.line, 0, true);
-            reconAceEditor.focus();
-          }
-        },
-      });
+      // Mark the offending rows in the preview and open it, so the error
+      // has somewhere to point.
+      renderExportPreview(exportArtifactAtf, err.problems);
+      const wrap = document.getElementById('export-preview-wrap');
+      if (wrap) wrap.open = true;
     } else if (err instanceof EblClient.EblError) {
       const validationErrors = err.validationErrors;
       const details = validationErrors
         ? validationErrors.map((e) => (e.line != null ? `Line ${e.line}: ${e.message}` : e.message)).join('<br>')
         : escapeHtml(err.rawBody || err.message);
       exportResultEl.innerHTML = `<strong>${escapeHtml(err.message)}</strong><br>${details}`;
-      // If the failed step was import and we have validation errors, push them into Ace
-      if (running && running.dataset.step === 'import' && validationErrors) {
-        applyValidationErrorsToAce(validationErrors);
-        // Surface them clickably below Ace too
-        showReconStatus({
-          title: 'eBL import validation errors',
-          items: validationErrors.map((e) => ({
-            line: e.line,
-            message: e.message,
-          })),
-          onItemClick: (it) => {
-            if (it.line != null) {
-              reconAceEditor.gotoLine(it.line, 0, true);
-              reconAceEditor.focus();
-            }
-          },
-        });
+      // Also in the overlay, where it can be copied out whole.
+      showComposeReport('eBL refused it', [
+        outcomeBanner('none', 'The chapter', 'Nothing was changed.'),
+        noteBlock(err.message, 'bad'),
+        rawBlock(validationErrors
+          ? validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message).join(String.fromCharCode(10))
+          : (err.rawBody || err.message)),
+      ], 'export-error');
+      // eBL's own line numbers address the ATF we sent, which is what the
+      // preview shows.
+      if (validationErrors) {
+        renderExportPreview(exportArtifactAtf, validationErrors);
+        const wrap = document.getElementById('export-preview-wrap');
+        if (wrap) wrap.open = true;
       }
     } else {
       exportResultEl.textContent = err.message || String(err);
@@ -7762,112 +13284,33 @@ async function runExport() {
   }
 }
 
-function applyValidationErrorsToAce(validationErrors) {
-  if (!reconAceEditor) return;
-  const anns = validationErrors
-    .filter((e) => e.line != null)
-    .map((e) => ({
-      row: Math.max(0, e.line - 1),
-      column: (e.column || 1) - 1,
-      text: e.message,
-      type: 'error',
-    }));
-  reconAceEditor.session.setAnnotations(anns);
-}
-
 // ---- Wire buttons ----
 
-if (reconViewBtn) reconViewBtn.addEventListener('click', openReconView);
-if (reconCloseBtn) reconCloseBtn.addEventListener('click', closeReconView);
-if (reconRefreshBtn) reconRefreshBtn.addEventListener('click', async () => {
-  if (reconAceEditor && reconAceEditor.getValue() !== reconOriginalAtf) {
-    if (!confirm('You have in-view edits that will be lost. Refresh anyway?')) return;
-  }
-  await refreshReconArtifact();
+// The Export button is a two-item menu: the synoptic score as a text file,
+// or the chapter to eBL. Closes on any click outside it.
+const exportMenuEl = document.getElementById('export-menu');
+const exportTxtItem = document.getElementById('export-txt-item');
+const exportEblItem = document.getElementById('export-ebl-item');
+
+function closeExportMenu() {
+  if (!exportMenuEl) return;
+  exportMenuEl.classList.add('hidden');
+  exportBtn.setAttribute('aria-expanded', 'false');
+}
+
+exportBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = exportMenuEl.classList.toggle('hidden');
+  exportBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
 });
-if (reconValidateBtn) reconValidateBtn.addEventListener('click', validateRecon);
-if (reconExportBtn) reconExportBtn.addEventListener('click', openExportModal);
+document.addEventListener('click', closeExportMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeExportMenu(); });
+if (exportTxtItem) exportTxtItem.addEventListener('click', () => { closeExportMenu(); exportScore(); });
+if (exportEblItem) exportEblItem.addEventListener('click', () => { closeExportMenu(); openExportModal(); });
 
 // ---- Local ATF validation via the server.js → Python sidecar ----
 
 const VALIDATE_MAX_ERRORS = 5;
-
-async function validateRecon() {
-  if (!reconAceEditor) return;
-  const atfText = reconAceEditor.getValue();
-  const stripped = (window.EblAtf && EblAtf.stripFormatting)
-    ? EblAtf.stripFormatting(atfText)
-    : atfText;
-
-  reconValidateBtn.disabled = true;
-  const origLabel = reconValidateBtn.textContent;
-  reconValidateBtn.textContent = 'Validating…';
-  try {
-    const res = await fetch('/api/validate-atf', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ atf: stripped }),
-    });
-
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      showReconStatus({
-        title: `Validator unavailable (HTTP ${res.status})`,
-        items: [{ message: body.hint || body.error || res.statusText }],
-      });
-      reconAceEditor.session.clearAnnotations();
-      return;
-    }
-
-    const result = await res.json();
-    if (result.valid) {
-      reconAceEditor.session.clearAnnotations();
-      showReconStatus({
-        title: `Valid · ${result.parsed_lines} line${result.parsed_lines === 1 ? '' : 's'} parsed by ${result.validation_source}`,
-        items: [],
-      });
-      return;
-    }
-
-    // Map artifact-row errors back to Ace rows. Because we stripped formatting
-    // before sending to Python, the validator's line numbers correspond to the
-    // *stripped* version, not the on-screen buffer. Each row has a 1:1 line
-    // mapping (stripFormatting is per-line), so the row indices match.
-    const errors = (result.errors || []).slice(0, VALIDATE_MAX_ERRORS);
-    const total = result.errors.length;
-
-    reconAceEditor.session.setAnnotations(errors.map((e) => ({
-      row: Math.max(0, (e.line || 1) - 1),
-      column: Math.max(0, (e.column || 1) - 1),
-      text: e.message,
-      type: 'error',
-    })));
-
-    showReconStatus({
-      title: total > VALIDATE_MAX_ERRORS
-        ? `${VALIDATE_MAX_ERRORS} of ${total} errors (fix these and Validate again to see the rest)`
-        : `${total} error${total === 1 ? '' : 's'}`,
-      items: errors.map((e) => ({
-        line: e.line,
-        message: (e.column != null ? `col ${e.column}: ` : '') + e.message,
-      })),
-      onItemClick: (it) => {
-        if (it.line != null) {
-          reconAceEditor.gotoLine(it.line, (errors.find(x => x.line === it.line)?.column || 1) - 1, true);
-          reconAceEditor.focus();
-        }
-      },
-    });
-  } catch (err) {
-    showReconStatus({
-      title: 'Validator request failed',
-      items: [{ message: err.message }],
-    });
-  } finally {
-    reconValidateBtn.textContent = origLabel;
-    reconValidateBtn.disabled = false;
-  }
-}
 
 if (exportCloseBtn) exportCloseBtn.addEventListener('click', closeExportModal);
 if (exportCancelBtn) exportCancelBtn.addEventListener('click', closeExportModal);
