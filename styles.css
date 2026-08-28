@@ -1964,6 +1964,7 @@ body.dark-mode .reconstructed-text:empty::before {
   align-items: center;
   padding: 1rem;
   border-bottom: 1px solid var(--border-color);
+  flex: 0 0 auto;
 }
 
 .modal-header h3 {
@@ -3404,6 +3405,7 @@ body.dark-mode .stats-table tr.is-mid td { background: rgba(239, 140, 0, 0.12); 
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
+  flex: 0 0 auto;
   padding: 0.7rem 1.1rem;
   border-top: 1px solid var(--border-color);
   background: var(--bg-light);
@@ -3503,6 +3505,11 @@ body.dark-mode .report-note.is-good { color: #7fc98a; }
 .compose-report-body {
   padding: 0.9rem 1.1rem 1.2rem;
   overflow: auto;
+  /* overflow alone is not enough in a flex column: without min-height the item
+     still refuses to shrink below its content, and the buttons underneath are
+     pushed out of the dialog. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* The reading itself, given room to be read. */
@@ -3697,8 +3704,12 @@ body.dark-mode .report-count.is-bad b { color: #e88b83; }
  * =========================================== */
 
 .export-modal {
-  max-width: 560px;
-  width: 90%;
+  max-width: 680px;
+  width: 92%;
+  /* Later than .modal-content, so this is the height that applies. The dialog
+     carries a mode list, the preview, the warnings, the step list and the
+     result, and 80vh left too little for them. */
+  max-height: 88vh;
   background: var(--bg-white);
   border-radius: 8px;
   box-shadow: 0 12px 40px rgba(0,0,0,.2);
@@ -3706,11 +3717,19 @@ body.dark-mode .report-count.is-bad b { color: #e88b83; }
   flex-direction: column;
 }
 
+/* The part that scrolls. A flex item will not shrink below its content unless
+   told to — min-height defaults to auto — so this grew past the dialog's 80vh
+   and pushed Cancel and Export out of the bottom of it. Everything the export
+   can say (the preview, the warnings, the step list, the result) lands in here,
+   so it is the piece that has to give. */
 .export-modal-body {
   padding: 1rem 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .export-row {
@@ -3975,6 +3994,8 @@ body.dark-mode .report-count.is-bad b { color: #e88b83; }
   gap: 0.5rem;
   padding: 0.75rem 1.25rem;
   border-top: 1px solid var(--border-color);
+  /* Never squeezed out by whatever the body is showing. */
+  flex: 0 0 auto;
 }
 
 .modal-actions button {
@@ -4907,8 +4928,9 @@ body.dark-mode {
   z-index: 40;
   top: 100%;
   left: 0;
-  min-width: 22rem;
-  max-height: calc(10 * 1.45rem);
+  min-width: 34rem;
+  max-width: min(46rem, 80vw);
+  max-height: calc(12 * 1.5rem);
   overflow-y: auto;
   display: block;
   background: var(--bg-white, #fff);
@@ -4919,11 +4941,11 @@ body.dark-mode {
 }
 .lem-option {
   display: grid;
-  grid-template-columns: minmax(6rem, 10rem) 1fr auto auto;
+  grid-template-columns: minmax(6rem, 12rem) minmax(5rem, 1fr) minmax(0, auto) auto;
   gap: 0.5rem;
   align-items: baseline;
-  padding: 0.2rem 0.5rem;
-  height: 1.45rem;
+  padding: 0.22rem 0.5rem;
+  height: 1.5rem;
   box-sizing: border-box;
   font-size: 0.74rem;
   white-space: nowrap;
@@ -4933,8 +4955,58 @@ body.dark-mode {
 .lem-option:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.1)); }
 .lem-option.is-empty { display: block; opacity: 0.6; cursor: default; }
 .lem-option-id { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-.lem-option-guide { opacity: 0.85; overflow: hidden; text-overflow: ellipsis; }
-.lem-option-how { grid-column: 3; font-size: 0.68rem; opacity: 0.6; font-style: italic; }
+.lem-option-guide { min-width: 0; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; }
+/* Where a candidate came from. It gives way to the meaning rather than the
+   other way round: a verb reached by its root said so at such length that the
+   guide word beside it was ellipsised out of existence. */
+.lem-option-how {
+  grid-column: 3;
+  min-width: 0;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.68rem;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* Add another lemma to this word. */
+.lem-add {
+  border: 1px solid var(--border-color, #cfc3b4);
+  background: var(--bg-white, #fff);
+  color: var(--accent, #7a5c3e);
+  border-radius: 3px;
+  width: 1.3rem;
+  height: 1.3rem;
+  line-height: 1;
+  padding: 0;
+  margin-left: 0.25rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.lem-add:hover { background: var(--accent-light, #f0e6d8); }
+
+/* The endings the dictionary read off the word, each one a choice. MU-NI is
+   not a base plus -ni, so an inferred ending has to be refusable. */
+.lem-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.5rem;
+  padding: 0.2rem 0.5rem 0.3rem;
+  border-bottom: 1px solid var(--border-color, #cfc3b4);
+  background: var(--bg-white, #fff);
+  font-size: 0.72rem;
+}
+.lem-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+.lem-part:hover { opacity: 1; }
+.lem-part input { margin: 0; }
 
 /* The mark that records a reading for the whole project rather than this word.
    Kept faint until the row is under the cursor: it is the rarer of the two

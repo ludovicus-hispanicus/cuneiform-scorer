@@ -490,6 +490,9 @@
             </span>
           </div>
           <div class="export-options">
+            <label class="export-opt-lines hidden"><input type="checkbox" id="export-opt-alignment" checked> &hellip;and the alignment after &mdash; sending a line replaces what eBL held for it</label>
+            <label class="export-opt-lines hidden"><input type="checkbox" id="export-opt-lemmas" checked> &hellip;and the lemmas after &mdash; a witness word takes the lemma of what it is aligned to</label>
+            <label><input type="checkbox" id="export-opt-repeat"> Let a commentary point two tokens at the same word &mdash; eBL has no stored case of this, so it may refuse the alignment</label>
             <label><input type="checkbox" id="export-opt-manuscripts" checked> Register manuscripts first</label>
             <label><input type="checkbox" id="export-opt-save-atf"> Save a copy of the ATF in the project folder</label>
           </div>
@@ -518,6 +521,12 @@
           </div>
           <div class="export-step" data-step="line">
             <span class="step-icon">·</span> Replace the line
+          </div>
+          <div class="export-step" data-step="align">
+            <span class="step-icon">&middot;</span> Send the alignment again
+          </div>
+          <div class="export-step" data-step="lemmas">
+            <span class="step-icon">&middot;</span> Send the lemmas again
           </div>
           <div class="export-step" data-step="import">
             <span class="step-icon">·</span> Import lines

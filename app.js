@@ -1693,6 +1693,32 @@ function buildScore() {
     scoreLines[entry.targetLine].push(entry);
   }
 
+  // A ruling sits under the line it follows, so it belongs to the reading its
+  // manuscript's lines belong to. Where a witness was moved to a variant before
+  // its directives followed, the marker was left behind in the old reading —
+  // §18 kept AO.6450's ruling while AO.6450 itself had gone to §18b. Read it
+  // where the lines are rather than where the file happens to say.
+  //
+  // Only when the manuscript has readings in exactly one reading of the
+  // section: with lines in two, which one the ruling follows is a real
+  // question and not one to answer by guessing.
+  for (const n of Object.keys(scoreLines)) {
+    const here = scoreLines[n];
+    const readingsBy = new Map();
+    for (const e of here) {
+      if (e.type !== 'line') continue;
+      if (!readingsBy.has(e.siglum)) readingsBy.set(e.siglum, new Set());
+      readingsBy.get(e.siglum).add(e.variant || 0);
+    }
+    for (const e of here) {
+      if (e.type === 'line') continue;
+      const seen = readingsBy.get(e.siglum);
+      if (!seen || seen.size !== 1) continue;
+      const only = [...seen][0];
+      if ((e.variant || 0) !== only) e.variant = only;
+    }
+  }
+
   for (const n of Object.keys(scoreLines)) scoreLines[n].sort(scoreEntryOrder);
 
   return { scoreLines, rulings, comments };
@@ -2431,10 +2457,22 @@ async function assignWitnessesToVariant(witnesses, lineNum, variantIndex) {
     const msEntry = Object.values(manuscripts).find((m) => m.siglum === msKey);
     if (!msEntry) continue;
     let content = msEntry.content;
+    const from = new Set();
     for (const w of group) {
       const res = EblAtf.setWitnessVariant(content, {
         lineNum, sourceLine: w.sourceLine, letter,
       });
+      if (res.ok) {
+        content = res.content;
+        from.add(variantLetterOf(w.variant || 0));
+      }
+    }
+    // A ruling belongs under the line it follows, so it goes where the lines
+    // went. Only once none of this manuscript's lines are left behind — a
+    // witness with readings in both still needs its ruling with the others.
+    for (const fromLetter of from) {
+      if (fromLetter === letter) continue;
+      const res = EblAtf.setDirectiveVariant(content, { lineNum, fromLetter, letter });
       if (res.ok) content = res.content;
     }
     if (content !== msEntry.content) {
@@ -4945,6 +4983,7 @@ async function saveScoreDataToFile() {
       alignments: lineAlignments,
       lemmas: lemmaChoices,
       glossary: projectGlossary,
+      allowRepeatedClaims,
       exported: exportedSections,
       savedAt: new Date().toISOString()
     };
@@ -4980,6 +5019,9 @@ async function loadScoreData() {
       if (data.glossary) {
         projectGlossary = data.glossary;
         applyProjectGlossary();
+      }
+      if (typeof data.allowRepeatedClaims === 'boolean') {
+        allowRepeatedClaims = data.allowRepeatedClaims;
       }
       migrateSentMarks();
       console.log('Loaded score-data.json');
@@ -8178,6 +8220,9 @@ async function pollForChanges() {
         projectGlossary = data.glossary;
         applyProjectGlossary();
       }
+      if (typeof data.allowRepeatedClaims === 'boolean') {
+        allowRepeatedClaims = data.allowRepeatedClaims;
+      }
       migrateSentMarks();
         renderScore();
         hasChanges = true;
@@ -8403,6 +8448,9 @@ try {
         projectGlossary = data.glossary;
         applyProjectGlossary();
       }
+      if (typeof data.allowRepeatedClaims === 'boolean') {
+        allowRepeatedClaims = data.allowRepeatedClaims;
+      }
       migrateSentMarks();
         renderScore();
       }
@@ -8529,6 +8577,9 @@ const exportProgressEl = document.getElementById('export-progress');
 const exportResultEl = document.getElementById('export-result');
 const exportPreflightEl = document.getElementById('export-preflight');
 const exportEffectEl = document.getElementById('export-effect');
+const exportOptRepeatEl = document.getElementById('export-opt-repeat');
+const exportOptAlignmentEl = document.getElementById('export-opt-alignment');
+const exportOptLemmasEl = document.getElementById('export-opt-lemmas');
 const exportOptManuscriptsEl = document.getElementById('export-opt-manuscripts');
 const exportOptSaveAtfEl = document.getElementById('export-opt-save-atf');
 
@@ -8807,7 +8858,15 @@ function stepsForMode(mode) {
   const steps = ['validate'];
   if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) steps.push('manuscripts');
   if (mode === 'alignment') return [];   // it reports for itself
-  if (mode === 'line' || mode === 'range') { steps.push('line'); return steps; }
+  if (mode === 'line' || mode === 'range') {
+    steps.push('line');
+    // eBL rebuilds a line's tokens from the ATF it is sent, so the alignment
+    // and the lemmas it held for that line are gone the moment the line lands.
+    // Sending them again is not an extra: it is what keeps the line whole.
+    if (exportOptAlignmentEl && exportOptAlignmentEl.checked) steps.push('align');
+    if (exportOptLemmasEl && exportOptLemmasEl.checked) steps.push('lemmas');
+    return steps;
+  }
   if (mode === 'replace') steps.push('backup', 'delete');
   steps.push('import');
   return steps;
@@ -8882,6 +8941,7 @@ async function openExportModal() {
   if (validateRadio) validateRadio.checked = true;
   const linePicker = document.getElementById('export-line-picker');
   if (linePicker) linePicker.classList.add('hidden');
+  if (exportOptRepeatEl) exportOptRepeatEl.checked = allowRepeatedClaims;
 
   // Validate-only writes nothing, so it needs neither a token nor write scope.
   const canExport = !!exportArtifactAtf;
@@ -8915,6 +8975,11 @@ document.querySelectorAll('input[name="export-mode"]').forEach((radio) => {
     exportGoBtn.title = ok ? '' : 'Cannot write to eBL — fix token/target first';
     const picker = document.getElementById('export-line-picker');
     if (picker) picker.classList.toggle('hidden', mode !== 'line' && mode !== 'range');
+    // Only a line send needs them: the other modes either carry no ATF or
+    // rewrite the whole chapter anyway.
+    for (const opt of document.querySelectorAll('.export-opt-lines')) {
+      opt.classList.toggle('hidden', mode !== 'line' && mode !== 'range');
+    }
     const toBox = document.getElementById('export-range-to');
     if (toBox) toBox.classList.toggle('hidden', mode !== 'range');
     renderExportEffect();
@@ -8927,7 +8992,15 @@ const exportLineNumEl = document.getElementById('export-line-num');
 if (exportLineNumEl) exportLineNumEl.addEventListener('input', renderExportEffect);
 const exportLineToEl = document.getElementById('export-line-to');
 if (exportLineToEl) exportLineToEl.addEventListener('input', renderExportEffect);
+if (exportOptRepeatEl) {
+  exportOptRepeatEl.addEventListener('change', () => {
+    allowRepeatedClaims = exportOptRepeatEl.checked;
+    saveScoreDataToFile();
+  });
+}
 exportOptManuscriptsEl && exportOptManuscriptsEl.addEventListener('change', syncExportSteps);
+exportOptAlignmentEl && exportOptAlignmentEl.addEventListener('change', syncExportSteps);
+exportOptLemmasEl && exportOptLemmasEl.addEventListener('change', syncExportSteps);
 
 function closeExportModal() {
   exportModal.classList.add('hidden');
@@ -9947,9 +10020,10 @@ function localAlignment(m, w, positions, omitted, convert) {
   let doubled = 0;
   plan.forEach((p, i) => {
     if (p.at == null || best.get(p.at) === i) return;
+    doubled++;
+    if (allowRepeatedClaims) return;   // both claims stand; eBL answers for it
     p.at = null;
     p.partner = null;
-    doubled++;
   });
 
   const claimed = new Set();
@@ -10614,6 +10688,19 @@ async function offerRefreshSuggestions(from) {
 // usually the same ones they will settle for the next.
 let projectGlossary = {};
 
+// May two tokens of one witness point at the same word of the reading?
+//
+// A commentary quotes a lemma and then quotes it again inside its explanation,
+// and both halves answer to the one word the reading has. eBL has never stored
+// such a case — nought in fourteen thousand aligned tokens across seven
+// chapters — but that rule is inferred from its data, not documented, and it
+// has never actually been put to eBL because this app refused it first.
+//
+// Off by default, because the safe reading of silence is that it is refused.
+// On, both claims go and eBL answers for itself; the line is sent either way,
+// so the worst case is a refused alignment and a message worth reading.
+let allowRepeatedClaims = false;
+
 function applyProjectGlossary() {
   try { Lemmatizer.setGlossary(projectGlossary); } catch (_) { /* not loaded yet */ }
 }
@@ -11125,9 +11212,17 @@ async function openLemmaDropdown(el) {
   const word = (words.find((t) => t.pos === pos) || {}).text || '';
   const held = lemmasAt(lineNum, vi, pos);
 
-  // An ending written onto the word is kept whatever the base becomes: it is a
-  // fact about the spelling, not a reading of it.
+  // What the dictionary reads as an ending written onto the word. Offered, not
+  // imposed: MU-NI is not a base plus -ni, and while every save welded the
+  // inferred ending back on there was no way to say so. Each one is a box the
+  // editor can clear.
+  //
+  // A box starts ticked when the token already carries that ending, and for a
+  // token with nothing on it yet. Once something has been chosen, an ending
+  // that is not there was taken off on purpose and stays off.
   const endingIds = endingIdsOf(word);
+  const endingOn = {};
+  for (const id of endingIds) endingOn[id] = !held.length || held.indexOf(id) >= 0;
   // A word may be more than one lemma. UTU.È is one writing for ṣīt šamši, and
   // both halves belong on the token, so the box holds them joined by a + and
   // gives them back the same way.
@@ -11147,9 +11242,16 @@ async function openLemmaDropdown(el) {
   const idHtml = el.querySelector('.lem-id');
   const previous = idHtml ? idHtml.outerHTML : '';
   if (idHtml) {
+    const parts = endingIds.map((id) => '<label class="lem-part">'
+      + '<input type="checkbox" class="lem-part-box" data-id="' + escapeHtml(id) + '"'
+      + (endingOn[id] ? ' checked' : '') + '>'
+      + escapeHtml(id) + '</label>').join('');
     idHtml.outerHTML = '<span class="lem-edit">'
       + '<input class="lem-input" value="' + escapeHtml(base) + '"'
       + ' placeholder="lemma" autocomplete="off" spellcheck="false">'
+      + '<button type="button" class="lem-add" title="Add another lemma to this word'
+      + ' (a compound writes two words with one sign)">+</button>'
+      + (parts ? '<span class="lem-parts">' + parts + '</span>' : '')
       + '<span class="lem-list" role="listbox"></span></span>';
   }
   const input = el.querySelector('.lem-input');
@@ -11159,6 +11261,47 @@ async function openLemmaDropdown(el) {
   let rows = suggestions;
   let active = -1;
   const PIN = String.fromCharCode(167);   // §, the mark the score already uses
+
+  // One word can be several lemmas — UTU.È writes ṣīt šamši with two signs and
+  // carries both — and the box holds them joined by a +. Everything below works
+  // on the one under the caret, so each is completed on its own. Searching the
+  // whole box meant that the moment a + was in it nothing matched at all, and
+  // the second lemma had to be typed blind.
+  const segmentAt = () => {
+    const v = input.value;
+    const c = input.selectionStart == null ? v.length : input.selectionStart;
+    return v.slice(0, c).split('+').length - 1;
+  };
+  const segmentText = (i) => (input.value.split('+')[i] || '').trim();
+  const putSegment = (i, text) => {
+    const parts = input.value.split('+').map((x) => x.trim());
+    while (parts.length <= i) parts.push('');
+    parts[i] = text;
+    input.value = parts.join(' + ');
+    const upto = parts.slice(0, i + 1).join(' + ').length;
+    try { input.setSelectionRange(upto, upto); } catch (_) { /* not focused yet */ }
+  };
+  // A lemma already standing in another slot is not a candidate for this one.
+  const takenElsewhere = (i) => new Set(input.value.split('+')
+    .map((x) => x.trim()).filter((x, n) => x && n !== i));
+
+  const refresh = () => {
+    const i = segmentAt();
+    const q = segmentText(i);
+    const taken = takenElsewhere(i);
+    const found = q
+      ? Lemmatizer.search(q, 60).map((r) => ({ id: r.id, guide: r.guide, how: '' }))
+      : suggestions;
+    rows = found.filter((r) => !taken.has(r.id));
+    // Nothing typed in this slot, nothing selected: Enter on an empty box has
+    // to clear the word rather than put the first suggestion back.
+    active = q && rows.length ? 0 : -1;
+    paint();
+  };
+
+  // Fill the slot under the caret, then save. Choosing one lemma is the common
+  // case and still takes one click.
+  const pick = (id, teach) => { putSegment(segmentAt(), id); commit(null, teach); };
 
   const paint = () => {
     list.innerHTML = rows.length
@@ -11190,7 +11333,11 @@ async function openLemmaDropdown(el) {
     }
     if (typed && !chosen.length) { close(false); return; }
     const ids = chosen.slice();
-    for (const e of endingIds) if (ids.indexOf(e) < 0) ids.push(e);
+    // Only the endings still ticked.
+    for (const box of el.querySelectorAll('.lem-part-box')) {
+      const id = box.dataset.id;
+      if (box.checked && id && ids.indexOf(id) < 0) ids.push(id);
+    }
     setLemmasAt(lineNum, vi, pos, chosen.length ? ids : [], 'hand');
     // Recorded for the project, the reading answers this word everywhere it is
     // written, on lines not yet looked at as well as this one.
@@ -11225,14 +11372,14 @@ async function openLemmaDropdown(el) {
   let timer = null;
   input.addEventListener('input', () => {
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      const q = input.value.trim();
-      rows = q ? Lemmatizer.search(q, 60).map((r) => ({ id: r.id, guide: r.guide, how: '' }))
-               : suggestions;
-      active = rows.length ? 0 : -1;
-      paint();
-    }, 120);
+    timer = setTimeout(refresh, 120);
   });
+  // Moving the caret between slots changes which lemma is being completed.
+  input.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+      || e.key === 'Home' || e.key === 'End') refresh();
+  });
+  input.addEventListener('click', refresh);
 
   // The next word to tag, as coordinates rather than as an element: committing
   // rebuilds the score, so anything held by reference is gone by the time it
@@ -11260,7 +11407,8 @@ async function openLemmaDropdown(el) {
       e.preventDefault();
       // Ctrl-Enter records the reading for the project, the same as the §
       // beside the row: the hands are already on the keyboard by then.
-      commit(active >= 0 && rows[active] ? rows[active].id : null, e.ctrlKey || e.metaKey);
+      if (active >= 0 && rows[active]) pick(rows[active].id, e.ctrlKey || e.metaKey);
+      else commit(null, e.ctrlKey || e.metaKey);
     } else if (e.key === 'Tab') {
       // Tab takes what is in the box and moves to the next word, which is the
       // whole of the work: read the suggestion, accept it or change it, move
@@ -11269,7 +11417,8 @@ async function openLemmaDropdown(el) {
       // and an edition.
       e.preventDefault();
       const where = neighbour(e.shiftKey ? -1 : 1);
-      commit(active >= 0 && rows[active] ? rows[active].id : null);
+      if (active >= 0 && rows[active]) pick(rows[active].id);
+      else commit(null);
       // After the re-render, not before it.
       setTimeout(() => openAt(where), 0);
     } else if (e.key === 'Escape') { e.preventDefault(); close(true); }
@@ -11280,15 +11429,35 @@ async function openLemmaDropdown(el) {
     if (pin) {
       e.preventDefault();
       const r = rows[Number(pin.dataset.pin)];
-      if (r) commit(r.id, true);
+      if (r) pick(r.id, true);
       return;
     }
     const row = e.target.closest ? e.target.closest('.lem-option') : null;
     if (!row || row.classList.contains('is-empty')) return;
     e.preventDefault();   // keep the input focused through the click
     const r = rows[Number(row.dataset.i)];
-    if (r) commit(r.id);
+    if (r) pick(r.id);
   });
+
+  // Add a slot. A compound logogram is one writing for two words, and after the
+  // + the word's own candidates are offered again for the second — minus the
+  // one already taken, which is what makes ṣītu I + šamšu I two clicks.
+  const addBtn = el.querySelector('.lem-add');
+  if (addBtn) addBtn.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const v = input.value.trim();
+    input.value = v ? v + ' + ' : '';
+    input.focus();
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) { /* ignore */ }
+    refresh();
+  });
+
+  // Ticking a box leaves the keyboard on the box, where Enter would toggle it
+  // again instead of saving. Hand the input back so the row can be finished
+  // the way every other row is finished.
+  for (const box of el.querySelectorAll('.lem-part-box')) {
+    box.addEventListener('change', () => input.focus());
+  }
 
   paint();
   input.focus();
@@ -11744,9 +11913,14 @@ function alignmentOutcome(r) {
     out.push(rawBlock(s.unmatched.slice(0, 10).join(String.fromCharCode(10))));
   }
   if (s.doubled && s.doubled.length) {
-    out.push(noteBlock('A commentary may quote the same word twice, and the reading has it'
-      + ' once. eBL allows one token to point at a word, so the quotation that agrees with'
-      + ' the reading keeps it and the repeat went out unaligned.'));
+    out.push(noteBlock(allowRepeatedClaims
+      ? 'A commentary quoted the same word more than once, and both quotations were'
+        + ' sent pointing at it. eBL has no stored case of this, so if it refused the'
+        + ' alignment this is the first thing to suspect.'
+      : 'A commentary may quote the same word twice, and the reading has it once. One'
+        + ' token may point at a word, so the quotation that agrees with the reading kept'
+        + ' it and the repeat went out unaligned. Turn on repeated quotations to send'
+        + ' both and let eBL answer.'));
     out.push(rawBlock(s.doubled.slice(0, 10).join(String.fromCharCode(10))));
   }
   return out;
@@ -11799,9 +11973,11 @@ function alignmentProblems(chapter, payload) {
           }
           claimed.set(a, (claimed.get(a) || 0) + 1);
         }
-        for (const [a, count] of claimed) {
-          if (count > 1) out.push(at + 'word ' + a + ' (' + (toks[a] || {}).value
-            + ') is claimed by ' + count + ' tokens');
+        if (!allowRepeatedClaims) {
+          for (const [a, count] of claimed) {
+            if (count > 1) out.push(at + 'word ' + a + ' (' + (toks[a] || {}).value
+              + ') is claimed by ' + count + ' tokens');
+          }
         }
         for (const o of (built.omittedWords || [])) {
           if (!(typeof o === 'number' && o >= 0 && o < n)) {
@@ -12920,7 +13096,7 @@ function buildLineForExport(lineNum, ctx, scoreLines) {
     noteLines,
     parallelLines,
     variantLines,
-    manuscriptIdByFile,
+    manuscriptIdByFile: ctx.manuscriptIdByFile,
     omittedByKey,
     existing: index < 0 ? null : ctx.lines[index],
   });
@@ -13126,7 +13302,13 @@ async function runExport() {
 
     if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) {
       setStep('manuscripts', 'running');
-      const eblMss = EblClient.toEblManuscripts(manuscriptsMeta);
+      // Whatever the chapter holds and this project does not is sent back
+      // unchanged. A blank colophon here means nothing to say, not make it
+      // empty, and POST /manuscripts replaces the whole list.
+      let held = [];
+      try { held = (await EblClient.getChapter(target)).manuscripts || []; } catch (_) { held = []; }
+      const eblMss = EblClient.preserveFromChapter(
+        EblClient.toEblManuscripts(manuscriptsMeta), held);
       const moved = await manuscriptIdChanges(target, eblMss);
       if (moved.length) {
         setStep('manuscripts', 'error');
@@ -13142,6 +13324,28 @@ async function runExport() {
     // no window in which the chapter sits emptied. No backup step for that
     // reason — but the line eBL held is echoed into the result so a bad swap
     // can be undone by hand.
+    // A line export replaces what eBL held for that line, alignment and lemmas
+    // included, because eBL rebuilds the tokens from the ATF it is sent. Both
+    // endpoints rewrite the whole chapter, so one call each covers every line
+    // just sent — and the lemmas go after the alignment, since a witness word
+    // takes the lemma of whatever it is aligned to.
+    const followUp = async (label) => {
+      const out = [];
+      if (exportOptAlignmentEl && exportOptAlignmentEl.checked) {
+        setStep('align', 'running');
+        const r = await sendAlignmentFor(target, label);
+        setStep('align', r && r.sent ? 'done' : 'error');
+        out.push(...alignmentOutcome(r));
+      }
+      if (exportOptLemmasEl && exportOptLemmasEl.checked) {
+        setStep('lemmas', 'running');
+        const r = await sendLemmasFor(target, label, false);
+        setStep('lemmas', r && r.sent ? 'done' : 'error');
+        out.push(...lemmaOutcome(r));
+      }
+      return out;
+    };
+
     if (mode === 'range') {
       setStep('line', 'running');
       const res = await exportLineRange(target, rangeNums);
@@ -13158,11 +13362,14 @@ async function runExport() {
           + `${res.warnings.length === 1 ? '' : 's'}:</strong><br>`
           + res.warnings.slice(0, 20).map((w) => escapeHtml(w)).join('<br>');
       }
+      const after = await followUp('§' + rangeNums[0] + '–§' + rangeNums[rangeNums.length - 1]);
+
       exportResultEl.classList.remove('hidden');
       exportResultEl.classList.remove('failure');
       exportResultEl.classList.add('success');
       exportResultEl.innerHTML = html
-        + ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+        + ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`
+        + after.join('');
       return;
     }
 
@@ -13181,11 +13388,14 @@ async function runExport() {
           `${res.warnings.length === 1 ? '' : 's'}:</strong><br>` +
           res.warnings.map((w) => escapeHtml(w)).join('<br>');
       }
+      const after = await followUp('§' + lineNum);
+
       exportResultEl.classList.remove('hidden');
       exportResultEl.classList.remove('failure');
       exportResultEl.classList.add('success');
       exportResultEl.innerHTML = html +
-        ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+        ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`
+        + after.join('');
       return;
     }
 
