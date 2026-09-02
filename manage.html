@@ -628,6 +628,8 @@
         <button id="ebl-ms-check-btn" class="btn btn-secondary" type="button">Compare with eBL</button>
         <button id="ebl-ms-adopt-btn" class="btn btn-secondary" type="button" hidden>Take eBL&#39;s numbering</button>
         <button id="ebl-ms-siglum-btn" class="btn btn-secondary" type="button" hidden>Give the clashing tablets a free number</button>
+        <button id="ebl-ms-renumber-btn" class="btn btn-secondary" type="button"
+          title="Number each provenance–period–type group on its own, so the tenth excerpt is Ex10, not Ex37">Renumber sigla per group</button>
         <button id="ebl-ms-send-btn" class="btn" type="button" disabled>Register manuscripts</button>
       </div>
       <div id="ebl-ms-report" class="ebl-hint" style="margin-top: 0.6rem;"></div>
@@ -949,6 +951,18 @@
     function updateManuscriptField(idx, field, value) {
       if (!manuscriptsMeta.manuscripts[idx]) return;
       manuscriptsMeta.manuscripts[idx][field] = value;
+      // The group changed, so the tablet is numbered within its new group —
+      // the disambiguator counts NinNAEx tablets, not all tablets, which is
+      // how the tenth excerpt stays Ex10. A hand-written non-numeric
+      // disambiguator is a choice and is left alone.
+      if (['provenance', 'period', 'periodModifier', 'type'].includes(field)) {
+        const m = manuscriptsMeta.manuscripts[idx];
+        const d = String(m.siglumDisambiguator || '').trim();
+        if (!d || /^\d+$/.test(d)) {
+          m.siglumDisambiguator = EblClient.nextFreeDisambiguator(manuscriptsMeta, m);
+          renderMappingTable();
+        }
+      }
       debouncedSaveMappings();
       // Re-render only if a field that affects validation or preview changed
       if (['provenance', 'period', 'type', 'siglumDisambiguator', 'museumNumber'].includes(field)) {
@@ -1036,6 +1050,7 @@
       document.getElementById('ebl-ms-send-btn').addEventListener('click', registerManuscriptsWithEbl);
       document.getElementById('ebl-ms-adopt-btn').addEventListener('click', adoptEblNumbering);
       document.getElementById('ebl-ms-siglum-btn').addEventListener('click', resolveSiglumClashes);
+      document.getElementById('ebl-ms-renumber-btn').addEventListener('click', renumberSiglaPerGroup);
       document.getElementById('ebl-sync-meta-btn').addEventListener('click', syncMetadataFromEbl);
 
       renderEblStatus();
@@ -1085,6 +1100,7 @@
     let msProblems = [];
     let msKept = [];
     let msClashes = [];
+    let msRenamed = [];
 
     function eblTargetFromForm() {
       return {
@@ -1126,6 +1142,16 @@
       if (plan.dropped.length) {
         out.push(line('<b>' + plan.dropped.length + '</b> on eBL but not in this project: '
           + names(plan.dropped) + '. Registering removes them.'));
+      }
+      // A rename is safe — lines point at a manuscript by id, and the id does
+      // not move — but it changes the name every eBL page shows, so it is
+      // spelled out, and it is enough on its own to make the send worth doing.
+      if (msRenamed.length) {
+        out.push(line('<b>' + msRenamed.length + '</b> to rename: '
+          + msRenamed.slice(0, 10).map((x) => x.museumNumber + ' (' + x.from + ' → ' + x.to + ')').join(', ')
+          + (msRenamed.length > 10 ? ', and ' + (msRenamed.length - 10) + ' more' : '')
+          + '. The id stays, so the chapter&#39;s lines, alignment and lemmas are untouched —'
+          + ' only the siglum eBL shows changes.'));
       }
       if (plan.moved.length) {
         out.push(line('<b style="color:#a33">' + plan.moved.length + ' would change id</b> — '
@@ -1175,12 +1201,13 @@
           + Object.keys(tally).map((f) => '<b>' + tally[f] + '</b> ' + f).join(', ')
           + '. eBL holds these and this project does not, so they are sent back as they are.'));
       }
-      if (!plan.added.length && !plan.dropped.length && !plan.moved.length && !bad.length) {
+      if (!plan.added.length && !plan.dropped.length && !plan.moved.length
+          && !msRenamed.length && !bad.length) {
         out.push(line('Nothing to change.'));
       }
       el.innerHTML = out.join('');
       send.disabled = !!plan.moved.length || !!bad.length || !!msClashes.length
-        || (!plan.added.length && !plan.dropped.length);
+        || (!plan.added.length && !plan.dropped.length && !msRenamed.length);
     }
 
     async function checkManuscriptsAgainstEbl() {
@@ -1189,6 +1216,7 @@
       el.textContent = 'Reading the chapter...';
       btn.disabled = true;
       msPlan = null;
+      msRenamed = [];
       document.getElementById('ebl-ms-send-btn').disabled = true;
       try {
         const target = eblTargetFromForm();
@@ -1198,6 +1226,7 @@
         msProblems = EblClient.validateManuscripts(manuscriptsMeta);
         msKept = EblClient.wouldErase(sending, chapter.manuscripts || []);
         msClashes = EblClient.duplicateSigla(manuscriptsMeta);
+        msRenamed = EblClient.renamedSigla(chapter.manuscripts || [], sending);
         renderManuscriptPlan(msPlan, msProblems);
       } catch (err) {
         el.textContent = 'Could not read the chapter: ' + (err && err.message || err);
@@ -1217,7 +1246,11 @@
         ? String.fromCharCode(10) + 'This also removes from eBL: '
           + msPlan.dropped.map((x) => x.museumNumber).join(', ')
         : '';
-      if (!confirm('Register ' + msPlan.added.length + ' manuscript(s) with eBL?' + dropping)) return;
+      const doing = [];
+      if (msPlan.added.length) doing.push('register ' + msPlan.added.length + ' manuscript(s)');
+      if (msRenamed.length) doing.push('rename ' + msRenamed.length + ' siglum/sigla');
+      if (!doing.length) doing.push('send the manuscript list');
+      if (!confirm(doing.join(' and ').replace(/^./, (c) => c.toUpperCase()) + ' on eBL?' + dropping)) return;
       btn.disabled = true;
       el.textContent = 'Registering...';
       try {
@@ -1255,6 +1288,33 @@
         await checkManuscriptsAgainstEbl();
       } catch (err) {
         el.textContent = 'Could not take the numbering: ' + (err && err.message || err);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Number each provenance–period–type group on its own, in id order. This
+    // is the repair for sigla numbered by the global manuscript id, where the
+    // tenth excerpt came out as Ex37 because thirty-six tablets of any kind
+    // preceded it.
+    async function renumberSiglaPerGroup() {
+      const el = document.getElementById('ebl-ms-report');
+      const btn = document.getElementById('ebl-ms-renumber-btn');
+      if (!confirm('Renumber the sigla so each provenance-period-type group counts its'
+        + ' own tablets 1, 2, 3... in registration order? Hand-written (non-numeric)'
+        + ' disambiguators are kept as they are.'
+        + String.fromCharCode(10)
+        + 'If the chapter is already on eBL, register the manuscripts again afterwards'
+        + ' so eBL shows the new names — the ids do not move, so nothing else changes.')) return;
+      btn.disabled = true;
+      try {
+        manuscriptsMeta = EblClient.renumberSiglaPerGroup(manuscriptsMeta);
+        await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+        await syncSiglaToProjectConfig();
+        renderMappingTable();
+        showStatus('Sigla renumbered per group. Compare and register to rename them on eBL.', 'success');
+      } catch (err) {
+        el.textContent = 'Could not renumber: ' + (err && err.message || err);
       } finally {
         btn.disabled = false;
       }

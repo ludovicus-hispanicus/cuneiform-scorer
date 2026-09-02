@@ -68,6 +68,18 @@ function resolveValidator() {
 }
 const VALIDATOR = resolveValidator();
 
+// How the validator's work is budgeted and shared out.
+//
+// A row costs the Earley parser about a quarter of a second, so these are
+// measured from that: enough workers to keep a chapter-sized range inside a
+// coffee-length wait, but never so many for a single omen that starting them
+// costs more than the parsing.
+const VALIDATE_MS_PER_ROW = 1500;                 // generous: measured ~250ms
+const VALIDATE_MAX_MS = 15 * 60 * 1000;
+const VALIDATE_MIN_ROWS_PER_WORKER = 24;
+const VALIDATE_MAX_WORKERS = Math.max(1,
+  Math.min(8, (require('os').cpus() || { length: 4 }).length - 1));
+
 const PORT = process.env.PORT || 3000;
 const PROJECTS_DIR = path.join(__dirname, 'projects');
 const MANUSCRIPTS_DIR = path.join(__dirname, 'manuscripts'); // Legacy support
@@ -131,11 +143,23 @@ const server = http.createServer((req, res) => {
   // ===========================================
   // eBL ATF VALIDATOR — spawns Python or the bundled PyInstaller binary
   // ===========================================
+  //
+  // eBL's grammar is parsed with Earley, which costs roughly a quarter of a
+  // second for every line, whatever the line says. That is fine for one omen
+  // and ruinous for a range: a whole chapter is some 700 rows, near three
+  // minutes of honest work, and it used to be killed at a flat thirty seconds
+  // — so any range past about a dozen sections came back as a 500, which the
+  // editor read as "no problems" and sent unchecked.
+  //
+  // Every line is judged on its own, with no state carried between them, so
+  // the work shards cleanly: the rows are dealt out to several validators at
+  // once and the answers stitched back together, with each shard's line
+  // numbers shifted to where they belong in the whole.
   if (req.method === 'POST' && req.url === '/api/validate-atf') {
     let body = '';
     req.setEncoding('utf8');
     req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
       let payload;
       try {
         payload = JSON.parse(body);
@@ -157,65 +181,116 @@ const server = http.createServer((req, res) => {
         }));
         return;
       }
-      const cmd = VALIDATOR.cmd;
-      const args = VALIDATOR.args;
 
-      let child;
-      try {
-        child = spawn(cmd, args, {
-          // PyInstaller binaries set PYTHONIOENCODING themselves, but be explicit
-          // for the dev python path.
-          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-        });
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Failed to spawn validator',
-          detail: err.message,
-          hint: 'Install Python + `pip install lark`, or set VALIDATE_ATF_BIN to the bundled binary.',
-        }));
-        return;
-      }
-
-      let stdout = '';
-      let stderr = '';
-      child.stdout.setEncoding('utf8');
-      child.stderr.setEncoding('utf8');
-      child.stdout.on('data', (d) => { stdout += d; });
-      child.stderr.on('data', (d) => { stderr += d; });
-
-      const timeout = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch (_) {}
-      }, 30000);
-
-      child.on('error', (err) => {
-        clearTimeout(timeout);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Validator process error',
-          detail: err.message,
-        }));
-      });
-
-      child.on('close', (code) => {
-        clearTimeout(timeout);
-        if (code !== 0 && !stdout) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            error: 'Validator exited with code ' + code,
-            stderr: stderr.slice(0, 2000),
-          }));
+      // One validator over one slice of the rows. Resolves with the parsed
+      // JSON, or rejects with a reason worth showing the editor.
+      const runShard = (text, rows) => new Promise((resolve, reject) => {
+        let child;
+        try {
+          child = spawn(VALIDATOR.cmd, VALIDATOR.args, {
+            // PyInstaller binaries set PYTHONIOENCODING themselves, but be
+            // explicit for the dev python path.
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+          });
+        } catch (err) {
+          reject(new Error('Failed to spawn validator: ' + err.message));
           return;
         }
-        // Pass through the JSON the validator wrote.
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(stdout);
+
+        let stdout = '';
+        let stderr = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (d) => { stdout += d; });
+        child.stderr.on('data', (d) => { stderr += d; });
+
+        // Budgeted by the work in hand rather than by a flat number: start-up
+        // plus a generous allowance per row, so a long parse is waited for and
+        // a hung one is still cut off.
+        let killed = false;
+        const budget = Math.min(VALIDATE_MAX_MS, 30000 + rows * VALIDATE_MS_PER_ROW);
+        const timer = setTimeout(() => {
+          killed = true;
+          try { child.kill('SIGKILL'); } catch (_) {}
+        }, budget);
+
+        child.on('error', (err) => {
+          clearTimeout(timer);
+          reject(new Error('Validator process error: ' + err.message));
+        });
+
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          if (killed) {
+            reject(new Error('The validator ran longer than '
+              + Math.round(budget / 1000) + 's on ' + rows + ' row(s) and was stopped.'));
+            return;
+          }
+          if (code !== 0 && !stdout) {
+            reject(new Error('Validator exited with code ' + code
+              + (stderr ? ': ' + stderr.slice(0, 500) : '')));
+            return;
+          }
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (err) {
+            reject(new Error('Validator wrote something that is not JSON: '
+              + stdout.slice(0, 300)));
+          }
+        });
+
+        child.stdin.setDefaultEncoding('utf8');
+        child.stdin.write(text);
+        child.stdin.end();
       });
 
-      // Pipe ATF into validator stdin
-      child.stdin.setDefaultEncoding('utf8');
-      child.stdin.write(atf);
-      child.stdin.end();
+      // Deal the rows out. Small inputs stay in one process: starting a
+      // validator costs about half a second, so sharding an omen would be
+      // slower than parsing it.
+      const lines = atf.split('\n');
+      const workers = Math.max(1, Math.min(
+        VALIDATE_MAX_WORKERS,
+        Math.floor(lines.length / VALIDATE_MIN_ROWS_PER_WORKER) || 1
+      ));
+      const per = Math.ceil(lines.length / workers);
+      const shards = [];
+      for (let at = 0; at < lines.length; at += per) {
+        shards.push({ offset: at, rows: lines.slice(at, at + per) });
+      }
+
+      try {
+        const parts = await Promise.all(
+          shards.map((s) => runShard(s.rows.join('\n'), s.rows.length)));
+        // Stitched back in order, so the errors still read in the order the
+        // rows do, and every line number addresses the ATF that was sent.
+        const merged = {
+          valid: true, errors: [], warnings: [], parsed_lines: 0,
+          validation_source: parts[0] ? parts[0].validation_source : 'local_lark',
+          available: true, init_error: null,
+        };
+        parts.forEach((part, i) => {
+          const offset = shards[i].offset;
+          for (const e of (part.errors || [])) {
+            merged.errors.push({ ...e, line: e.line == null ? null : e.line + offset });
+          }
+          for (const w of (part.warnings || [])) merged.warnings.push(w);
+          merged.parsed_lines += part.parsed_lines || 0;
+          if (part.available === false) merged.available = false;
+          if (part.init_error && !merged.init_error) merged.init_error = part.init_error;
+        });
+        merged.valid = merged.errors.length === 0;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(merged));
+      } catch (err) {
+        // A check that could not be run is not a clean bill of health, and the
+        // editor is told which it got.
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          valid: false, errors: [], warnings: [], parsed_lines: 0,
+          validation_source: VALIDATOR.kind, available: false,
+          init_error: err.message || String(err),
+        }));
+      }
     });
     return;
   }

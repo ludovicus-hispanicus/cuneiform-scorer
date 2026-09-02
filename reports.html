@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Export reports</title>
+  <link rel="icon" href="favicon.svg">
+  <style>
+    /* A page of its own, meant to stand open beside the scorer. It borrows the
+       scorer's palette by hand rather than by stylesheet — styles.css lays out
+       the whole scorer and would fight this page's simpler frame. */
+    :root {
+      --bg: #faf7f2;
+      --panel: #ffffff;
+      --text: #2e2a24;
+      --muted: #8a8178;
+      --border: #ddd;
+      --hover: rgba(122, 92, 62, 0.12);
+      --sent-accent: #2f7d4f;
+      --sent-light: #e6f4ec;
+      --changed-accent: #9a6b12;
+      --changed-light: #fbf1dc;
+      --issue-accent: #b3402f;
+      --issue-light: #f9e4e0;
+      --notice-accent: #2a6f8f;
+      --notice-light: #e2eff5;
+    }
+    body.dark-mode {
+      --bg: #1e1c19;
+      --panel: #262421;
+      --text: #e8e2d9;
+      --muted: #9a9187;
+      --border: #444;
+      --hover: rgba(200, 170, 140, 0.12);
+      --sent-accent: #7fc79b;
+      --sent-light: #24352b;
+      --changed-accent: #e0b055;
+      --changed-light: #3a3222;
+      --issue-accent: #e0806f;
+      --issue-light: #3b2723;
+      --notice-accent: #7fb8d4;
+      --notice-light: #22313a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      flex-wrap: wrap;
+      padding: 0.6rem 1rem;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { font-size: 1rem; margin: 0; }
+    header .project { color: var(--muted); font-weight: normal; }
+    header .spacer { flex: 1; }
+    select, button, input, textarea {
+      font: inherit;
+      color: inherit;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.25rem 0.5rem;
+    }
+    button { cursor: pointer; }
+    button:hover { background: var(--hover); }
+    main { max-width: 62rem; margin: 0 auto; padding: 0.8rem 1rem 3rem; }
+    .status-note {
+      color: var(--muted);
+      font-size: 0.85rem;
+      padding: 0.3rem 0;
+    }
+    .connect-box {
+      margin: 3rem auto;
+      max-width: 26rem;
+      text-align: center;
+      padding: 1.5rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .connect-box p { color: var(--muted); }
+    .sec-filter {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0.4rem 0;
+      padding: 0.25rem 0.6rem;
+      background: var(--notice-light);
+      color: var(--notice-accent);
+      border-radius: 999px;
+      font-size: 0.85rem;
+    }
+    .day-heading {
+      margin: 1.1rem 0 0.4rem;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+
+    /* One report: a folded line that opens into the whole story. */
+    details.report {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 6px;
+      margin: 0.35rem 0;
+    }
+    details.report.k-error   { border-left-color: var(--issue-accent); }
+    details.report.k-warning { border-left-color: var(--changed-accent); }
+    details.report.k-notice  { border-left-color: var(--notice-accent); }
+    details.report.k-ok      { border-left-color: var(--sent-accent); }
+    details.report.is-done { opacity: 0.75; }
+    details.report > summary {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.45rem 0.7rem;
+      cursor: pointer;
+      list-style: none;
+      flex-wrap: wrap;
+    }
+    details.report > summary::-webkit-details-marker { display: none; }
+    details.report > summary::before {
+      content: '▸';
+      color: var(--muted);
+      font-size: 0.8rem;
+      transition: transform 0.12s;
+    }
+    details.report[open] > summary::before { transform: rotate(90deg); }
+    .chip {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .chip.k-error   { background: var(--issue-light);   color: var(--issue-accent); }
+    .chip.k-warning { background: var(--changed-light); color: var(--changed-accent); }
+    .chip.k-notice  { background: var(--notice-light);  color: var(--notice-accent); }
+    .chip.k-ok      { background: var(--sent-light);    color: var(--sent-accent); }
+    .r-date { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+    .r-sec {
+      font-size: 0.8rem;
+      padding: 0.05rem 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      white-space: nowrap;
+    }
+    .r-title { flex: 1; min-width: 12rem; }
+    .r-state { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+    .r-state.is-open-err  { color: var(--issue-accent); }
+    .r-state.is-open-warn { color: var(--changed-accent); }
+    .r-body { padding: 0.2rem 0.9rem 0.7rem 1.5rem; }
+    .r-notes { margin: 0.4rem 0; }
+    .r-notes h4 { margin: 0 0 0.25rem; font-size: 0.8rem; }
+    .r-notes ul { margin: 0; padding-left: 1.2rem; }
+    .r-notes li { font-size: 0.85rem; padding: 0.08rem 0; }
+    .r-help {
+      font-size: 0.83rem;
+      font-style: italic;
+      opacity: 0.9;
+      margin: 0.4rem 0;
+      padding-left: 0.5rem;
+      border-left: 2px solid var(--changed-accent);
+    }
+    .r-help.is-done {
+      font-style: normal;
+      border-left-color: var(--sent-accent);
+      color: var(--sent-accent);
+    }
+    details.sub {
+      margin: 0.4rem 0;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    details.sub > summary {
+      padding: 0.25rem 0.6rem;
+      cursor: pointer;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    details.sub > .sub-body { padding: 0.4rem 0.6rem; }
+    pre.raw {
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 14rem;
+      overflow: auto;
+      margin: 0;
+      padding: 0.45rem;
+      background: var(--hover);
+      border-radius: 4px;
+    }
+    .r-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      flex-wrap: wrap;
+      margin-top: 0.5rem;
+      font-size: 0.83rem;
+    }
+    .r-check { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+    .r-delete { font-size: 0.78rem; color: var(--issue-accent); border-color: transparent; background: transparent; }
+    .empty { color: var(--muted); text-align: center; padding: 2.5rem 0; }
+
+    /* The full report was written for the scorer's overlay; enough of its
+       classes are dressed here for it to read the same way. */
+    .full-report { font-size: 0.86rem; }
+    .full-report .report-outcome {
+      display: flex; flex-direction: column; gap: 0.15rem;
+      padding: 0.5rem 0.7rem; border-radius: 5px; margin: 0.3rem 0;
+      background: var(--sent-light);
+    }
+    .full-report .report-outcome.is-kept { background: var(--changed-light); }
+    .full-report .report-heading { margin: 0.7rem 0 0.25rem; font-size: 0.85rem; }
+    .full-report .report-counts { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.3rem 0; }
+    .full-report .report-count {
+      padding: 0.15rem 0.5rem; border: 1px solid var(--border); border-radius: 999px;
+      font-size: 0.78rem;
+    }
+    .full-report .report-count.is-done { border-color: var(--sent-accent); color: var(--sent-accent); }
+    .full-report .report-note { margin: 0.35rem 0; }
+    .full-report .report-note.is-bad  { color: var(--issue-accent); }
+    .full-report .report-note.is-warn { color: var(--changed-accent); }
+    .full-report .report-note.is-good { color: var(--sent-accent); }
+    .full-report .report-raw, .full-report pre {
+      font-size: 0.74rem; white-space: pre-wrap; word-break: break-word;
+      max-height: 16rem; overflow: auto; padding: 0.45rem;
+      background: var(--hover); border-radius: 4px;
+    }
+    .full-report a { color: var(--notice-accent); }
+    .full-report fieldset { border: 1px solid var(--border); border-radius: 5px; }
+    .full-report input[type="checkbox"] { pointer-events: none; }
+
+    /* The hand-written report form. */
+    #report-form {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.7rem;
+      margin: 0.5rem 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+    #report-form .row { display: flex; gap: 0.45rem; }
+    #report-form input[type="text"] { flex: 1; }
+    #report-form textarea { resize: vertical; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Export reports <span class="project" id="project-name"></span></h1>
+    <span class="status-note" id="sync-note"></span>
+    <span class="spacer"></span>
+    <select id="filter" title="Which reports to show">
+      <option value="all">All</option>
+      <option value="open">Open</option>
+      <option value="done">Done</option>
+    </select>
+    <button id="add-btn" title="Write a report by hand">+ Add</button>
+  </header>
+
+  <main>
+    <div id="connect" class="connect-box hidden">
+      <p>This page shows the export reports of the project — every send to eBL,
+        and what each one left to check or repair by hand.</p>
+      <button id="connect-btn">Open the project's reports</button>
+    </div>
+
+    <div id="report-form" class="hidden">
+      <div class="row">
+        <select id="form-kind">
+          <option value="error">Error — nothing went through</option>
+          <option value="warning">Warning — parts went through</option>
+          <option value="notice">To check on eBL</option>
+        </select>
+        <input type="text" id="form-sec" placeholder="§ (optional)" size="6"
+               title="Chapter line the report is about, e.g. 4">
+      </div>
+      <input type="text" id="form-title" placeholder="What to remember or repair...">
+      <textarea id="form-desc" rows="2" placeholder="Detail (optional)..."></textarea>
+      <div class="row">
+        <button id="form-save">Save</button>
+        <button id="form-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div id="sec-bar"></div>
+    <div id="list"><div class="empty">Loading…</div></div>
+  </main>
+
+  <script src="file-system.js"></script>
+  <script>
+    // Same project resolution as manage.html: the ?project= parameter wins,
+    // then sessionStorage — the parameter matters because this page opens in
+    // its own window and session storage is per-tab.
+    const projectId =
+      new URLSearchParams(location.search).get('project') ||
+      sessionStorage.getItem('currentProjectId');
+    let secFilter = (() => {
+      const s = new URLSearchParams(location.search).get('sec');
+      const n = s == null ? NaN : parseInt(s, 10);
+      return Number.isFinite(n) ? n : null;
+    })();
+
+    if (localStorage.getItem('dark_mode') === 'true') document.body.classList.add('dark-mode');
+
+    let dirHandle = null;
+    let issues = [];
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    const KIND_WORD = { error: 'Error', warning: 'Warning', notice: 'Check', ok: 'OK' };
+    const KIND_HELP = {
+      error: 'Nothing of this send reached eBL. Repair the cause and send again, or do it'
+        + ' on eBL by hand — then tick the box.',
+      warning: 'The line is on eBL, but a part behind it is not. Fix the cause and send'
+        + ' that part again, or set it right in eBL’s own editor — then tick the box.',
+      notice: 'Everything was accepted, but the points listed above are worth a look on'
+        + ' eBL — a repeated quotation goes unaligned, a witness under another reading'
+        + ' keeps its old pairing. When they have been checked, tick the box.',
+      ok: '',
+    };
+
+    // ---- Load -------------------------------------------------------------
+
+    async function connect(interactive) {
+      const projects = await FileSystem.getSavedProjects();
+      const project = projects.find((p) => p.id === projectId);
+      if (!project) return { fail: 'Project not found. Open it from the scorer once.' };
+      // Silently when possible; the button supplies the user gesture otherwise.
+      if (interactive) {
+        if (!await FileSystem.requestPermission(project.handle)) {
+          return { fail: 'Permission was not granted.' };
+        }
+      } else if ((await project.handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+        return { ask: true };
+      }
+      dirHandle = project.handle;
+      try {
+        const cfg = await FileSystem.readProjectConfig(dirHandle);
+        if (cfg && cfg.name) {
+          document.getElementById('project-name').textContent = '— ' + cfg.name;
+          document.title = 'Export reports — ' + cfg.name;
+        }
+      } catch (_) { /* the name is a nicety */ }
+      return { ok: true };
+    }
+
+    async function load() {
+      const data = await FileSystem.readScoreData(dirHandle);
+      issues = (data && Array.isArray(data.issues)) ? data.issues : [];
+      render();
+    }
+
+    // Every change is read-modify-write against the file, so a tick here never
+    // clobbers what the scorer wrote a moment ago — and the scorer is told.
+    async function mutate(fn) {
+      const data = await FileSystem.readScoreData(dirHandle);
+      if (!data) return;   // no score data means no reports to change
+      data.issues = Array.isArray(data.issues) ? data.issues : [];
+      fn(data.issues);
+      await FileSystem.writeScoreData(dirHandle, data);
+      issues = data.issues;
+      if (channel) channel.postMessage({ type: 'score-data-saved', projectId });
+      render();
+    }
+
+    // ---- Render -----------------------------------------------------------
+
+    function dayOf(iso) {
+      const d = new Date(iso);
+      return isNaN(d) ? 'Undated' : d.toLocaleDateString(undefined,
+        { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    }
+
+    function render() {
+      const listEl = document.getElementById('list');
+      const filter = document.getElementById('filter').value;
+
+      // Folding is the reader's, not the renderer's: what was open stays open.
+      const wasOpen = new Set(Array.from(
+        listEl.querySelectorAll('details.report[open]')).map((d) => d.dataset.id));
+
+      const bar = document.getElementById('sec-bar');
+      bar.innerHTML = secFilter == null ? '' :
+        `<span class="sec-filter">Reports on § ${escapeHtml(String(secFilter))}
+           <button id="clear-sec">show all</button></span>`;
+      const clearBtn = document.getElementById('clear-sec');
+      if (clearBtn) clearBtn.addEventListener('click', () => { secFilter = null; render(); });
+
+      let list = issues.slice();
+      if (filter === 'open') list = list.filter((r) => !r.done);
+      else if (filter === 'done') list = list.filter((r) => r.done);
+      if (secFilter != null) {
+        list = list.filter((r) => r.sec != null && parseInt(r.sec, 10) === secFilter);
+      }
+      list.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+
+      if (!list.length) {
+        listEl.innerHTML = '<div class="empty">No reports here. Every send to eBL files'
+          + ' one — clean sends included — so this page is the log.</div>';
+        return;
+      }
+
+      let html = '';
+      let day = null;
+      for (const r of list) {
+        const d = dayOf(r.at);
+        if (d !== day) { day = d; html += `<div class="day-heading">${escapeHtml(d)}</div>`; }
+        html += renderOne(r, wasOpen.has(r.id));
+      }
+      listEl.innerHTML = html;
+      bindHandlers();
+    }
+
+    function renderOne(r, open) {
+      const kind = KIND_WORD[r.kind] ? r.kind : 'warning';
+      const time = r.at ? new Date(r.at).toLocaleTimeString(undefined,
+        { hour: '2-digit', minute: '2-digit' }) : '';
+      const notes = Array.isArray(r.notes) ? r.notes : [];
+      const state = r.done
+        ? `done${r.how ? ' — ' + escapeHtml(r.how) : ''}`
+        : 'open';
+      const stateClass = r.done ? '' : (kind === 'error' ? ' is-open-err' : ' is-open-warn');
+      return `
+      <details class="report k-${kind} ${r.done ? 'is-done' : ''}" data-id="${escapeHtml(r.id)}"${open ? ' open' : ''}>
+        <summary>
+          <span class="chip k-${kind}">${KIND_WORD[kind]}</span>
+          <span class="r-date">${escapeHtml(time)}</span>
+          ${r.sec != null ? `<span class="r-sec">§ ${escapeHtml(String(r.sec))}</span>`
+            : '<span class="r-sec">chapter</span>'}
+          <span class="r-title">${escapeHtml(r.title || '(untitled)')}</span>
+          <span class="r-state${stateClass}">${state}</span>
+        </summary>
+        <div class="r-body">
+          ${notes.length ? `<div class="r-notes"><h4>To check on eBL later</h4>
+            <ul>${notes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul></div>` : ''}
+          ${r.done
+            ? `<div class="r-help is-done">Done${r.doneAt ? ' ' + new Date(r.doneAt).toLocaleString() : ''}${r.how ? ' — ' + escapeHtml(r.how) : ''}</div>`
+            : (KIND_HELP[kind] ? `<div class="r-help">${escapeHtml(KIND_HELP[kind])}</div>` : '')}
+          ${r.detail ? `<details class="sub"><summary>What eBL said</summary>
+            <div class="sub-body"><pre class="raw">${escapeHtml(r.detail)}</pre></div></details>` : ''}
+          ${r.report ? `<details class="sub"><summary>Full report, as it was shown</summary>
+            <div class="sub-body full-report">${r.report}</div></details>` : ''}
+          <div class="r-actions">
+            <label class="r-check" title="Tick when this has been checked or repaired on eBL by hand — the sign on the section in the scorer clears with it">
+              <input type="checkbox" class="done-box" data-id="${escapeHtml(r.id)}"${r.done ? ' checked' : ''}>
+              checked / fixed on eBL by hand
+            </label>
+            <button class="r-delete" data-id="${escapeHtml(r.id)}">Delete</button>
+          </div>
+        </div>
+      </details>`;
+    }
+
+    function bindHandlers() {
+      document.querySelectorAll('.done-box').forEach((box) => {
+        box.addEventListener('change', () => mutate((all) => {
+          const rec = all.find((r) => r.id === box.dataset.id);
+          if (!rec) return;
+          rec.done = box.checked;
+          rec.doneAt = box.checked ? new Date().toISOString() : null;
+          rec.how = box.checked ? 'checked by hand' : null;
+        }));
+      });
+      document.querySelectorAll('.r-delete').forEach((btn) => {
+        btn.addEventListener('click', () => mutate((all) => {
+          const i = all.findIndex((r) => r.id === btn.dataset.id);
+          if (i >= 0) all.splice(i, 1);
+        }));
+      });
+    }
+
+    // ---- Manual reports ----------------------------------------------------
+
+    document.getElementById('add-btn').addEventListener('click', () => {
+      document.getElementById('report-form').classList.toggle('hidden');
+      document.getElementById('form-title').focus();
+    });
+    document.getElementById('form-cancel').addEventListener('click', () => {
+      document.getElementById('report-form').classList.add('hidden');
+    });
+    document.getElementById('form-save').addEventListener('click', async () => {
+      const title = document.getElementById('form-title').value.trim();
+      if (!title) { document.getElementById('form-title').focus(); return; }
+      const secRaw = document.getElementById('form-sec').value.trim().replace(/^§/, '');
+      const sec = secRaw === '' ? NaN : parseInt(secRaw, 10);
+      await mutate((all) => {
+        all.unshift({
+          id: Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+          sec: Number.isFinite(sec) ? sec : null,
+          kind: document.getElementById('form-kind').value,
+          part: 'other',
+          title,
+          notes: [],
+          detail: document.getElementById('form-desc').value.trim(),
+          report: '',
+          at: new Date().toISOString(),
+          done: false, doneAt: null, how: null,
+        });
+      });
+      document.getElementById('report-form').classList.add('hidden');
+      ['form-title', 'form-sec', 'form-desc'].forEach((id) => {
+        document.getElementById(id).value = '';
+      });
+    });
+
+    document.getElementById('filter').addEventListener('change', render);
+
+    // ---- Live sync ---------------------------------------------------------
+    // The scorer broadcasts after every save, and listens too — a tick here
+    // reaches its section signs the same way.
+    let channel = null;
+    try {
+      channel = new BroadcastChannel('manuscript-scorer-sync');
+      channel.onmessage = (e) => {
+        const msg = e.data || {};
+        if (msg.type === 'score-data-saved' && msg.projectId === projectId && dirHandle) {
+          load();
+          const note = document.getElementById('sync-note');
+          note.textContent = 'updated ' + new Date().toLocaleTimeString();
+        }
+      };
+    } catch (_) { /* no channel, no live sync */ }
+
+    // ---- Boot --------------------------------------------------------------
+
+    (async () => {
+      if (!projectId) {
+        document.getElementById('list').innerHTML =
+          '<div class="empty">No project. Open this page from the scorer’s Reports button.</div>';
+        return;
+      }
+      sessionStorage.setItem('currentProjectId', projectId);
+      const r = await connect(false);
+      if (r.ok) { await load(); return; }
+      document.getElementById('list').innerHTML = '';
+      const box = document.getElementById('connect');
+      if (r.fail) {
+        box.classList.remove('hidden');
+        box.querySelector('p').textContent = r.fail;
+        box.querySelector('button').classList.add('hidden');
+        return;
+      }
+      // Permission needs a click to ask for.
+      box.classList.remove('hidden');
+      document.getElementById('connect-btn').addEventListener('click', async () => {
+        const r2 = await connect(true);
+        if (r2.ok) { box.classList.add('hidden'); await load(); }
+        else if (r2.fail) box.querySelector('p').textContent = r2.fail;
+      });
+    })();
+  </script>
+</body>
+</html>

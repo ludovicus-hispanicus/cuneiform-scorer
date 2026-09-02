@@ -39,6 +39,14 @@
   const WITNESS_SIGLUM_MIN_WIDTH = 8;
   const WITNESS_LINENUM_MIN_WIDTH = 3;
 
+  // A witness row, "SIGLUM  N.  content", as buildChapterAtf lays it out for
+  // reading. The line number is whatever the tablet calls it — digits with
+  // letters, primes, "+" and "-" around them: "18'", "3a", "6a'", "6'a",
+  // "a+1", "7b-8a" are all labels this corpus actually uses. It only has to
+  // hold a digit; eBL judges the rest on the way in.
+  const LINE_NO = "[0-9A-Za-z'′’+-]*\\d[0-9A-Za-z'′’+-]*";
+  const WITNESS_ROW = new RegExp(`^(\\S+)\\s+(${LINE_NO})\\.\\s+(.*)$`);
+
   // The app authors one translation per line and eBL's default language is
   // "en", so a plain string becomes an English translation line.
   const TRANSLATION_PREFIX = '#tr.en: ';
@@ -54,11 +62,18 @@
   // without even occupying a column.
   const ODD_SPACE = /[   -   　]/g;
   const INVISIBLE = /[​-‍⁠﻿]/g;
+  // Every value this cleans is a single ATF row — a reconstruction, a witness
+  // line, a translation — so a newline inside one is never meant. A
+  // contenteditable makes them easily: Enter, or a paste that brings the
+  // score's own line breaks with it. Only spaces and tabs were collapsed here,
+  // so a newline survived into the payload, and eBL split the reconstruction
+  // on it and refused the piece after the break as a row it could not parse —
+  // it was looking for the "//" that starts a parallel line.
   function normaliseAtfText(text) {
     return String(text == null ? '' : text)
       .replace(ODD_SPACE, ' ')
       .replace(INVISIBLE, '')
-      .replace(/[ 	]+/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim();
   }
 
@@ -299,13 +314,18 @@
   // ATF can be POSTed to eBL. Reconstruction lines (start with a digit + ".")
   // stay as-is; witness rows ("  SIG   N. content") get leading whitespace
   // stripped and inter-column whitespace collapsed to single spaces.
+  //
+  // A row is recognised by WITNESS_ROW, which reads any label a tablet
+  // carries. The pattern here knew only digits and a prime, so every lettered
+  // row — "3a.", "6a'.", "7b-8a." — went to eBL still padded out to the
+  // column widths it had been laid out with for reading.
   function stripFormatting(atfText) {
     return atfText.split('\n').map((row) => {
       if (!row.trim()) return '';
       const stripped = row.replace(/^\s+/, '');
       // Collapse internal multi-space padding between siglum and line number,
       // and between line number and content, on witness rows.
-      const witness = stripped.match(/^([^\s]+)\s+([0-9]+'?)\.\s+(.*)$/);
+      const witness = stripped.match(WITNESS_ROW);
       if (witness) return `${witness[1]} ${witness[2]}. ${witness[3]}`;
       return stripped;
     }).join('\n');

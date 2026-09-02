@@ -106,7 +106,52 @@ RECON_RE = re.compile(r"^\s*\d+'?\.\s")
 _SURFACE = r"(?:o|r|b\.e\.|e\.|l\.e\.|r\.e\.|t\.e\.)"
 _COLUMN = r"(?:i{1,3}|iv|vi{0,3}|v|ix|xi{0,2}|x)"
 _LABEL = r"(?:%s|%s)" % (_SURFACE, _COLUMN)
-_LINE_NO = r"(?:\d+[A-Za-z]?'?)"
+# The line number is recognised, not judged. Anything made of digits, letters,
+# primes, "+" and "-" that holds at least one digit counts, so every label a
+# tablet actually carries is matched: "18'", "3a", "6a'", "6'a", "a+1",
+# "7b-8a". eBL is the authority on which of those it will accept, and it
+# checks them itself on the way in — this pattern only has to find where the
+# content starts.
+#
+# It used to spell out one shape, "\d+[A-Za-z]?'?", which quietly excluded
+# ranges and either order of prime and letter. A row that fails to match here
+# is not skipped: it goes to the fragment grammar whole, siglum and all, and
+# comes back as an unexpected character two columns in — inside the siglum,
+# nowhere near the real trouble, and with nothing to say about what was
+# actually wrong. That is what "§23, line 6, col 2, unexpected 'i'" was: the
+# 'i' of "NinNB2".
+_LINE_NO = r"(?:[0-9A-Za-z'′’+-]*\d[0-9A-Za-z'′’+-]*)"
+# The shape eBL will actually accept, from its own grammar
+# (ebl_atf_text_line.lark, shipped in ebl-grammar/):
+#
+#   single_line_number: [LETTER "+"] INT [ANY_PRIME] [LETTER]
+#   line_number:        single_line_number | single_line_number "-" single_line_number
+#
+# The prime comes BEFORE the letter. "6'a" is a line number; "6a'" is not, and
+# eBL refuses the whole manuscript line for it — saying only "Invalid
+# manuscript line" with the ATF quoted, which points at the content when the
+# content is fine. Recognising the row stays deliberately loose above, so the
+# ATF is always checked; the number is judged here, where a wrong one can be
+# named and corrected instead of costing a round trip to Munich.
+_EBL_SINGLE_NO = r"(?:[A-Za-z]\+)?\d+['′’]?[A-Za-z]?"
+EBL_LINE_NO_RE = re.compile(r"^%s(?:-%s)$|^%s$" % (_EBL_SINGLE_NO, _EBL_SINGLE_NO, _EBL_SINGLE_NO))
+_PRIME_AFTER_LETTER = re.compile(r"^((?:[A-Za-z]\+)?\d+)([A-Za-z])(['′’])$")
+
+
+def ebl_line_number_problem(number):
+    """None if eBL will take this line number, else a message naming the fix."""
+    if EBL_LINE_NO_RE.match(number):
+        return None
+    swapped = _PRIME_AFTER_LETTER.match(number)
+    if swapped:
+        fixed = swapped.group(1) + swapped.group(3) + swapped.group(2)
+        return ("eBL does not accept the line number %r: the prime comes before "
+                "the letter, so write %r." % (number, fixed))
+    return ("eBL does not accept the line number %r. It allows an optional "
+            "letter and +, then digits, then an optional prime, then an "
+            "optional letter — as in 18', 3a, 6'a, a+1, 7b-8a." % number)
+
+
 WITNESS_RE = re.compile(
     r"^\s*(\S+)((?:\s+" + _LABEL + r")*)\s+(" + _LINE_NO + r")\.\s+(.*)$"
 )
@@ -197,8 +242,23 @@ def validate(atf_text: str):
         col_offset = 0
         to_parse = stripped
         start = "translation_line" if TRANSLATION_RE.match(stripped) else "start"
-        witness_match = WITNESS_RE.match(raw)
+        # A control row is never a witness row, however much it may look like
+        # one: "#tr.en: 5. ..." has a siglum-shaped first word and a number
+        # after it, and rewriting it as a text line would check the wrong
+        # thing against the wrong start rule.
+        witness_match = None
+        if not stripped.startswith(("&", "#", "@", "$", "//")):
+            witness_match = WITNESS_RE.match(raw)
         if witness_match and not RECON_RE.match(raw):
+            # The number eBL will be asked to take, judged before the content:
+            # a bad one refuses the line whatever the content says.
+            bad_number = ebl_line_number_problem(witness_match.group(3))
+            if bad_number:
+                errors.append({
+                    "line": i,
+                    "column": witness_match.start(3) + 1,
+                    "message": bad_number,
+                })
             content = witness_match.group(4)
             # Recompose as a fragment-style text line for the Lark grammar.
             to_parse = f"1. {content}"

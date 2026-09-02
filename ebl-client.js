@@ -158,19 +158,64 @@
     return res.json();
   }
 
+  // How long to wait for eBL before calling it. Generous, because a
+  // whole-chapter write is minutes of honest work, but finite.
+  const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
   async function authedRequest(method, path, body) {
     const jwt = getToken();
     if (!jwt) throw new EblError('No eBL token configured', 0, '');
 
-    const res = await fetch(`${getApiUrl()}${path}`, {
-      method,
-      headers: {
-        'Authorization': `Bearer ${jwt}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: body == null ? undefined : JSON.stringify(body),
-    });
+    // A refusal and a request that never arrived are different facts, and only
+    // one of them is eBL's. fetch rejects for a dropped connection, a blocked
+    // preflight, a machine that is offline — none of which eBL ever saw, and
+    // none of which say anything about the ATF. Reported as a refusal, they
+    // sent editors hunting for a fault in the line instead of in the network.
+    //
+    // Worse, a write whose reply is lost is not a write that did not happen:
+    // eBL may have taken it. So this is marked `transport`, and what is not
+    // known about it is not asserted.
+    // Waiting is bounded. A whole-chapter alignment or lemmatization is a big
+    // write and legitimately slow, but fetch has no timeout of its own: a
+    // request eBL never answers hangs until the tab is closed, which is how an
+    // export came to sit on "sending the lemmas…" all night with no way to
+    // tell it apart from work still in progress.
+    let signal;
+    try {
+      if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+        signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      }
+    } catch (_) { signal = undefined; }
+
+    let res;
+    try {
+      res = await fetch(`${getApiUrl()}${path}`, {
+        method,
+        headers: {
+          'Authorization': `Bearer ${jwt}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: body == null ? undefined : JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      // Giving up waiting is not the same as never arriving, and the
+      // difference matters: a request that timed out was received, and eBL
+      // may well have acted on it.
+      const timedOut = err && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      const e = new EblError(
+        timedOut
+          ? 'eBL did not answer within ' + Math.round(REQUEST_TIMEOUT_MS / 60000)
+            + ' minutes. The request was sent; whether it was applied is not known from here.'
+          : 'The request never reached eBL: ' + (err && err.message ? err.message : String(err)),
+        0, '', null);
+      e.transport = true;
+      e.timedOut = !!timedOut;
+      e.method = method;
+      e.path = path;
+      throw e;
+    }
 
     const text = await res.text();
     let json = null;
@@ -194,6 +239,9 @@
       this.status = status;
       this.rawBody = rawBody;
       this.body = parsedBody;
+      // Set only when the request never completed, so a caller can tell a
+      // refusal (which has a status and a body) from silence.
+      this.transport = false;
     }
 
     // eBL returns 422 with { description, errors: [{ lineNumber, description }] }
@@ -357,7 +405,11 @@
     return {
       file: filename,
       id: id,
-      siglumDisambiguator: String(id),
+      // Left empty on purpose. The disambiguator numbers a tablet within its
+      // provenance–period–type group, and the group is not known yet — the id
+      // counts every manuscript, which made the tenth excerpt NinNAEx37.
+      // Settings fills it in the moment the group is chosen.
+      siglumDisambiguator: '',
       museumNumber: primary,
       accession: '',
       provenance: '',
@@ -415,7 +467,7 @@
       const id = idFor.get(file);
       if (!prev) return defaultManuscriptEntry(file, id);
 
-      const healed = { ...prev, file, id, siglumDisambiguator: prev.siglumDisambiguator || String(id) };
+      const healed = { ...prev, file, id, siglumDisambiguator: prev.siglumDisambiguator || '' };
       // Heal museumNumber: if it contains join notation, re-extract the primary.
       // If it's empty, derive from the filename.
       if (!healed.museumNumber) {
@@ -596,6 +648,82 @@
     return { version: 1, manuscripts: out };
   }
 
+  // The lowest number no other manuscript of this one's group is using — what
+  // a tablet should be called the moment its provenance, period and type are
+  // known. The group counts its own: the tenth excerpt is Ex10, however many
+  // library copies came before it.
+  function nextFreeDisambiguator(meta, target) {
+    const g = siglumGroupKey(target);
+    const used = new Set();
+    for (const m of (meta && meta.manuscripts) || []) {
+      if (m === target || siglumGroupKey(m) !== g) continue;
+      const d = String(m.siglumDisambiguator || '').trim();
+      if (d) used.add(d);
+    }
+    let n = 1;
+    while (used.has(String(n))) n++;
+    return String(n);
+  }
+
+  // Number every siglum group on its own, 1, 2, 3… in id order, so the
+  // sequence follows the order the tablets were registered in. The
+  // disambiguator only tells apart manuscripts that share provenance, period
+  // and type — numbering them all in one run is what made the tenth excerpt
+  // NinNAEx37. A non-numeric disambiguator was written by hand and is kept;
+  // the numbers are laid out around it.
+  function renumberSiglaPerGroup(meta) {
+    const rows = (meta && meta.manuscripts) || [];
+    const groups = new Map();
+    for (const m of rows) {
+      const g = siglumGroupKey(m);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(m);
+    }
+    const newDis = new Map();   // row -> disambiguator
+    for (const [, list] of groups) {
+      list.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+      const kept = new Set();
+      for (const m of list) {
+        const d = String(m.siglumDisambiguator || '').trim();
+        if (d && !/^\d+$/.test(d)) { newDis.set(m, d); kept.add(d); }
+      }
+      let n = 1;
+      for (const m of list) {
+        if (newDis.has(m)) continue;
+        while (kept.has(String(n))) n++;
+        newDis.set(m, String(n));
+        n++;
+      }
+    }
+    return {
+      version: 1,
+      manuscripts: rows.map((m) => Object.assign({}, m, { siglumDisambiguator: newDis.get(m) })),
+    };
+  }
+
+  // Manuscripts eBL already has under this museum number and id, but whose
+  // number in the siglum differs from what would be sent. A rename is safe:
+  // the chapter's lines point at the id, not the name — but it is a change
+  // worth showing, and a reason to register even when nothing is added.
+  function renamedSigla(held, sending) {
+    const theirs = new Map();
+    for (const m of (held || [])) {
+      const k = museumNumberOf(m);
+      if (k) theirs.set(k, m);
+    }
+    const out = [];
+    for (const m of (sending || [])) {
+      const was = theirs.get(museumNumberOf(m));
+      if (!was || was.id !== m.id) continue;
+      const a = String(was.siglumDisambiguator || '').trim();
+      const b = String(m.siglumDisambiguator || '').trim();
+      if (a !== b) {
+        out.push({ museumNumber: museumNumberOf(m), from: a || '—', to: b || '—' });
+      }
+    }
+    return out;
+  }
+
   // Keep what the chapter holds and this project does not.
   //
   // POST /manuscripts replaces the whole list, so every field goes as written —
@@ -738,6 +866,9 @@
     wouldErase,
     duplicateSigla,
     resolveSiglumClashes,
+    nextFreeDisambiguator,
+    renumberSiglaPerGroup,
+    renamedSigla,
     validateManuscripts,
 
     EblError,

@@ -69,6 +69,8 @@
       <button id="settings-btn" class="icon-btn" title="Project settings, eBL metadata and export"
         aria-label="Project settings">&#9881;</button>
       <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes</button>
+      <button id="reports-btn" title="Export reports — the log of every send, on a page of its own">Reports<span
+        id="reports-badge" class="reports-badge hidden"></span></button>
       <span class="export-menu-wrap">
         <button id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
         <span id="export-menu" class="export-menu hidden">
@@ -334,6 +336,7 @@
     </div>
   </div>
 
+
   <!-- PDF Page Picker Modal -->
   <div id="pdf-picker-modal" class="modal hidden">
     <div class="modal-content pdf-picker-modal">
@@ -447,6 +450,8 @@
         <div class="export-row">
           <span class="export-label">On eBL now</span>
           <span class="export-value" id="export-preflight">checking…</span>
+          <button type="button" id="ebl-lines-btn" class="ebl-lines-btn"
+            title="List the chapter's lines in the order eBL holds them. Reads only — nothing is sent.">list them</button>
         </div>
 
         <fieldset class="export-modes">
@@ -481,6 +486,16 @@
             <span class="export-mode-name">Update a range of lines</span>
             <span class="export-mode-hint">Replace every &sect; from one to another, in a single request. Lines outside the range keep their lemmatization and alignment.</span>
           </label>
+          <label class="export-mode">
+            <input type="radio" name="export-mode" value="trim">
+            <span class="export-mode-name">Remove lines from the end</span>
+            <span class="export-mode-hint">Delete a run of lines from a chosen position down to the last one. Only ever a tail, never a gap in the middle &mdash; so the positions left behind cannot shift under you. Use it to cut off strays that were appended out of order, then send those sections again.</span>
+          </label>
+          <div class="export-line-picker hidden" id="export-trim-picker">
+            <label for="export-trim-from">From position</label>
+            <input type="number" id="export-trim-from" min="1" step="1" placeholder="44">
+            <span class="export-trim-note" id="export-trim-note"></span>
+          </div>
           <div class="export-line-picker hidden" id="export-line-picker">
             <label for="export-line-num">Section &sect;</label>
             <input type="number" id="export-line-num" min="1" step="1" placeholder="1">
@@ -492,7 +507,6 @@
           <div class="export-options">
             <label class="export-opt-lines hidden"><input type="checkbox" id="export-opt-alignment" checked> &hellip;and the alignment after &mdash; sending a line replaces what eBL held for it</label>
             <label class="export-opt-lines hidden"><input type="checkbox" id="export-opt-lemmas" checked> &hellip;and the lemmas after &mdash; a witness word takes the lemma of what it is aligned to</label>
-            <label><input type="checkbox" id="export-opt-repeat"> Let a commentary point two tokens at the same word &mdash; eBL has no stored case of this, so it may refuse the alignment</label>
             <label><input type="checkbox" id="export-opt-manuscripts" checked> Register manuscripts first</label>
             <label><input type="checkbox" id="export-opt-save-atf"> Save a copy of the ATF in the project folder</label>
           </div>

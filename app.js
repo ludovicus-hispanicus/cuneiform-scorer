@@ -228,6 +228,19 @@ const lemmaChoices = {};
 
 // Per section: the fingerprint of what was sent to eBL, and when.
 const exportedSections = {};
+// Per section: the fingerprint of what a human editor signed off on, and when.
+// A separate ledger from the export marks — a section can be on eBL without
+// anyone having read it through, and read through without having been sent.
+const revisedSections = {};
+
+// What a send to eBL left broken, waiting for a hand.
+//
+// A failed or half-failed export is not a state the score can show on its own:
+// fixing it usually means opening eBL and doing something there, and only the
+// editor knows when that has happened. So each mishap becomes a report — an
+// error when nothing went through, a warning when parts did — and the section
+// wears the sign until the editor ticks the report done by hand.
+const exportIssues = [];
 let positionMode = false;
 
 // Sections shown as positions or as lemmas on their own, without turning the
@@ -1032,6 +1045,45 @@ document.addEventListener('click', (e) => {
   toggleSentMark(lineNum, e.shiftKey);
 });
 
+// The revision mark, worked the same way: click to say an editor has read the
+// section through, click again to unsay it, shift-click to carry the mark down
+// from the last one set. Its own anchor, so revising and marking-as-sent can
+// interleave without stealing each other's runs.
+let lastRevisedSection = null;
+
+async function toggleRevisedMark(lineNum, extend) {
+  const from = (extend && lastRevisedSection != null)
+    ? Math.min(lastRevisedSection, lineNum) : lineNum;
+  const to = (extend && lastRevisedSection != null)
+    ? Math.max(lastRevisedSection, lineNum) : lineNum;
+
+  const clearing = revisedState(lineNum) !== 'never';
+  const { scoreLines } = buildScore();
+  const known = new Set(Object.keys(scoreLines).map(Number));
+  let touched = 0;
+  for (let n = from; n <= to; n++) {
+    if (!known.has(n)) continue;
+    if (clearing) { delete revisedSections[n]; touched++; }
+    else { markRevised(n); touched++; }
+  }
+  lastRevisedSection = lineNum;
+  if (!touched) return;
+  await saveScoreDataToFile();
+  keepScoreInView(renderScore);
+  setStatus('connected', (clearing ? 'Cleared the revision mark on ' : 'Marked as revised: ')
+    + touched + ' section(s)' + (from === to ? '' : ' (§' + from + '–§' + to + ')'));
+  setTimeout(() => setStatus('connected', 'Ready'), 4000);
+}
+
+document.addEventListener('click', (e) => {
+  const mark = e.target && e.target.closest ? e.target.closest('.line-revised') : null;
+  if (!mark) return;
+  const lineNum = parseInt(mark.dataset.line, 10);
+  if (!Number.isFinite(lineNum)) return;
+  e.preventDefault();
+  toggleRevisedMark(lineNum, e.shiftKey);
+});
+
 // Keyboard: Alt+P for positions, Alt+L for lemmas.
 //
 // Alt rather than Ctrl, which the browser has already spoken for, and both are
@@ -1249,23 +1301,32 @@ function positionRun(list) {
   return out.join(',');
 }
 
-// Recount one witness row after one of its boxes changed.
+// Recount one witness after one of its boxes changed.
+//
+// The tally belongs to the omen, and on a witness spread over several lines
+// it is written under the last of them — so a box edited on the first line
+// has to reach across to it.
 function refreshPositionTally(input) {
-  const row = input.closest ? input.closest('.score-witness') : null;
-  if (!row) return;
-  const out = row.querySelector('.pos-tally');
-  if (!out) return;
+  const line = input.closest ? input.closest('.score-line') : null;
+  if (!line) return;
 
   const lineNum = input.dataset.line;
   const key = input.dataset.key;
   const vi = Number(input.dataset.variant || 0);
+  const siglum = String(key).split('|')[0];
   const { scoreLines } = buildScore();
-  const w = (scoreLines[lineNum] || []).find(
-    (x) => x.type === 'line' && (x.variant || 0) === vi && (x.siglum + '|' + x.sourceLine) === key);
+  const rows = omenRowsOf(lineNum, vi, siglum, scoreLines);
   const reading = variantsFor(lineNum)[vi];
-  if (!w || !reading) return;
+  if (!rows.length || !reading) return;
 
-  const tally = alignmentTally(lineNum, w, positionWords(reading.text));
+  const group = lineNum + '|' + vi + '|' + siglum;
+  let out = null;
+  line.querySelectorAll('.pos-tally').forEach((el) => {
+    if (el.dataset.group === group && !el.classList.contains('is-continues')) out = el;
+  });
+  if (!out) return;
+
+  const tally = alignmentTally(lineNum, rows, positionWords(reading.text));
   // Worded exactly as the full render words it, or the label changes meaning
   // the moment a box is edited.
   const bits = [];
@@ -1353,7 +1414,41 @@ function renderPositionWitness(lineNum, vi, w) {
   return html;
 }
 
-// What the pairings add up to for one witness row.
+// A witness's lines under one reading, in the order the tablet has them.
+//
+// A tablet that needs three lines for one omen is still one witness. Judged a
+// line at a time, K.6121 o 42' reported "lost 7–35" — but the omen it opens
+// only finishes on o 46', and the line is not missing those words, it has not
+// reached them yet. So the tally, and every count the position card shows,
+// counts omens rather than the lines they happen to run over.
+function sourceLineOrder(a, b) {
+  const n = (x) => parseInt(String(x).replace(/[^0-9]/g, ''), 10);
+  const na = n(a.sourceLine), nb = n(b.sourceLine);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+  return String(a.sourceLine).localeCompare(String(b.sourceLine), undefined, { numeric: true });
+}
+
+// The witnesses of one reading, each with all the lines it gives to it:
+// [{ siglum, rows }], in the order the score has them.
+function omensOf(lineNum, vi, scoreLines) {
+  const all = ((scoreLines || buildScore().scoreLines)[lineNum] || [])
+    .filter((x) => x.type === 'line' && (x.variant || 0) === vi);
+  const by = new Map();
+  for (const w of all) {
+    if (!by.has(w.siglum)) by.set(w.siglum, []);
+    by.get(w.siglum).push(w);
+  }
+  return [...by.entries()].map(([siglum, rows]) =>
+    ({ siglum, rows: rows.slice().sort(sourceLineOrder) }));
+}
+
+function omenRowsOf(lineNum, vi, siglum, scoreLines) {
+  const hit = omensOf(lineNum, vi, scoreLines).find((o) => o.siglum === siglum);
+  return hit ? hit.rows : [];
+}
+
+// What the pairings add up to for one witness — one row, or every row of the
+// omen when the tablet spreads it over several lines.
 //
 // This judges the same way the compositor does, and for the same reasons:
 //   - words are compared as signs, so {iti}BAR₂ and {iti}BARA₂ are one word
@@ -1362,10 +1457,24 @@ function renderPositionWitness(lineNum, vi, w) {
 //     preserves — a tablet broken to "[...]" claims nothing at all;
 //   - dividers, protocol markers and commentary are not words and take no
 //     position, so they are never counted as unplaced.
-function alignmentTally(lineNum, w, readingWords) {
-  const key = w.siglum + '|' + w.sourceLine;
-  const map = alignmentFor(lineNum, key);
-  const stream = witnessWords(w.content);
+function alignmentTally(lineNum, rows, readingWords) {
+  // One stream over the whole omen. Each token carries the position its own
+  // line's alignment gives it, so lines joined here keep their own numbering
+  // and a break at the end of one line no longer swallows everything the next
+  // line goes on to say.
+  const list = Array.isArray(rows) ? rows : [rows];
+  const stream = [];
+  for (const row of list) {
+    const map = alignmentFor(lineNum, row.siglum + '|' + row.sourceLine);
+    for (const tok of witnessWords(row.content)) {
+      stream.push({
+        text: tok.text,
+        role: tok.role,
+        index: tok.index,
+        at: tok.index == null || map[tok.index] == null ? null : Number(map[tok.index]),
+      });
+    }
+  }
   const words = stream.filter((t) => t.index != null);
   const convert = positionConverter();
   const C = window.Compositor;
@@ -1377,7 +1486,7 @@ function alignmentTally(lineNum, w, readingWords) {
   const duplicated = [];
   let extra = 0;
   for (const tok of words) {
-    const at = map[tok.index];
+    const at = tok.at;
     // A divider answers to no position, so leaving it unpaired is not a gap
     // in the alignment and must not be reported as one.
     if (at == null) { if (!divider(tok.text) && legible(tok.text)) extra++; continue; }
@@ -1409,7 +1518,7 @@ function alignmentTally(lineNum, w, readingWords) {
         continue;
       }
       if (tok.index == null) continue;
-      const at = map[tok.index];
+      const at = tok.at;
       if (at == null) continue;
       if (last != null && broken) {
         for (let p = Math.min(last, at) + 1; p < Math.max(last, at); p++) lost.add(p);
@@ -1463,6 +1572,204 @@ function alignmentTally(lineNum, w, readingWords) {
   }
   return { omitted, differing, illegible, duplicated, extra, paired: taken.size };
 }
+
+// ---- Seeing one position across the witnesses -----------------------------
+//
+// The colour already says which column a word belongs to; the relief says it
+// louder, and only for the word under the mouse. Hovering a witness word
+// lifts the reading word it answers to, and hovering a reading word lifts
+// every witness word answering to it.
+//
+// Clicking a reading word holds that light and counts it: how many witness
+// lines have a word at this position, and how many have one twice — 5/2 —
+// with the lines named. That is the number an editor weighs when deciding
+// whether a word belongs in the reconstruction or is one witness's variant.
+
+let reliefLit = [];
+function clearRelief() {
+  for (const el of reliefLit) { if (el.isConnected) el.classList.remove('is-relief'); }
+  reliefLit = [];
+}
+function lightRelief(els) {
+  clearRelief();
+  for (const el of els) { el.classList.add('is-relief'); reliefLit.push(el); }
+}
+
+// The reading word a witness word answers to, from the box it carries.
+function reliefFromWitness(wordEl) {
+  const input = wordEl.querySelector('.pos-input');
+  if (!input || input.value.trim() === '') return [];
+  const at = String(parseInt(input.value, 10));
+  const line = wordEl.closest('.score-line');
+  if (!line) return [];
+  const vi = input.dataset.variant || '0';
+  const recon = line.querySelector(`.reconstructed-text.is-positions[data-variant="${vi}"]`);
+  const card = recon ? recon.querySelector(`.pos-word[data-pos="${at}"]`) : null;
+  return card ? [card] : [];
+}
+
+// Every witness word answering to a reading word. Read from the boxes, not
+// from the stored alignment, so a number just typed lights up before it is
+// even committed.
+function reliefFromCard(card) {
+  const recon = card.closest('.reconstructed-text.is-positions');
+  const line = card.closest('.score-line');
+  if (!recon || !line) return [];
+  const vi = recon.dataset.variant || '0';
+  const at = card.dataset.pos;
+  const out = [];
+  line.querySelectorAll('.witness-text.is-positions .pos-input').forEach((inp) => {
+    if ((inp.dataset.variant || '0') !== vi) return;
+    if (String(parseInt(inp.value, 10)) !== at) return;
+    const word = inp.closest('.pos-word');
+    if (word) out.push(word);
+  });
+  return out;
+}
+
+document.addEventListener('mouseover', (e) => {
+  if (!e.target || !e.target.closest) return;
+  const witnessWord = e.target.closest('.witness-text.is-positions .pos-word');
+  if (witnessWord) { lightRelief(reliefFromWitness(witnessWord)); return; }
+  const card = e.target.closest('.reconstructed-text.is-positions .pos-word[data-pos]');
+  if (card) { lightRelief(reliefFromCard(card)); return; }
+  if (reliefLit.length) clearRelief();
+});
+
+// What the witnesses say about one position, omen by omen. `used` is every
+// witness with a word there (a differing word included — it attests the
+// slot); the rest sort the silence: an omission is a claim, a break is not.
+//
+// Counted per omen, not per line. A tablet giving one omen five lines is one
+// witness with one opinion about a word, and counting its lines instead made
+// the denominator the number of rows on screen — "5 of 17" where the honest
+// answer is "5 of 6".
+function positionUsage(lineNum, vi, pos) {
+  const { scoreLines } = buildScore();
+  const omens = omensOf(lineNum, vi, scoreLines);
+  const reading = variantsFor(lineNum)[vi];
+  const words = reading ? positionWords(reading.text || '') : [];
+  const u = { omens: omens.length, used: [], twice: [], otherwise: [],
+    omits: [], lost: [], silent: [] };
+  for (const om of omens) {
+    // How many words this witness puts here, over all the lines it gives the
+    // omen — a commentary quoting the lemma and then quoting it again is the
+    // case worth seeing.
+    let n = 0;
+    for (const row of om.rows) {
+      const map = (lineAlignments[lineNum] || {})[row.siglum + '|' + row.sourceLine] || {};
+      for (const k of Object.keys(map)) if (Number(map[k]) === pos) n++;
+    }
+    const label = displaySiglum(om.siglum);
+    const tally = alignmentTally(lineNum, om.rows, words);
+    if (n) {
+      u.used.push(label + (n > 1 ? ' ×' + n : ''));
+      if (n > 1) u.twice.push(label);
+      if (tally.differing.indexOf(pos) >= 0) u.otherwise.push(label);
+    } else if (tally.omitted.indexOf(pos) >= 0) u.omits.push(label);
+    else if (tally.illegible.indexOf(pos) >= 0) u.lost.push(label);
+    else u.silent.push(label);
+  }
+  return u;
+}
+
+let usagePop = null;
+let usagePopKey = '';
+function closeUsagePop() {
+  if (usagePop) { usagePop.remove(); usagePop = null; }
+  usagePopKey = '';
+  document.querySelectorAll('.pos-word.is-held').forEach((el) => el.classList.remove('is-held'));
+}
+
+// The reading's card for one position, wherever the question was asked from.
+function cardForPosition(anchor, vi, pos) {
+  const line = anchor.closest('.score-line');
+  if (!line) return null;
+  const recon = line.querySelector(`.reconstructed-text.is-positions[data-variant="${vi}"]`);
+  return recon ? recon.querySelector(`.pos-word[data-pos="${pos}"]`) : null;
+}
+
+function showUsagePop(anchor, lineNum, vi, pos) {
+  closeUsagePop();
+  const u = positionUsage(lineNum, vi, pos);
+  const card = cardForPosition(anchor, vi, pos);
+  const wordEl = card && card.querySelector('.pos-word-text');
+  const word = wordEl ? wordEl.textContent : '';
+
+  const row = (name, list) => (list.length
+    ? `<div class="pop-row"><span class="pop-k">${name}</span>`
+      + `<span class="pop-v">${escapeHtml(list.join(', '))}</span></div>`
+    : '');
+  const pop = document.createElement('div');
+  pop.className = 'pos-usage-pop';
+  // Attested out of witnesses, because that is the ratio the decision turns
+  // on. Quoting twice is a different fact and is reported as one, rather than
+  // as a second number that reads like a denominator — "5/0" said nothing.
+  pop.innerHTML =
+    `<div class="pop-head"><b>${escapeHtml(word)}</b><span class="pop-pos">position ${pos}</span></div>`
+    + `<div class="pop-big">${u.used.length}/${u.omens}</div>`
+    + `<div class="pop-say">${u.used.length} of ${u.omens} witness${u.omens === 1 ? '' : 'es'}`
+    + ` ${u.used.length === 1 ? 'has' : 'have'} a word here`
+    + (u.twice.length ? ` — ${u.twice.length} of them twice` : '') + `</div>`
+    + row('have it', u.used)
+    + row('read otherwise', u.otherwise)
+    + row('omit it', u.omits)
+    + row('lost', u.lost)
+    + row('no claim', u.silent);
+  document.body.appendChild(pop);
+
+  // Under whatever was clicked, kept on screen. Fixed, so it survives
+  // nothing — any scroll closes it rather than letting it drift off its word.
+  const r = anchor.getBoundingClientRect();
+  const pw = pop.offsetWidth;
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8)) + 'px';
+  pop.style.top = Math.min(r.bottom + 6, window.innerHeight - pop.offsetHeight - 8) + 'px';
+
+  usagePop = pop;
+  usagePopKey = lineNum + '|' + vi + '|' + pos;
+  if (card) {
+    card.classList.add('is-held');
+    for (const el of reliefFromCard(card)) el.classList.add('is-held');
+  }
+  window.addEventListener('scroll', closeUsagePop, { capture: true, once: true });
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target || !e.target.closest) return;
+  if (usagePop && usagePop.contains(e.target)) return;
+  // The box is for typing a position, not for asking about one.
+  if (e.target.closest('.pos-input')) return;
+
+  const card = e.target.closest('.reconstructed-text.is-positions .pos-word[data-pos]');
+  // A witness word answers for the same position, so asking there asks the
+  // same question — the word in hand is usually the one being weighed.
+  const witnessWord = card ? null : e.target.closest('.witness-text.is-positions .pos-word');
+
+  let anchor = null, lineNum = null, vi = 0, pos = null;
+  if (card) {
+    const recon = card.closest('.reconstructed-text.is-positions');
+    anchor = card;
+    lineNum = parseInt(recon.dataset.line, 10);
+    vi = Number(recon.dataset.variant || 0);
+    pos = parseInt(card.dataset.pos, 10);
+  } else if (witnessWord) {
+    const input = witnessWord.querySelector('.pos-input');
+    if (!input || input.value.trim() === '') return;   // answers to nothing
+    anchor = witnessWord;
+    lineNum = parseInt(input.dataset.line, 10);
+    vi = Number(input.dataset.variant || 0);
+    pos = parseInt(input.value, 10);
+  }
+  if (anchor == null || !Number.isFinite(pos)) { if (usagePop) closeUsagePop(); return; }
+
+  const key = lineNum + '|' + vi + '|' + pos;
+  if (usagePopKey === key) { closeUsagePop(); return; }   // asked again: put it away
+  showUsagePop(anchor, lineNum, vi, pos);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && usagePop) closeUsagePop();
+});
 
 // ---- Line variants -------------------------------------------------------
 // A reading is tied to one of a line's variants by a letter on the § marker:
@@ -1743,7 +2050,11 @@ function renderScore() {
 
     const translation = translationLines[lineNum] || '';
 
-    html += `<div class="score-line" data-line="${lineNum}">`;
+    // A section being worked on measures its witnesses against the reading, so
+    // the reading has to stay in sight while they are read. Marked here so the
+    // stylesheet can keep it there.
+    const working = (positionsOn(lineNum) || lemmasOn(lineNum)) ? ' is-working' : '';
+    html += `<div class="score-line${working}" data-line="${lineNum}">`;
     // Translation line — it belongs to the chapter line, so it stays above
     // every reading rather than under one of them.
     html += `<div class="translation-line"><span class="translation-text" contenteditable="true" data-line="${lineNum}">${escapeHtml(translation)}</span></div>`;
@@ -1789,7 +2100,7 @@ function renderScore() {
         // witnesses are measured against, and it should not move under them.
         const rw = positionWords(reading.text);
         const marksHere = daggerPositions(lineNum, vi, reading);
-        html += `<span class="reconstructed-text is-positions">` + rw.map((t) => {
+        html += `<span class="reconstructed-text is-positions" data-line="${lineNum}" data-variant="${vi}">` + rw.map((t) => {
           if (t.divider) return `<span class="pos-word is-divider">${escapeHtml(t.text)}`
             + `<span class="pos-num">${t.pos}</span></span>`;
           // Numbered, because eBL numbers it, but shown as the placeholder it is.
@@ -1801,7 +2112,8 @@ function renderScore() {
           const dag = marksHere.has(t.pos)
             ? `<span class="pos-dagger" title="${escapeHtml(marksHere.get(t.pos).join('; '))}">‡</span>`
             : '';
-          return `<span class="pos-word" style="color:${c.fg};background:${c.bg}">` + dag +
+          return `<span class="pos-word" data-pos="${t.pos}" style="color:${c.fg};background:${c.bg}"`
+            + ` title="Click: which witnesses have a word at position ${t.pos}">` + dag +
             `<span class="pos-word-text">${renderAtf(t.text)}</span>` +
             `<span class="pos-num">${t.pos}</span></span>`;
         }).join('') + `</span>`;
@@ -1834,6 +2146,25 @@ function renderScore() {
         html += `<button type="button" class="line-sent is-${sent}" data-line="${lineNum}"`
           + ` title="${escapeHtml(sentTitle(lineNum))}">`
           + (sent === 'never' ? '·' : '✓') + `</button>`;
+        // The human counterpart of the send mark: a pencil for "an editor has
+        // read this through", worked and worn exactly the same way.
+        const revised = revisedState(lineNum);
+        html += `<button type="button" class="line-revised is-${revised}" data-line="${lineNum}"`
+          + ` title="${escapeHtml(revisedTitle(lineNum))}">`
+          + (revised === 'never' ? '·' : '✎') + `</button>`;
+        // And what the last send left broken, if anything: ✖ when nothing went
+        // through, ⚠ when parts did. Clicking opens the report that says what
+        // to repair on eBL by hand; the sign clears when that report is ticked.
+        const issue = issueState(lineNum);
+        if (issue) {
+          const openHere = openIssuesFor(lineNum).length;
+          html += `<button type="button" class="line-issue is-${issue}" data-line="${lineNum}"`
+            + ` title="${issue === 'error'
+              ? 'A send of this section failed — nothing went through.'
+              : 'A send of this section went only partly through.'}`
+            + ` ${openHere} open report${openHere === 1 ? '' : 's'} — click to see what to fix on eBL by hand.">`
+            + (issue === 'error' ? '✖' : '⚠') + `</button>`;
+        }
         // The four actions wrap as a block of their own, so they break 2 and 2
         // rather than dragging the mark into the arithmetic.
         html += `<span class="line-actions">`;
@@ -1871,9 +2202,6 @@ function renderScore() {
       // put in there becomes a column beside the reading and squeezes it —
       // which is the opposite of standing the lemma under its word.
       if (!lemmasOn(lineNum) && !positionsOn(lineNum)) {
-        // The published line first, then its lemmas: the order they will be
-        // read in.
-        html += daggerLine(lineNum, vi, reading, daggerPositions(lineNum, vi, reading));
         html += lemmaStrip(lineNum, vi, reading);
       }
 
@@ -1898,6 +2226,12 @@ function renderScore() {
       // rulings and parallels — so a dotted rule is drawn where the siglum
       // changes, never before the first block or after the last.
       let lastSiglum = null;
+      // Which row closes each witness's omen here. The positions tally speaks
+      // for the omen, so it is written under that row and nowhere else.
+      const lastRowOf = new Map();
+      for (const x of witnesses) {
+        if (x.type === 'line' && (x.variant || 0) === vi) lastRowOf.set(x.siglum, x);
+      }
       for (const w of witnesses.filter((x) => (x.variant || 0) === vi)) {
         if (lastSiglum !== null && w.siglum !== lastSiglum) {
           html += '<div class="witness-rule"></div>';
@@ -1924,15 +2258,26 @@ function renderScore() {
           // so there is nothing to choose here and nothing to show but the text.
           html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
         } else if (positionsOn(lineNum)) {
-          const tally = alignmentTally(lineNum, w, positionWords(reading.text));
           html += `<span class="witness-text is-positions">${renderPositionWitness(lineNum, vi, w)}</span>`;
-          const bits = [];
-          if (tally.omitted.length) bits.push(`omits ${positionRun(tally.omitted)}`);
-          if (tally.illegible.length) bits.push(`lost ${positionRun(tally.illegible)}`);
-          if (tally.differing.length) bits.push(`reads otherwise at ${positionRun(tally.differing)}`);
-          if (tally.duplicated.length) bits.push(`two words at ${tally.duplicated.join(',')}`);
-          if (tally.extra) bits.push(`${tally.extra} unplaced`);
-          html += `<span class="pos-tally">${bits.length ? escapeHtml(bits.join(" · ")) : "✓"}</span>`;
+          // The verdict is the omen's, so it is written once, under the last
+          // line of it. On the lines above it would be a claim about words
+          // the tablet has simply not reached yet.
+          const group = `${lineNum}|${vi}|${w.siglum}`;
+          if (lastRowOf.get(w.siglum) === w) {
+            const tally = alignmentTally(lineNum, omenRowsOf(lineNum, vi, w.siglum, scoreLines),
+              positionWords(reading.text));
+            const bits = [];
+            if (tally.omitted.length) bits.push(`omits ${positionRun(tally.omitted)}`);
+            if (tally.illegible.length) bits.push(`lost ${positionRun(tally.illegible)}`);
+            if (tally.differing.length) bits.push(`reads otherwise at ${positionRun(tally.differing)}`);
+            if (tally.duplicated.length) bits.push(`two words at ${tally.duplicated.join(',')}`);
+            if (tally.extra) bits.push(`${tally.extra} unplaced`);
+            html += `<span class="pos-tally" data-group="${escapeHtml(group)}">`
+              + `${bits.length ? escapeHtml(bits.join(" · ")) : "✓"}</span>`;
+          } else {
+            html += `<span class="pos-tally is-continues" data-group="${escapeHtml(group)}"`
+              + ` title="The omen goes on below — its verdict is under its last line">⋯</span>`;
+          }
         } else {
           html += `<span class="witness-text">${renderAtf(w.content)}</span>`;
         }
@@ -4968,10 +5313,12 @@ async function saveScoreDataToFile() {
   const hasAlignments = Object.keys(lineAlignments).length > 0;
   const hasLemmas = Object.keys(lemmaChoices).length > 0;
   const hasExports = Object.keys(exportedSections).length > 0;
+  const hasRevisions = Object.keys(revisedSections).length > 0;
+  const hasIssues = exportIssues.length > 0;
   const hasGlossary = Object.keys(projectGlossary).length > 0;
   if (!hasReconstructed && !hasTranslations && !hasNotes && !hasParallels
       && !hasVariants && !hasAlignments && !hasLemmas && !hasExports
-      && !hasGlossary) return;
+      && !hasRevisions && !hasIssues && !hasGlossary) return;
 
   try {
     const data = {
@@ -4983,8 +5330,9 @@ async function saveScoreDataToFile() {
       alignments: lineAlignments,
       lemmas: lemmaChoices,
       glossary: projectGlossary,
-      allowRepeatedClaims,
       exported: exportedSections,
+      revised: revisedSections,
+      issues: exportIssues,
       savedAt: new Date().toISOString()
     };
     await FileSystem.writeScoreData(dirHandle, data);
@@ -5016,14 +5364,14 @@ async function loadScoreData() {
       if (data.alignments) Object.assign(lineAlignments, data.alignments);
       if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
       if (data.exported) Object.assign(exportedSections, data.exported);
+      if (data.revised) Object.assign(revisedSections, data.revised);
+      if (Array.isArray(data.issues)) exportIssues.push(...data.issues);
       if (data.glossary) {
         projectGlossary = data.glossary;
         applyProjectGlossary();
       }
-      if (typeof data.allowRepeatedClaims === 'boolean') {
-        allowRepeatedClaims = data.allowRepeatedClaims;
-      }
       migrateSentMarks();
+      updateReportsBadge();
       console.log('Loaded score-data.json');
     }
   } catch (err) {
@@ -8208,6 +8556,8 @@ async function pollForChanges() {
         Object.keys(lineAlignments).forEach(k => delete lineAlignments[k]);
         Object.keys(lemmaChoices).forEach(k => delete lemmaChoices[k]);
         Object.keys(exportedSections).forEach(k => delete exportedSections[k]);
+        Object.keys(revisedSections).forEach(k => delete revisedSections[k]);
+        exportIssues.length = 0;
         if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
         if (data.translations) Object.assign(translationLines, data.translations);
         if (data.notes) Object.assign(noteLines, data.notes);
@@ -8216,14 +8566,14 @@ async function pollForChanges() {
       if (data.alignments) Object.assign(lineAlignments, data.alignments);
       if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
       if (data.exported) Object.assign(exportedSections, data.exported);
+      if (data.revised) Object.assign(revisedSections, data.revised);
+      if (Array.isArray(data.issues)) exportIssues.push(...data.issues);
       if (data.glossary) {
         projectGlossary = data.glossary;
         applyProjectGlossary();
       }
-      if (typeof data.allowRepeatedClaims === 'boolean') {
-        allowRepeatedClaims = data.allowRepeatedClaims;
-      }
       migrateSentMarks();
+      updateReportsBadge();
         renderScore();
         hasChanges = true;
       }
@@ -8436,6 +8786,8 @@ try {
         Object.keys(lineAlignments).forEach(k => delete lineAlignments[k]);
         Object.keys(lemmaChoices).forEach(k => delete lemmaChoices[k]);
         Object.keys(exportedSections).forEach(k => delete exportedSections[k]);
+        Object.keys(revisedSections).forEach(k => delete revisedSections[k]);
+        exportIssues.length = 0;
         if (data.reconstructed) Object.assign(reconstructedLines, data.reconstructed);
         if (data.translations) Object.assign(translationLines, data.translations);
         if (data.notes) Object.assign(noteLines, data.notes);
@@ -8444,14 +8796,14 @@ try {
       if (data.alignments) Object.assign(lineAlignments, data.alignments);
       if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
       if (data.exported) Object.assign(exportedSections, data.exported);
+      if (data.revised) Object.assign(revisedSections, data.revised);
+      if (Array.isArray(data.issues)) exportIssues.push(...data.issues);
       if (data.glossary) {
         projectGlossary = data.glossary;
         applyProjectGlossary();
       }
-      if (typeof data.allowRepeatedClaims === 'boolean') {
-        allowRepeatedClaims = data.allowRepeatedClaims;
-      }
       migrateSentMarks();
+      updateReportsBadge();
         renderScore();
       }
     } else if (msg.type === 'annotations-saved' && msg.projectId === projectId) {
@@ -8576,8 +8928,26 @@ const exportWarningsEl = document.getElementById('export-warnings');
 const exportProgressEl = document.getElementById('export-progress');
 const exportResultEl = document.getElementById('export-result');
 const exportPreflightEl = document.getElementById('export-preflight');
+(() => {
+  const btn = document.getElementById('ebl-lines-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const target = (projectConfig && projectConfig.ebl && projectConfig.ebl.target) || null;
+    if (!target) return;
+    btn.disabled = true;
+    try {
+      // Read it fresh: the dialog may have been open a while, and the whole
+      // point is to see the order as it stands now.
+      await loadExportPreflight(target);
+      renderExportPreflight();
+      renderExportEffect();
+      showComposeReport('What eBL holds', chapterListingBlocks(), 'ebl-lines');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
 const exportEffectEl = document.getElementById('export-effect');
-const exportOptRepeatEl = document.getElementById('export-opt-repeat');
 const exportOptAlignmentEl = document.getElementById('export-opt-alignment');
 const exportOptLemmasEl = document.getElementById('export-opt-lemmas');
 const exportOptManuscriptsEl = document.getElementById('export-opt-manuscripts');
@@ -8778,6 +9148,18 @@ async function loadExportPreflight(target) {
       first: numbers[0] || null,
       last: numbers[numbers.length - 1] || null,
       translated: (chapter.lines || []).filter((l) => (l.translation || []).length).length,
+      // Which sections eBL already holds. A section it has is replaced where
+      // it stands; one it lacks can only be appended, because POST /lines has
+      // no insert. Knowing which is which before the send is the difference
+      // between an ordered chapter and a surprise at the bottom of it.
+      has: new Set(numbers.map((n) => String(n))),
+      // Enough of each line to recognise it, in the order eBL holds them —
+      // which is the only place the order is visible at all.
+      lines: (chapter.lines || []).map((l) => ({
+        number: String(l.number),
+        text: ((l.variants || [])[0] && ((l.variants[0].reconstructionTokens || [])
+          .map((t) => t.value).join(' '))) || '',
+      })),
     };
   } catch (err) {
     exportPreflight = {
@@ -8824,15 +9206,37 @@ function renderExportEffect() {
     const n = selectedExportLine();
     html = n == null
       ? 'Type the section to update.'
-      : `Replaces <strong>§${n}</strong> in place. Every other line is untouched, ` +
-        'and their lemmatization and alignment survive.';
+      : (sectionsNotOnEbl([n]) || []).length
+          ? `<strong>§${n}</strong> is not on eBL yet.` + appendNote([n]).replace(/^<br>/, ' ')
+          : `Replaces <strong>§${n}</strong> in place. Every other line is untouched, `
+            + 'and their lemmatization and alignment survive.';
   } else if (mode === 'range') {
     const nums = selectedExportRange();
     html = !nums || !nums.length
       ? 'Type the first and last section to update.'
-      : `Replaces <strong>${nums.length}</strong> line${nums.length === 1 ? '' : 's'} ` +
-        `(§${nums[0]}–§${nums[nums.length - 1]}) in one request. Lines outside the range ` +
-        'are untouched, and their lemmatization and alignment survive.';
+      : `Replaces <strong>${nums.length}</strong> line${nums.length === 1 ? '' : 's'} `
+        + `(§${nums[0]}–§${nums[nums.length - 1]}) in one request. Lines outside the range `
+        + 'are untouched, and their lemmatization and alignment survive.'
+        + '<br>A line eBL already holds is rewritten where it stands — this never moves '
+        + 'anything, so a line already out of position stays there.'
+        + appendNote(nums);
+  } else if (mode === 'trim') {
+    const plan = trimPlan(selectedTrimFrom());
+    if (!exportPreflight || exportPreflight.error || !exportPreflight.lines) {
+      html = 'The chapter could not be read, so there is nothing to trim.';
+    } else if (!plan) {
+      html = `Type the position to cut from — 1 to ${exportPreflight.lines.length}. `
+        + 'Press “list them” above to see what sits where.';
+    } else {
+      const names = plan.going.slice(0, 14).map((g) => '§' + g.number).join(', ');
+      html = `Removes <strong>${plan.going.length}</strong> line`
+        + `${plan.going.length === 1 ? '' : 's'} from position <strong>${plan.from}</strong> `
+        + `to the end (${names}${plan.going.length > 14 ? ', …' : ''}). `
+        + `<strong>${plan.keeping}</strong> line${plan.keeping === 1 ? '' : 's'} above are `
+        + 'untouched and keep their lemmas and alignment. '
+        + 'Their lemmatization and alignment on eBL go with the removed lines — send those '
+        + 'sections again afterwards to put them back.';
+    }
   } else {
     html = existing == null
       ? `Deletes every existing line, then writes ${sending}.`
@@ -8849,12 +9253,245 @@ function renderExportEffect() {
     : mode === 'alignment' ? 'Check the alignment'
     : mode === 'line' ? 'Update this line'
     : mode === 'range' ? 'Update these lines'
+    : mode === 'trim' ? 'Remove them'
     : 'Replace all lines';
+}
+
+// What eBL holds, read back from its API once the write is done.
+//
+// eBL serves the chapter page from a cache, so what the browser shows there
+// can lag a send by a long way — a trim that had already taken effect still
+// read as 60 lines on the site while the API said 42, which looks exactly
+// like an export that did nothing. The API is the authority, so the result
+// says what it actually returned rather than leaving the two to be
+// reconciled by eye.
+//
+// Never fatal: the write has happened either way, and a failed read-back is
+// only a missing sentence.
+async function readBackNote(target) {
+  try {
+    await loadExportPreflight(target);
+    renderExportPreflight();
+    renderExportEffect();
+  } catch (_) {
+    return '';
+  }
+  if (!exportPreflight || exportPreflight.error) return '';
+  const { lineCount, first, last } = exportPreflight;
+  return '<div class="export-readback">eBL now holds <strong>' + lineCount + '</strong> line'
+    + (lineCount === 1 ? '' : 's')
+    + (first && last ? ` (§${first}–§${last})` : '')
+    + ' — read back from its API just now. The chapter page on eBL is cached, so'
+    + ' reload it there before believing an older number.</div>';
+}
+
+// File what a dialog export did, the way the omen icon files what it did.
+//
+// Sends from the Export dialog kept no record at all: no ✓ on the section, no
+// entry on the reports page. An overnight run that stalled on the lemmas left
+// nothing behind to say the lines had gone.
+//
+// Called after the send, so it describes what actually happened; the sections
+// themselves are marked the moment their lines land, which is earlier.
+function fileExportReport(label, nums, res, afterBlocks) {
+  const warnings = (res && res.warnings) || [];
+  const added = ((res && res.results) || []).filter((r) => r.inserted);
+  const notes = warnings.slice(0, 40);
+  const kind = warnings.length ? 'notice' : 'ok';
+  const blocks = [
+    outcomeBanner('sent', label, ((res && res.results) || []).length
+      + ' line(s) written' + (added.length ? ', ' + added.length + ' new to the chapter' : '')),
+    ...(notes.length ? [rawBlock(notes.join(String.fromCharCode(10)))] : []),
+    ...(afterBlocks || []),
+  ];
+  for (const n of (nums || [])) supersedeExportIssues('send', n);
+  addExportIssue({
+    sec: (nums && nums.length === 1) ? nums[0] : null,
+    part: 'send',
+    kind,
+    title: label + ' sent' + (warnings.length
+      ? ' — ' + warnings.length + ' thing(s) to check on eBL' : ''),
+    notes,
+    report: blocks.join(''),
+    done: !warnings.length,
+    how: 'sent clean',
+  });
+  updateReportsBadge();
+  saveScoreDataToFile();
+}
+
+// The tail a trim would remove: everything from `from` (1-based position)
+// down to the last line eBL holds.
+//
+// Only ever a tail. Deleting from the middle would leave every position after
+// the hole meaning something different from what the listing showed, and the
+// indices in the payload are positions — so a gap is how you delete the wrong
+// lines. A tail cannot renumber anything that is left.
+function trimPlan(from) {
+  if (!exportPreflight || exportPreflight.error || !exportPreflight.lines) return null;
+  const lines = exportPreflight.lines;
+  const at = parseInt(from, 10);
+  if (!Number.isFinite(at) || at < 1 || at > lines.length) return null;
+  const going = lines.slice(at - 1).map((l, i) => ({
+    position: at + i, number: l.number, text: l.text,
+  }));
+  return {
+    from: at,
+    total: lines.length,
+    going,
+    // 0-based, which is what eBL's `deleted` counts in.
+    indices: going.map((g) => g.position - 1),
+    keeping: at - 1,
+  };
+}
+
+function selectedTrimFrom() {
+  const el = document.getElementById('export-trim-from');
+  const n = el ? parseInt(el.value, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// What eBL actually holds, in the order it holds it.
+//
+// The chapter's order is invisible from here otherwise: the export dialog can
+// say "58 lines (§1–52)" while six of them sit in the wrong place, and nothing
+// distinguishes a chapter in sequence from one with a tail of appended
+// strays. Read-only — it writes nothing and is meant to be looked at before
+// deciding whether a range send is enough or the chapter needs rebuilding.
+//
+// Three things are worth seeing, and they are different faults:
+//   duplicate     the same § twice, which is what an append makes when the
+//                 section was already there under a number that did not match
+//   out of order  a § lower than the one above it
+//   not here      a line this project has no section for
+function chapterListingBlocks() {
+  if (!exportPreflight || exportPreflight.error || !exportPreflight.lines) {
+    return [noteBlock('The chapter could not be read.', 'bad')];
+  }
+  const lines = exportPreflight.lines;
+  if (!lines.length) return [noteBlock('The chapter is empty.')];
+
+  const mine = new Set(Object.keys(buildScore().scoreLines).map(String));
+  const seen = new Map();
+  for (const l of lines) seen.set(l.number, (seen.get(l.number) || 0) + 1);
+
+  let highest = -Infinity;
+  let breaks = 0, dupes = 0, orphans = 0;
+  const rows = lines.map((l, i) => {
+    const n = parseInt(l.number, 10);
+    const flags = [];
+    if (seen.get(l.number) > 1) { flags.push('duplicate'); }
+    if (Number.isFinite(n) && n < highest) { flags.push('out of order'); breaks++; }
+    if (!mine.has(l.number)) { flags.push('not in this project'); orphans++; }
+    if (Number.isFinite(n) && n > highest) highest = n;
+    return { i, number: l.number, text: l.text, flags };
+  });
+  for (const [, n] of seen) if (n > 1) dupes += n - 1;
+
+  const head = '<div class="report-counts">'
+    + `<span class="report-count"><b>${lines.length}</b> lines on eBL</span>`
+    + `<span class="report-count${breaks ? ' is-done' : ''}"><b>${breaks}</b> out of order</span>`
+    + `<span class="report-count"><b>${dupes}</b> duplicate</span>`
+    + `<span class="report-count"><b>${orphans}</b> not in this project</span>`
+    + '</div>';
+
+  // Where the chapter would have to be cut to put it right.
+  //
+  // Not where the order breaks — that is where the strays were dumped, and
+  // deleting from there achieves nothing: a section numbered below what
+  // remains is simply appended to the end again. What matters is the lowest
+  // misplaced §. Every line from that number onward has to go and be sent
+  // again in order, because only then is each one above everything left.
+  const misplaced = rows.filter((r) => r.flags.indexOf('out of order') >= 0)
+    .map((r) => parseInt(r.number, 10)).filter((n) => Number.isFinite(n));
+  const lowest = misplaced.length ? Math.min.apply(null, misplaced) : null;
+  const cut = lowest == null ? -1
+    : rows.findIndex((r) => Number.isFinite(parseInt(r.number, 10))
+        && parseInt(r.number, 10) >= lowest);
+  const note = lowest == null
+    ? noteBlock('Every line is in ascending order.', 'good')
+    : noteBlock('§' + lowest + ' is the lowest section out of place. To put the chapter'
+        + ' in order, everything from position ' + (cut + 1) + ' (§' + rows[cut].number
+        + ') to the end — ' + (rows.length - cut) + ' lines — has to be removed and sent'
+        + ' again in ascending order. Trimming only the strays at the bottom would not'
+        + ' work: a section numbered below what remains is appended to the end again.'
+        + ' The lines above position ' + (cut + 1) + ' keep their lemmas and alignment.',
+        'warn');
+
+  const body = '<table class="report-table"><thead><tr>'
+    + '<th>#</th><th>§</th><th>reading</th><th></th></tr></thead><tbody>'
+    + rows.map((r) => '<tr class="' + (r.flags.length ? 'is-divergent' : '') + '">'
+        + `<td class="report-nums">${r.i + 1}</td>`
+        + `<td class="report-nums">${escapeHtml(r.number)}</td>`
+        + `<td>${escapeHtml(String(r.text).slice(0, 70))}</td>`
+        + `<td class="report-thin">${escapeHtml(r.flags.join(', '))}</td>`
+        + '</tr>').join('')
+    + '</tbody></table>';
+
+  return [head, note, body,
+    noteBlock('Nothing was sent or changed — this only reads the chapter.')];
+}
+
+// Of these sections, the ones eBL does not hold yet.
+function sectionsNotOnEbl(nums) {
+  if (!exportPreflight || exportPreflight.error || !exportPreflight.has) return null;
+  return (nums || []).filter((n) => !exportPreflight.has.has(String(n)));
+}
+
+// What appending would actually do to the order.
+//
+// eBL has no insert: a section it does not hold is added at the end. That is
+// only a problem when the section belongs somewhere else. A section numbered
+// above everything eBL holds belongs at the end, so appending it — and its
+// neighbours after it, since a range is sent in ascending order — puts the
+// chapter in exactly the right order and disturbs nothing below.
+//
+// So the two cases are worth telling apart. Warning about both alike said
+// "§53–§60 will be out of order" when the end was precisely where they go.
+function appendPlan(nums) {
+  const missing = sectionsNotOnEbl(nums);
+  if (!missing) return null;
+  const held = [...exportPreflight.has]
+    .map((n) => parseInt(n, 10)).filter((n) => Number.isFinite(n));
+  const highest = held.length ? Math.max.apply(null, held) : 0;
+  return {
+    missing,
+    highest,
+    // Above everything eBL holds: the end is where they belong.
+    afterEnd: missing.filter((n) => n > highest),
+    // Below it: the end is not where they belong.
+    outOfOrder: missing.filter((n) => n <= highest),
+  };
+}
+
+// The sentence describing an append, or '' when there is nothing to append.
+function appendNote(nums) {
+  const plan = appendPlan(nums);
+  if (!plan || !plan.missing.length) return '';
+  const list = (ns) => '§' + ns.slice(0, 12).join(', §') + (ns.length > 12 ? ', …' : '');
+  if (!plan.outOfOrder.length) {
+    return `<br><strong>${plan.afterEnd.length}</strong> of them `
+      + (plan.afterEnd.length === 1 ? 'is' : 'are') + ' not on eBL yet ('
+      + list(plan.afterEnd) + `). They are numbered above everything eBL holds `
+      + `(highest is §${plan.highest}), so appending them puts them in the right `
+      + 'place — nothing below is disturbed.';
+  }
+  return `<br><strong>${plan.outOfOrder.length}</strong> of them `
+    + (plan.outOfOrder.length === 1 ? 'is' : 'are') + ' not on eBL yet ('
+    + list(plan.outOfOrder) + `) and would land at the <strong>end</strong> of the `
+    + `chapter rather than in place, because eBL appends new lines and cannot insert. `
+    + '“Replace all lines” is what writes the whole chapter in order.'
+    + (plan.afterEnd.length
+        ? ` (The other ${plan.afterEnd.length} sit above §${plan.highest} and append correctly.)`
+        : '');
 }
 
 // Only the steps a mode actually runs are shown.
 function stepsForMode(mode) {
   if (mode === 'validate') return ['validate'];
+  // A trim writes no ATF, so there is nothing to validate; it backs the
+  // chapter up and deletes, and stops there.
+  if (mode === 'trim') return ['backup', 'delete'];
   const steps = ['validate'];
   if (exportOptManuscriptsEl && exportOptManuscriptsEl.checked) steps.push('manuscripts');
   if (mode === 'alignment') return [];   // it reports for itself
@@ -8941,7 +9578,8 @@ async function openExportModal() {
   if (validateRadio) validateRadio.checked = true;
   const linePicker = document.getElementById('export-line-picker');
   if (linePicker) linePicker.classList.add('hidden');
-  if (exportOptRepeatEl) exportOptRepeatEl.checked = allowRepeatedClaims;
+  const trimPicker = document.getElementById('export-trim-picker');
+  if (trimPicker) trimPicker.classList.add('hidden');
 
   // Validate-only writes nothing, so it needs neither a token nor write scope.
   const canExport = !!exportArtifactAtf;
@@ -8982,6 +9620,13 @@ document.querySelectorAll('input[name="export-mode"]').forEach((radio) => {
     }
     const toBox = document.getElementById('export-range-to');
     if (toBox) toBox.classList.toggle('hidden', mode !== 'range');
+    const trimPicker = document.getElementById('export-trim-picker');
+    if (trimPicker) trimPicker.classList.toggle('hidden', mode !== 'trim');
+    const trimNote = document.getElementById('export-trim-note');
+    if (trimNote) {
+      trimNote.textContent = (exportPreflight && !exportPreflight.error && exportPreflight.lineCount)
+        ? 'to the end (' + exportPreflight.lineCount + ' lines on eBL)' : '';
+    }
     renderExportEffect();
     syncExportSteps();
   });
@@ -8992,12 +9637,8 @@ const exportLineNumEl = document.getElementById('export-line-num');
 if (exportLineNumEl) exportLineNumEl.addEventListener('input', renderExportEffect);
 const exportLineToEl = document.getElementById('export-line-to');
 if (exportLineToEl) exportLineToEl.addEventListener('input', renderExportEffect);
-if (exportOptRepeatEl) {
-  exportOptRepeatEl.addEventListener('change', () => {
-    allowRepeatedClaims = exportOptRepeatEl.checked;
-    saveScoreDataToFile();
-  });
-}
+const exportTrimFromEl = document.getElementById('export-trim-from');
+if (exportTrimFromEl) exportTrimFromEl.addEventListener('input', renderExportEffect);
 exportOptManuscriptsEl && exportOptManuscriptsEl.addEventListener('change', syncExportSteps);
 exportOptAlignmentEl && exportOptAlignmentEl.addEventListener('change', syncExportSteps);
 exportOptLemmasEl && exportOptLemmasEl.addEventListener('change', syncExportSteps);
@@ -9900,6 +10541,90 @@ function pointAt(text, line, column) {
   return row + String.fromCharCode(10) + ' '.repeat(col - 1) + '^';
 }
 
+// How a failed write is described.
+//
+// A refusal is eBL's answer, and says something about what was sent. A request
+// that never arrived is not an answer at all — "Failed to fetch" is the
+// browser reporting that it could not complete the call, and eBL never saw it.
+// Shown as a refusal, it sent editors looking for a fault in the line when the
+// fault was in the connection.
+//
+// It also cannot be said that nothing changed. A reply can be lost after eBL
+// has acted, so the write may have landed. That matters most for a section eBL
+// does not hold yet: those go as new lines and eBL appends them, so sending
+// again after a lost reply is how a chapter ends up with the omen twice.
+function failureReport(label, err) {
+  const detail = (err instanceof EblClient.EblError && err.validationErrors)
+    ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
+        .join(String.fromCharCode(10))
+    : ((err && (err.rawBody || err.message)) || String(err));
+
+  if (!(err && err.transport)) {
+    return {
+      transport: false,
+      detail,
+      title: label + ' was refused — nothing went through',
+      blocks: [
+        outcomeBanner('notsent', label, 'eBL refused it. Nothing was changed.'),
+        noteBlock('What eBL said, in full:', 'bad'),
+        rawBlock(detail),
+      ],
+    };
+  }
+  return {
+    transport: true,
+    detail,
+    title: label + ' — the request never reached eBL',
+    blocks: [
+      outcomeBanner('none', label, 'The request never reached eBL.'),
+      noteBlock('This is not a refusal: eBL did not answer, so it has said nothing'
+        + ' about the line. The usual causes are a dropped connection, a machine that'
+        + ' went offline, or a token the browser would not send.', 'bad'),
+      noteBlock('Whether it was written cannot be told from here — a reply can be lost'
+        + ' after eBL has acted. Open the chapter and look before sending again: a'
+        + ' section eBL does not hold yet is appended, so a second send would add it'
+        + ' twice.', 'warn'),
+      rawBlock(detail),
+    ],
+  };
+}
+
+// An error message with the word it is about.
+//
+// "Invalid brackets." names a whole line and leaves the editor counting
+// characters to find the one at fault. The app already knows which brackets
+// have no partner, so a bracket complaint says which word carries it — the
+// usual cause being a half-bracket pasted in from a witness, where the other
+// half belonged to a word the reading does not have.
+function describeProblem(atf, e) {
+  const message = String((e && e.message) || '');
+  if (e == null || e.line == null) return message;
+  const row = String(atf || '').split(String.fromCharCode(10))[e.line - 1];
+  if (row == null) return message;
+  if (!/bracket/i.test(message)) return message;
+
+  const bad = unmatchedBrackets(row);
+  if (!bad.size) return message;
+  // The word each unmatched bracket sits in, named once.
+  const named = [];
+  const seen = new Set();
+  const word = /\S+/g;
+  let m;
+  while ((m = word.exec(row)) !== null) {
+    for (const i of bad) {
+      if (i < m.index || i >= m.index + m[0].length) continue;
+      const what = row[i];
+      const key = what + m[0];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      named.push(what + ' in ' + m[0]);
+    }
+  }
+  return named.length
+    ? message + ' Unmatched ' + named.join(', ') + '.'
+    : message;
+}
+
 function noteBlock(text, tone) {
   return `<p class="report-note${tone ? ' is-' + tone : ''}">${escapeHtml(text)}</p>`;
 }
@@ -10006,10 +10731,16 @@ function localAlignment(m, w, positions, omitted, convert) {
 
   // A commentary quotes the same word twice — ṣal-mat stands in the lemma and
   // again in the explanation — and both halves match the one word the reading
-  // has. eBL refuses a line where two tokens claim one word, which held back
-  // the alignment of the whole chapter. So the better claim keeps the word and
-  // the repeat goes out unaligned: the quotation that agrees with the reading
-  // is the one that is really pointing at it.
+  // has. Within ONE manuscript line eBL allows only one of them: its editor
+  // hides a word already assigned on that line from the picker, and the send
+  // fails — tested on IM.74460 o 4, whose quotation and paraphrase both reach
+  // for ina SAG KIN. A different line of the same witness starts fresh (o 5a
+  // may claim what o 4 claimed), and that needs nothing here, because every
+  // manuscript line is aligned on its own.
+  //
+  // So within the line, the better claim keeps the word and the repeat goes
+  // out unaligned: the quotation that agrees with the reading is the one that
+  // is really pointing at it.
   const best = new Map();
   plan.forEach((p, i) => {
     if (p.at == null) return;
@@ -10021,7 +10752,6 @@ function localAlignment(m, w, positions, omitted, convert) {
   plan.forEach((p, i) => {
     if (p.at == null || best.get(p.at) === i) return;
     doubled++;
-    if (allowRepeatedClaims) return;   // both claims stand; eBL answers for it
     p.at = null;
     p.partner = null;
   });
@@ -10165,7 +10895,10 @@ async function buildAlignmentPayload(chapter) {
       summary.aligned += built.alignment.filter((t) => t.alignment != null).length;
       summary.variants += built.alignment.filter((t) => t.variant).length;
       summary.omitted += built.omittedWords.length;
-      return built;
+      // Only the two fields eBL's schema knows. `doubled` is this app's own
+      // counter, and eBL refuses any unknown field — sent once, it failed the
+      // validation of the whole chapter, one "Unknown field." per manuscript.
+      return { alignment: built.alignment, omittedWords: built.omittedWords };
     }));
 
     if (touched) { summary.fromHere.push(L.number); }
@@ -10398,6 +11131,15 @@ function sentState(lineNum) {
   return rec.fingerprint === fingerprint(sectionContent(lineNum)) ? 'sent' : 'changed';
 }
 
+// never    no editor has signed this section off
+// revised  read through, and the section still reads as it did
+// changed  read through, then edited — it wants reading again
+function revisedState(lineNum) {
+  const rec = revisedSections[lineNum];
+  if (!rec || !rec.fingerprint) return 'never';
+  return rec.fingerprint === fingerprint(sectionContent(lineNum)) ? 'revised' : 'changed';
+}
+
 // Repaint one line's mark without rebuilding the score.
 //
 // Editing a reading deliberately does not re-render — the caret would be
@@ -10426,6 +11168,14 @@ function refreshSentMark(lineNum) {
       mark.textContent = state === 'never' ? '·' : '✓';
       mark.title = sentTitle(lineNum);
     }
+    const rmark = line.querySelector('.line-revised');
+    if (rmark) {
+      const rstate = revisedState(lineNum);
+      rmark.classList.remove('is-never', 'is-revised', 'is-changed');
+      rmark.classList.add('is-' + rstate);
+      rmark.textContent = rstate === 'never' ? '·' : '✎';
+      rmark.title = revisedTitle(lineNum);
+    }
   }, 250);
 }
 
@@ -10439,8 +11189,11 @@ function refreshSentMark(lineNum) {
 // amber stays amber. Either way it is stamped, so this runs once.
 function migrateSentMarks() {
   let restored = 0, kept = 0;
-  for (const key of Object.keys(exportedSections)) {
-    const rec = exportedSections[key];
+  // The revision marks live under the same fingerprint, so they come forward
+  // by the same rule.
+  for (const ledger of [exportedSections, revisedSections])
+  for (const key of Object.keys(ledger)) {
+    const rec = ledger[key];
     if (!rec) continue;
     const was = rec.v || 1;
     if (was >= SENT_FINGERPRINT_VERSION) continue;
@@ -10486,6 +11239,126 @@ function sentTitle(lineNum) {
     ? 'Sent to eBL (' + what + ') on ' + when + ', and unchanged since'
     : 'Sent to eBL (' + what + ') on ' + when + ', and edited since — send it again';
 }
+
+function markRevised(lineNum) {
+  revisedSections[lineNum] = {
+    fingerprint: fingerprint(sectionContent(lineNum)),
+    at: new Date().toISOString(),
+    v: SENT_FINGERPRINT_VERSION,
+  };
+}
+
+function revisedTitle(lineNum) {
+  const rec = revisedSections[lineNum];
+  const state = revisedState(lineNum);
+  if (state === 'never') {
+    return 'Not yet revised by an editor. Click when this section has been read'
+      + ' through; shift-click to carry the mark down from the last one.';
+  }
+  const when = rec && rec.at ? new Date(rec.at).toLocaleString() : 'earlier';
+  return state === 'revised'
+    ? 'Revised by an editor on ' + when + ', and unchanged since'
+    : 'Revised on ' + when + ', and edited since — it wants reading again';
+}
+
+// ---- Export reports -------------------------------------------------------
+//
+// Every send to eBL files a report, however it went:
+//   error     nothing went through
+//   warning   the line went, a part behind it did not
+//   notice    everything went, but something is worth checking on eBL —
+//             a repeated quotation left unaligned, a witness kept under
+//             another reading
+//   ok        everything went, nothing to look at (filed already done, a log)
+//
+// The reports live in score-data.json and are shown by reports.html, a page
+// of their own, so the log can stand open beside the scorer. An error or
+// warning also puts a sign on its section here, which clears when the report
+// is ticked done on that page — a manual tick, because only the editor knows
+// the repair on eBL actually happened — or when a later send supersedes it.
+
+function openIssuesFor(sec) {
+  return exportIssues.filter((r) => !r.done && r.sec != null
+    && parseInt(r.sec, 10) === parseInt(sec, 10));
+}
+
+// The sign a section wears: the worst of its open reports, or nothing.
+// Notices carry no sign — they are the badge's and the page's business.
+function issueState(sec) {
+  const open = openIssuesFor(sec).filter((r) => r.kind === 'error' || r.kind === 'warning');
+  if (!open.length) return null;
+  return open.some((r) => r.kind === 'error') ? 'error' : 'warning';
+}
+
+function addExportIssue(o) {
+  const rec = {
+    id: Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+    sec: o.sec == null ? null : parseInt(o.sec, 10),
+    kind: o.kind,                  // error | warning | notice | ok
+    part: o.part || 'other',       // send | alignment | other
+    title: o.title,
+    // Things to check on eBL later, one line each — they stand on the report
+    // even when everything was accepted.
+    notes: (o.notes || []).slice(0, 60),
+    detail: String(o.detail || '').slice(0, 4000),
+    // The full report exactly as the overlay showed it, reopenable from the
+    // reports page. Bounded, because score-data.json is read whole.
+    report: String(o.report || '').slice(0, 120000),
+    at: new Date().toISOString(),
+    done: !!o.done,
+    doneAt: o.done ? new Date().toISOString() : null,
+    how: o.done ? (o.how || 'nothing to do') : null,
+  };
+  exportIssues.unshift(rec);
+  return rec;
+}
+
+// A newer send of the same thing states the current truth, so the reports the
+// older one left open are closed rather than piling up. Hand-written reports
+// (part 'other') are never touched — only their author knows what they mean.
+function supersedeExportIssues(part, sec) {
+  for (const r of exportIssues) {
+    if (r.done || r.part !== part) continue;
+    if (String(r.sec) !== String(sec == null ? null : parseInt(sec, 10))) continue;
+    r.done = true;
+    r.doneAt = new Date().toISOString();
+    r.how = 'superseded by a later send';
+  }
+}
+
+function updateReportsBadge() {
+  const badge = document.getElementById('reports-badge');
+  if (!badge) return;
+  const open = exportIssues.filter((r) => !r.done);
+  badge.textContent = open.length ? String(open.length) : '';
+  badge.classList.toggle('hidden', !open.length);
+  badge.classList.toggle('is-error', open.some((r) => r.kind === 'error'));
+}
+
+// The reports have a page of their own, so the log can stand open beside the
+// scorer. One named window: a second click brings it forward, not a twin.
+function openReportsPage(sec) {
+  const q = [];
+  if (projectId) q.push('project=' + encodeURIComponent(projectId));
+  if (sec != null) q.push('sec=' + encodeURIComponent(sec));
+  const w = window.open('reports.html' + (q.length ? '?' + q.join('&') : ''), 'scorer-reports');
+  if (w && w.focus) w.focus();
+}
+
+(() => {
+  const btn = document.getElementById('reports-btn');
+  if (btn) btn.addEventListener('click', () => openReportsPage(null));
+})();
+
+// The ⚠ / ✖ a section wears opens the page on that section's reports.
+document.addEventListener('click', (e) => {
+  const mark = e.target && e.target.closest ? e.target.closest('.line-issue') : null;
+  if (!mark) return;
+  const lineNum = parseInt(mark.dataset.line, 10);
+  if (!Number.isFinite(lineNum)) return;
+  e.preventDefault();
+  openReportsPage(lineNum);
+});
 
 // ---- Lemmas ---------------------------------------------------------------
 
@@ -10688,18 +11561,6 @@ async function offerRefreshSuggestions(from) {
 // usually the same ones they will settle for the next.
 let projectGlossary = {};
 
-// May two tokens of one witness point at the same word of the reading?
-//
-// A commentary quotes a lemma and then quotes it again inside its explanation,
-// and both halves answer to the one word the reading has. eBL has never stored
-// such a case — nought in fourteen thousand aligned tokens across seven
-// chapters — but that rule is inferred from its data, not documented, and it
-// has never actually been put to eBL because this app refused it first.
-//
-// Off by default, because the safe reading of silence is that it is refused.
-// On, both claims go and eBL answers for itself; the line is sent either way,
-// so the worst case is a refused alignment and a message worth reading.
-let allowRepeatedClaims = false;
 
 function applyProjectGlossary() {
   try { Lemmatizer.setGlossary(projectGlossary); } catch (_) { /* not loaded yet */ }
@@ -11111,48 +11972,36 @@ function lemmaTitle(state, ids) {
 // Shown in the score itself, not only in the send preview — it is a fact about
 // the edition, and the point of it is to see the published line before it is
 // published.
+// Judged per omen, like everything else the reader is shown: a witness that
+// needs three lines for the omen omits a word only if none of the three has
+// it, and it speaks once, not once per line.
 function daggerPositions(lineNum, vi, reading) {
   const marks = new Map();
   const words = positionWords(reading.text || '');
   const { scoreLines } = buildScore();
-  for (const w of (scoreLines[lineNum] || [])) {
-    if (w.type !== 'line' || (w.variant || 0) !== vi) continue;
-    const map = (lineAlignments[lineNum] || {})[w.siglum + '|' + w.sourceLine];
-    if (!map || !Object.keys(map).length) continue;
-    const tally = alignmentTally(lineNum, w, words);
-    const toks = witnessWords(w.content).filter((t) => t.index != null);
+  for (const om of omensOf(lineNum, vi, scoreLines)) {
     const byPos = {};
-    for (const t of toks) if (map[t.index] != null) byPos[map[t.index]] = t.text;
+    let aligned = false;
+    for (const w of om.rows) {
+      const map = (lineAlignments[lineNum] || {})[w.siglum + '|' + w.sourceLine];
+      if (!map || !Object.keys(map).length) continue;
+      aligned = true;
+      for (const t of witnessWords(w.content)) {
+        if (t.index != null && map[t.index] != null) byPos[map[t.index]] = t.text;
+      }
+    }
+    if (!aligned) continue;
+    const tally = alignmentTally(lineNum, om.rows, words);
     const note = (pos, why) => {
       if (!marks.has(pos)) marks.set(pos, []);
       marks.get(pos).push(why);
     };
-    for (const pos of tally.omitted) note(pos, displaySiglum(w.siglum) + ' omits it');
+    for (const pos of tally.omitted) note(pos, displaySiglum(om.siglum) + ' omits it');
     for (const pos of (tally.differing || [])) {
-      note(pos, displaySiglum(w.siglum) + ' reads ' + (byPos[pos] || '?'));
+      note(pos, displaySiglum(om.siglum) + ' reads ' + (byPos[pos] || '?'));
     }
   }
   return marks;
-}
-
-// The line as eBL will print it: the reading with a ‡ on every word some
-// witness reads otherwise or has not got.
-//
-// Its own row, not the reading itself. The reading is contenteditable, and a ‡
-// put inside it would be typed over, and would be read back by writeReading
-// into the text that goes to eBL — the marker is eBL's, derived from the
-// alignment, and must never become part of the reconstruction.
-function daggerLine(lineNum, vi, reading, marks) {
-  if (!marks || !marks.size) return '';
-  const words = positionWords(reading.text || '');
-  const shown = words.map((t) => {
-    if (t.pos == null) return renderAtf(t.text);
-    if (!marks.has(t.pos)) return renderAtf(t.text);
-    return `<span class="ebl-marked" title="${escapeHtml(marks.get(t.pos).join('; '))}">`
-      + `${renderAtf(t.text)}<span class="ebl-dagger">‡</span></span>`;
-  }).join(' ');
-  return `<div class="ebl-line" data-line="${lineNum}" data-variant="${vi}"`
-    + ` title="How eBL will print this line">${shown}</div>`;
 }
 
 // The lemmas of a reading, each under the word it belongs to.
@@ -11913,14 +12762,9 @@ function alignmentOutcome(r) {
     out.push(rawBlock(s.unmatched.slice(0, 10).join(String.fromCharCode(10))));
   }
   if (s.doubled && s.doubled.length) {
-    out.push(noteBlock(allowRepeatedClaims
-      ? 'A commentary quoted the same word more than once, and both quotations were'
-        + ' sent pointing at it. eBL has no stored case of this, so if it refused the'
-        + ' alignment this is the first thing to suspect.'
-      : 'A commentary may quote the same word twice, and the reading has it once. One'
-        + ' token may point at a word, so the quotation that agrees with the reading kept'
-        + ' it and the repeat went out unaligned. Turn on repeated quotations to send'
-        + ' both and let eBL answer.'));
+    out.push(noteBlock('A commentary quoted the same word twice on one line, and eBL'
+      + ' lets only one token of a line claim a word. The quotation that agrees with'
+      + ' the reading kept it; the repeat went out unaligned.'));
     out.push(rawBlock(s.doubled.slice(0, 10).join(String.fromCharCode(10))));
   }
   return out;
@@ -11973,11 +12817,12 @@ function alignmentProblems(chapter, payload) {
           }
           claimed.set(a, (claimed.get(a) || 0) + 1);
         }
-        if (!allowRepeatedClaims) {
-          for (const [a, count] of claimed) {
-            if (count > 1) out.push(at + 'word ' + a + ' (' + (toks[a] || {}).value
-              + ') is claimed by ' + count + ' tokens');
-          }
+        // Within one manuscript line, one token per word: eBL's editor hides
+        // a word already assigned on that line, and the send fails. Another
+        // line of the same witness may claim the word again — that is fine.
+        for (const [a, count] of claimed) {
+          if (count > 1) out.push(at + 'word ' + a + ' (' + (toks[a] || {}).value
+            + ') is claimed by ' + count + ' tokens of one line');
         }
         for (const o of (built.omittedWords || [])) {
           if (!(typeof o === 'number' && o >= 0 && o < n)) {
@@ -12081,14 +12926,18 @@ async function exportAlignment() {
     await EblClient.postAlignment(target, built.payload);
   } catch (err) {
     setStatus('connected', 'Ready');
-    const detail = (err instanceof EblClient.EblError && err.validationErrors)
-      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message).join('\n')
-      : (err.rawBody || err.message || String(err));
-    showComposeReport('Alignment was not sent', [
-      outcomeBanner('none', 'The chapter', 'eBL refused the payload. Nothing was changed.'),
-      noteBlock('What eBL said, in full:', 'bad'),
-      rawBlock(detail),
-    ], 'alignment-error');
+    const fail = failureReport('The chapter alignment', err);
+    const blocks = fail.blocks;
+    supersedeExportIssues('alignment', null);
+    addExportIssue({
+      sec: null, part: 'alignment', kind: 'error',
+      title: fail.title,
+      detail: fail.detail, report: blocks.join(''),
+    });
+    updateReportsBadge();
+    await saveScoreDataToFile();
+    showComposeReport(fail.transport ? 'Alignment — no answer' : 'Alignment was not sent',
+      blocks, 'alignment-error');
     return;
   }
 
@@ -12098,7 +12947,7 @@ async function exportAlignment() {
   setStatus('connected', 'Alignment sent');
   setTimeout(() => setStatus('connected', 'Ready'), 5000);
 
-  showComposeReport('Alignment sent', [
+  const blocks = [
     outcomeBanner('changed', 'The chapter', 'Read back from eBL after sending.'),
     '<div class="report-counts">'
       + `<span class="report-count"><b>${before}</b> aligned before</span>`
@@ -12109,7 +12958,28 @@ async function exportAlignment() {
       ? 'eBL kept fewer than were sent. Some tokens it did not consider alignable, or the'
         + ' reading changed under them.'
       : 'Sent from §' + s.fromHere.join(', §') + '.'),
-  ], 'alignment');
+  ];
+
+  // Filed even when clean: the reports page is the log of every send. What
+  // went but wants a look on eBL afterwards — a repeated quotation left
+  // unaligned, a witness kept under another reading — rides on it as notes.
+  const checkLater = [...(s.doubled || []), ...(s.unmatched || [])];
+  supersedeExportIssues('alignment', null);
+  addExportIssue({
+    sec: null, part: 'alignment',
+    kind: checkLater.length ? 'notice' : 'ok',
+    title: 'Chapter alignment sent'
+      + (checkLater.length ? ' — ' + checkLater.length + ' thing(s) to check on eBL' : ''),
+    notes: checkLater,
+    report: blocks.join(''),
+    done: !checkLater.length,
+    how: 'sent clean',
+  });
+  updateReportsBadge();
+  await saveScoreDataToFile();
+  keepScoreInView(renderScore);
+
+  showComposeReport('Alignment sent', blocks, 'alignment');
 }
 
 function countAlignedTokens(chapter) {
@@ -12145,6 +13015,37 @@ async function composeReading(lineNum, vi, scope) {
   const rows = (scoreLines[lineNum] || []).filter((w) => w.type === 'line');
   const asW = (w) => ({ key: w.siglum + '|' + w.sourceLine, atf: w.content });
   const group = rows.filter((w) => (w.variant || 0) === vi).map(asW);
+
+  // A witness that needs two lines for one omen is still one witness.
+  //
+  // Voting per line made AO.6450's o 31 and o 32 two manuscripts that happen
+  // to agree about nothing, and the compositor duly wove the second halves
+  // into the middle of the first: §35 came out with BURU₁₄ um-šum dan-nu
+  // sitting where BAD₄ ends, because a majority of "witnesses" had a word
+  // there. Long omens are exactly the ones this ruins.
+  //
+  // So the vote is per manuscript, its lines joined in the order the tablet
+  // has them. The alignment stays per line — each line still answers for its
+  // own words — which is why the two are worked out separately below.
+  const lineOrder = (a, b) => {
+    const n = (x) => parseInt(String(x).replace(/[^0-9]/g, ''), 10);
+    const na = n(a.sourceLine), nb = n(b.sourceLine);
+    if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+    return String(a.sourceLine).localeCompare(String(b.sourceLine), undefined, { numeric: true });
+  };
+  const asWitness = (list) => {
+    const byMs = new Map();
+    for (const w of list) {
+      if (!byMs.has(w.siglum)) byMs.set(w.siglum, []);
+      byMs.get(w.siglum).push(w);
+    }
+    const out = [];
+    for (const [siglum, lines] of byMs) {
+      lines.sort(lineOrder);
+      out.push({ key: siglum, atf: lines.map((w) => w.content).join(' ') });
+    }
+    return out;
+  };
   if (!group.length) return { skipped: 'no witnesses' };
 
   // The main reading is the section's text, so EVERY witness of the section
@@ -12168,7 +13069,7 @@ async function composeReading(lineNum, vi, scope) {
   const speaking = askedForCommentary
     ? scoped : scoped.filter((w) => !isCommentaryWitness(w.siglum));
   const setAside = scoped.length - speaking.length;
-  const voters = speaking.map(asW);
+  const voters = asWitness(speaking);
   const inGroup = new Set(group.map((w) => w.key));
   if (!voters.length) {
     return { skipped: setAside
@@ -12214,10 +13115,10 @@ async function composeReading(lineNum, vi, scope) {
   if (!r || !r.text.trim()) return { skipped: 'nothing legible' };
 
   writeReading(lineNum, vi, r.text);
-  // Measured against everyone, whoever was asked.
-  const measured = (scope && scope.kind !== 'all')
-    ? Compositor.alignToReading(r.text, rows.map(asW), convert).perWitness
-    : r.perWitness;
+  // Measured line by line, always. The vote was taken per manuscript, so what
+  // comes back from composeSection is keyed by siglum and cannot say which of
+  // a tablet's two lines a word sits on. The alignment has to.
+  const measured = Compositor.alignToReading(r.text, rows.map(asW), convert).perWitness;
   if (!lineAlignments[lineNum]) lineAlignments[lineNum] = {};
   // Only this reading's own witnesses get an alignment against it. A
   // variant's witness voted here but answers to its own reading.
@@ -12895,7 +13796,12 @@ async function exportOmen(lineNum) {
       return;
     }
 
-    const problems = await validateAtfForExport(atf);
+    // Asked in full, so a check that could not run is not mistaken for a clean
+    // one. A validator that is present but fails on the day — killed mid-parse,
+    // answering an error — used to come back as an empty problem list, and the
+    // section went to eBL as though it had passed.
+    const check = await validateAtfDetailed(atf);
+    const problems = check.problems;
     if (problems.length) {
       setStatus('connected', 'Ready');
       showComposeReport(label + ' — not sent', [
@@ -12903,7 +13809,8 @@ async function exportOmen(lineNum) {
           + (problems.length === 1 ? '' : 's') + ' — nothing was sent.'),
         rawBlock(problems.map((e) => {
           const where = 'Line ' + (e.line == null ? '?' : e.line)
-            + (e.column == null ? '' : ', col ' + e.column) + ': ' + e.message;
+            + (e.column == null ? '' : ', col ' + e.column) + ': '
+            + describeProblem(atf, e);
           const at = e.line == null ? '' : pointAt(atf, e.line, e.column);
           return at ? where + String.fromCharCode(10) + String.fromCharCode(10) + at : where;
         }).join(String.fromCharCode(10) + String.fromCharCode(10))),
@@ -12950,8 +13857,10 @@ async function exportOmen(lineNum) {
             + ' lemma of whatever it is aligned to.')
         : noteBlock('No word of this section carries a lemma yet. Turn on Lemmas to'
             + ' fill them in.'),
-      localValidatorAvailable ? '' : noteBlock('No local validator here, so the ATF was not'
-        + ' checked first — eBL will check it.', 'warn'),
+      check.checked ? '' : noteBlock('The ATF was not checked here — '
+        + (check.why || 'the validator did not answer')
+        + '. eBL will be the first to read it, and refuses the whole line if it'
+        + ' disagrees.', 'warn'),
     ], 'Send ' + label, true);
     if (!ok) return;
 
@@ -12964,6 +13873,17 @@ async function exportOmen(lineNum) {
     setStatus('connected', label + ' — sending the line…');
     const res = await exportSingleLine(target, lineNum);
     const what = res.inserted ? 'added to' : 'updated on';
+
+    // The line is on eBL now, so that is written down now.
+    //
+    // The record used to be kept until the alignment and the lemmas had also
+    // been tried, which meant a follow-up that hung took the record of a
+    // successful line with it: the section stayed unmarked and no report was
+    // filed, though the line had landed. What is true is recorded when it
+    // becomes true.
+    markSent(lineNum, ['line']);
+    await saveScoreDataToFile();
+    keepScoreInView(renderScore);
 
     // Step two. The line is already committed, so from here nothing may throw
     // out of the whole export — a failed alignment is reported beside a
@@ -12990,12 +13910,6 @@ async function exportOmen(lineNum) {
     if (realign && realign.sent) went.push('alignment');
     if (lemmaWork && lemmaWork.sent) went.push('lemmas');
     markSent(lineNum, went);
-    await saveScoreDataToFile();
-    // Repaint, or the mark stays as it was until something else redraws.
-    keepScoreInView(renderScore);
-
-    setStatus('connected', label + ' ' + what + ' eBL');
-    setTimeout(() => setStatus('connected', 'Ready'), 5000);
 
     const url = 'https://www.ebl.lmu.de/corpus/' + target.genre + '/' + target.category
       + '/' + target.index + '/' + target.stage + '/' + target.name;
@@ -13014,19 +13928,65 @@ async function exportOmen(lineNum) {
     blocks.push(noteBlock('Reload eBL to see it — the chapter page is cached.'));
     blocks.push('<p class="report-note"><a href="' + url + '" target="_blank" rel="noopener noreferrer">'
       + 'View the chapter on eBL →</a></p>');
+
+    // Every send files a report on the reports page, clean ones included —
+    // that page is the log. What failed makes it a warning; what went but
+    // wants a later look on eBL — a repeated quotation left unaligned, a
+    // witness kept under another reading — rides on it as notes.
+    const failedParts = [];
+    const failDetail = [];
+    for (const [part, r2] of [['alignment', realign], ['lemmas', lemmaWork]]) {
+      if (!r2 || r2.skipped || r2.sent) continue;
+      failedParts.push(part);
+      failDetail.push(part + ': ' + (r2.failed ? String(r2.failed)
+        : (r2.problems || []).slice(0, 20).join(String.fromCharCode(10))));
+    }
+    const checkLater = [
+      ...((realign && realign.summary && realign.summary.doubled) || []),
+      ...((realign && realign.summary && realign.summary.unmatched) || []),
+      ...((lemmaWork && lemmaWork.summary && lemmaWork.summary.mismatched) || []),
+    ];
+    supersedeExportIssues('send', lineNum);
+    addExportIssue({
+      sec: lineNum, part: 'send',
+      kind: failedParts.length ? 'warning' : (checkLater.length ? 'notice' : 'ok'),
+      title: failedParts.length
+        ? label + ' — the line went, the ' + failedParts.join(' and ') + ' did not'
+        : checkLater.length
+          ? label + ' sent — ' + checkLater.length + ' thing(s) to check on eBL'
+          : label + ' sent (' + went.join(', ') + ')',
+      notes: checkLater,
+      detail: failDetail.join(String.fromCharCode(10) + String.fromCharCode(10)),
+      report: blocks.join(''),
+      done: !failedParts.length && !checkLater.length,
+      how: 'sent clean',
+    });
+    updateReportsBadge();
+    await saveScoreDataToFile();
+    // Repaint, or the mark stays as it was until something else redraws.
+    keepScoreInView(renderScore);
+
+    setStatus('connected', label + ' ' + what + ' eBL');
+    setTimeout(() => setStatus('connected', 'Ready'), 5000);
+
     showComposeReport(label + ' — sent', blocks, 'export-' + lineNum);
   } catch (err) {
     setStatus('connected', 'Ready');
-    const detail = (err instanceof EblClient.EblError && err.validationErrors)
-      ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
-          .join(String.fromCharCode(10))
-      : (err.rawBody || err.message || String(err));
-    showComposeReport(label + ' — not sent', [
-      outcomeBanner('notsent', label, 'eBL refused it. Nothing was changed.'),
-      noteBlock('What eBL said, in full:', 'bad'),
-      rawBlock(detail),
-      noteBlock('Press Copy below to send this on.'),
-    ], 'export-error-' + lineNum);
+    const fail = failureReport(label, err);
+    const blocks = fail.blocks.concat([noteBlock('Press Copy below to send this on.')]);
+    // Nothing came back: the section wears an error until a later send
+    // supersedes it or the editor repairs it on eBL and ticks the report done.
+    supersedeExportIssues('send', lineNum);
+    addExportIssue({
+      sec: lineNum, part: 'send', kind: 'error',
+      title: fail.title,
+      detail: fail.detail, report: blocks.join(''),
+    });
+    updateReportsBadge();
+    await saveScoreDataToFile();
+    keepScoreInView(renderScore);
+    showComposeReport(label + (fail.transport ? ' — no answer' : ' — not sent'),
+      blocks, 'export-error-' + lineNum);
   }
 }
 
@@ -13218,12 +14178,43 @@ async function runExport() {
   exportProgressEl.classList.remove('hidden');
   exportResultEl.classList.add('hidden');
 
-  const setStep = (step, state) => {
+  // A step that is working says so, and for how long.
+  //
+  // Some of these are minutes of honest work — validating sixty sections is
+  // hundreds of lines through an Earley parser, and the alignment and lemma
+  // steps each read the whole chapter and write it back. With only a "…" to go
+  // on there is no way to tell a long step from a dead one, which is the
+  // question anyone watching actually has.
+  const setStep = (step, state, note) => {
     const el = exportProgressEl.querySelector(`.export-step[data-step="${step}"]`);
     if (!el) return;
+    // Marking a running step running again only adds to what it says — the
+    // clock keeps counting from when the work actually began.
+    const wasRunning = el.classList.contains('running');
     el.classList.remove('running', 'done', 'error');
     el.classList.add(state);
-    if (state === 'running') el.querySelector('.step-icon').textContent = '…';
+    let out = el.querySelector('.step-time');
+    if (!out) {
+      out = document.createElement('span');
+      out.className = 'step-time';
+      el.appendChild(out);
+    }
+    clearInterval(stepTimers[step]);
+    if (state !== 'running') {
+      // Freeze whatever it took, so a finished run still shows where the time
+      // went rather than resetting to nothing.
+      const held = stepStarted[step];
+      out.textContent = held ? ' ' + elapsedSince(held) : '';
+      return;
+    }
+    el.querySelector('.step-icon').textContent = '…';
+    const t0 = (wasRunning && stepStarted[step]) ? stepStarted[step] : Date.now();
+    stepStarted[step] = t0;
+    const tick = () => {
+      out.textContent = ' ' + elapsedSince(t0) + (note ? ' · ' + note : '');
+    };
+    tick();
+    stepTimers[step] = setInterval(tick, 1000);
   };
 
   const mode = selectedExportMode();
@@ -13236,6 +14227,18 @@ async function runExport() {
   // emptied when the failure hit, and point at the backup if so.
   let backupName = null;
   let deleted = 0;
+  // Set when the ATF could not be checked, and carried into whatever the
+  // export reports, so no result ever implies a check that did not happen.
+  let uncheckedNote = '';
+  // The text the validator was given, so a rejection can point into it.
+  let checkedAtf = '';
+  // Per step: the interval painting its clock, and when it started.
+  const stepTimers = {};
+  const stepStarted = {};
+  const elapsedSince = (t0) => {
+    const sec = Math.round((Date.now() - t0) / 1000);
+    return sec < 60 ? sec + 's' : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
+  };
 
   try {
     // Always validate first. On a replace this is the difference between a
@@ -13252,6 +14255,82 @@ async function runExport() {
     // Lemmas carry no ATF either, and answer for the whole chapter.
     if (mode === 'lemmas') {
       await exportLemmatization();
+      return;
+    }
+
+    // A trim removes lines and writes none, so it validates nothing and asks
+    // for itself. Irreversible on eBL, so it says exactly what goes and backs
+    // the chapter up first.
+    if (mode === 'trim') {
+      const plan = trimPlan(selectedTrimFrom());
+      if (!plan) {
+        throw new ExportAborted('Type a position between 1 and '
+          + ((exportPreflight && exportPreflight.lines || []).length || 0) + '.', []);
+      }
+      const ok = await askOverlay('Remove ' + plan.going.length + ' line'
+        + (plan.going.length === 1 ? '' : 's') + ' from eBL?', [
+        outcomeBanner('notsent', 'The chapter', 'Nothing is removed until you confirm.'),
+        noteBlock('These go, from position ' + plan.from + ' to the end:'),
+        rawBlock(plan.going.map((g) => String(g.position).padStart(4) + '  §'
+          + g.number + '  ' + String(g.text).slice(0, 60)).join(String.fromCharCode(10))),
+        noteBlock(plan.keeping + ' line(s) above are untouched and keep their lemmas'
+          + ' and alignment.'),
+        noteBlock('The lemmas and alignment eBL holds for the removed lines go with them.'
+          + ' This project can send them again, but anything aligned only on eBL is gone.', 'warn'),
+        noteBlock('The chapter is backed up to the project folder first.'),
+      ], 'Remove ' + plan.going.length + ' line(s)', true);
+      // Cancelling is not a failure; nothing was attempted.
+      if (!ok) { exportProgressEl.classList.add('hidden'); return; }
+
+      setStep('backup', 'running');
+      const chapter = await EblClient.getChapter(target);
+      if (dirHandle) {
+        backupName = await FileSystem.writeProjectFile(
+          dirHandle, `ebl-chapter-backup-${stamp}.json`, JSON.stringify(chapter, null, 2));
+      }
+      setStep('backup', 'done');
+
+      setStep('delete', 'running');
+      await EblClient.postLines(target, { deleted: plan.indices });
+      deleted = plan.indices.length;
+      setStep('delete', 'done');
+
+      // Read it back rather than assuming: the count is the one fact worth
+      // having, and it comes from eBL.
+      await loadExportPreflight(target);
+      renderExportPreflight();
+      renderExportEffect();
+
+      const left = (exportPreflight && !exportPreflight.error) ? exportPreflight.lineCount : null;
+      const blocks = [
+        outcomeBanner('changed', 'The chapter', deleted + ' line(s) removed; '
+          + (left == null ? '?' : left) + ' remain.'),
+        rawBlock(plan.going.map((g) => '§' + g.number).join(', ')),
+        noteBlock('Send those sections again to put them back — in ascending order, so'
+          + ' each is above everything left and lands in place.'),
+      ];
+      addExportIssue({
+        sec: null, part: 'send', kind: 'notice',
+        title: deleted + ' line(s) removed from the end of the chapter',
+        notes: plan.going.map((g) => '§' + g.number + ' removed — send it again'),
+        report: blocks.join(''),
+      });
+      updateReportsBadge();
+      await saveScoreDataToFile();
+
+      exportResultEl.classList.remove('hidden');
+      exportResultEl.classList.remove('failure');
+      exportResultEl.classList.add('success');
+      exportResultEl.innerHTML = `Removed <strong>${deleted}</strong> line(s); `
+        + `${left == null ? '?' : left} remain.`
+        + (backupName ? ` Backup saved as <code>${escapeHtml(backupName)}</code>.` : '')
+        + ' Send those sections again, in ascending order, to put them back in place.'
+        + '<div class="export-readback">eBL now holds <strong>' + (left == null ? '?' : left)
+        + '</strong> line(s)'
+        + (exportPreflight && exportPreflight.first && exportPreflight.last
+            ? ` (§${exportPreflight.first}–§${exportPreflight.last})` : '')
+        + ' — read back from its API just now. The chapter page on eBL is cached, so'
+        + ' reload it there before believing an older number.</div>';
       return;
     }
 
@@ -13273,10 +14352,17 @@ async function runExport() {
     }
 
     setStep('validate', 'running');
-    const problems = await validateAtfForExport(
-      mode === 'line' ? await buildSingleLineAtf(lineNum)
+    // What is actually checked in line and range mode is only those sections,
+    // so the error line numbers address that text and not the whole chapter.
+    // Reporting them against the full artifact pointed the caret and the
+    // highlighted rows at whatever happened to sit at that line number.
+    checkedAtf = mode === 'line' ? await buildSingleLineAtf(lineNum)
       : mode === 'range' ? await buildSingleLineAtf(rangeNums)
-      : wireAtf);
+      : wireAtf;
+    const rowCount = checkedAtf.split(String.fromCharCode(10)).filter((r) => r.trim()).length;
+    setStep('validate', 'running', rowCount + ' rows');
+    const check = await validateAtfDetailed(checkedAtf);
+    const problems = check.problems;
     if (problems && problems.length) {
       setStep('validate', 'error');
       throw new ExportAborted(
@@ -13284,7 +14370,19 @@ async function runExport() {
         problems
       );
     }
-    setStep('validate', 'done');
+    // A check that did not run is not a clean bill of health. It used to be
+    // indistinguishable from one: a validator killed mid-parse came back as a
+    // server error, the error came back as an empty problem list, and the
+    // export went out looking as though it had passed. A range of any size
+    // was the usual way to hit it.
+    if (!check.checked) {
+      setStep('validate', 'error');
+      uncheckedNote = '<div class="export-unchecked"><strong>The ATF was not checked here.</strong> '
+        + escapeHtml(check.why || 'the validator did not answer')
+        + '. eBL checks it on the way in and refuses the whole request if it disagrees.</div>';
+    } else {
+      setStep('validate', 'done');
+    }
 
     if (exportOptSaveAtfEl && exportOptSaveAtfEl.checked && dirHandle) {
       await FileSystem.writeProjectFile(dirHandle, `export-${stamp}.atf`, wireAtf);
@@ -13294,9 +14392,9 @@ async function runExport() {
       exportResultEl.classList.remove('hidden');
       exportResultEl.classList.add('success');
       exportResultEl.classList.remove('failure');
-      exportResultEl.innerHTML = localValidatorAvailable
+      exportResultEl.innerHTML = check.checked
         ? `Valid. ${countArtifactLines()} chapter lines ready to send. Nothing was written to eBL.`
-        : 'No local validator in browser mode, so the ATF was not checked. Nothing was written to eBL.';
+        : uncheckedNote + 'The ATF was not checked. Nothing was written to eBL.';
       return;
     }
 
@@ -13351,6 +14449,13 @@ async function runExport() {
       const res = await exportLineRange(target, rangeNums);
       setStep('line', 'done');
 
+      // The lines are on eBL. Written down before the follow-ups, which are
+      // whole-chapter writes and the slowest part of any send — one of them
+      // stalling must not cost the record of what already succeeded.
+      for (const n of rangeNums) markSent(n, ['line']);
+      await saveScoreDataToFile();
+      keepScoreInView(renderScore);
+
       const url = `https://www.ebl.lmu.de/corpus/${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`;
       const added = res.results.filter((r) => r.inserted).length;
       let html = `Sent ${res.results.length} line${res.results.length === 1 ? '' : 's'}`
@@ -13367,9 +14472,12 @@ async function runExport() {
       exportResultEl.classList.remove('hidden');
       exportResultEl.classList.remove('failure');
       exportResultEl.classList.add('success');
-      exportResultEl.innerHTML = html
+      const back = await readBackNote(target);
+      exportResultEl.innerHTML = uncheckedNote + html
         + ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`
-        + after.join('');
+        + after.join('') + back;
+      fileExportReport('§' + rangeNums[0] + '–§' + rangeNums[rangeNums.length - 1],
+        rangeNums, res, after.concat([back]));
       return;
     }
 
@@ -13377,6 +14485,10 @@ async function runExport() {
       setStep('line', 'running');
       const res = await exportSingleLine(target, lineNum);
       setStep('line', 'done');
+
+      markSent(lineNum, ['line']);
+      await saveScoreDataToFile();
+      keepScoreInView(renderScore);
 
       const url = `https://www.ebl.lmu.de/corpus/${target.genre}/${target.category}/${target.index}/${target.stage}/${target.name}`;
       let html = res.inserted
@@ -13393,9 +14505,11 @@ async function runExport() {
       exportResultEl.classList.remove('hidden');
       exportResultEl.classList.remove('failure');
       exportResultEl.classList.add('success');
-      exportResultEl.innerHTML = html +
+      const back = await readBackNote(target);
+      exportResultEl.innerHTML = uncheckedNote + html +
         ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`
-        + after.join('');
+        + after.join('') + back;
+      fileExportReport('§' + lineNum, [lineNum], res, after.concat([back]));
       return;
     }
 
@@ -13431,7 +14545,19 @@ async function runExport() {
     exportResultEl.classList.remove('hidden');
     exportResultEl.classList.add('success');
     exportResultEl.classList.remove('failure');
-    exportResultEl.innerHTML = `${summary}${backupNote} <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`;
+    const back = await readBackNote(target);
+    exportResultEl.innerHTML = `${uncheckedNote}${summary}${backupNote} <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>` + back;
+    // A whole-chapter write left no trace on the reports page either.
+    addExportIssue({
+      sec: null, part: 'send', kind: 'ok',
+      title: mode === 'replace' ? 'The chapter was replaced' : 'Lines were imported',
+      report: [outcomeBanner('changed', 'The chapter', summary),
+        backupName ? noteBlock('Backup saved as ' + backupName) : '',
+        noteBlock('Send the alignment and then the lemmas to put them back.')].join(''),
+      done: true, how: 'sent clean',
+    });
+    updateReportsBadge();
+    await saveScoreDataToFile();
   } catch (err) {
     // Figure out which step failed by looking for which step is currently running
     const running = exportProgressEl.querySelector('.export-step.running');
@@ -13443,15 +14569,21 @@ async function runExport() {
 
     if (err instanceof ExportAborted) {
       const shown = err.problems.slice(0, VALIDATE_MAX_ERRORS);
+      const source = checkedAtf || exportArtifactAtf;
       exportResultEl.innerHTML =
-        `<strong>${escapeHtml(err.message)}</strong><br>` +
-        shown.map((e) => escapeHtml(
-          (e.line != null ? `Line ${e.line}: ` : '') +
-          (e.column != null ? `col ${e.column}: ` : '') + e.message
-        )).join('<br>');
+        `<strong>${escapeHtml(err.message)}</strong>` +
+        shown.map((e) => {
+          const where = (e.line != null ? `Line ${e.line}` : '')
+            + (e.column != null ? `, col ${e.column}` : '');
+          const at = e.line == null ? '' : pointAt(source, e.line, e.column);
+          return `<div class="export-problem"><b>${escapeHtml(where)}</b> — `
+            + escapeHtml(describeProblem(source, e))
+            + (at ? `<pre>${escapeHtml(at)}</pre>` : '') + '</div>';
+        }).join('');
       // Mark the offending rows in the preview and open it, so the error
-      // has somewhere to point.
-      renderExportPreview(exportArtifactAtf, err.problems);
+      // has somewhere to point — against the text that was checked, which in
+      // line and range mode is only the sections being sent.
+      renderExportPreview(source, err.problems);
       const wrap = document.getElementById('export-preview-wrap');
       if (wrap) wrap.open = true;
     } else if (err instanceof EblClient.EblError) {
@@ -13459,15 +14591,49 @@ async function runExport() {
       const details = validationErrors
         ? validationErrors.map((e) => (e.line != null ? `Line ${e.line}: ${e.message}` : e.message)).join('<br>')
         : escapeHtml(err.rawBody || err.message);
-      exportResultEl.innerHTML = `<strong>${escapeHtml(err.message)}</strong><br>${details}`;
+      // A request that never arrived is not a refusal, and after one it is not
+      // known whether the write landed.
+      const fail = failureReport('The chapter', err);
+      exportResultEl.innerHTML = err.transport
+        ? `<div class="export-unchecked"><strong>The request never reached eBL.</strong>`
+          + ` ${escapeHtml(err.message)}<br>eBL has not answered, so whether anything`
+          + ` was written cannot be told from here — look at the chapter before`
+          + ` sending again.</div>`
+        : `<strong>${escapeHtml(err.message)}</strong><br>${details}`;
       // Also in the overlay, where it can be copied out whole.
-      showComposeReport('eBL refused it', [
-        outcomeBanner('none', 'The chapter', 'Nothing was changed.'),
-        noteBlock(err.message, 'bad'),
-        rawBlock(validationErrors
-          ? validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message).join(String.fromCharCode(10))
-          : (err.rawBody || err.message)),
-      ], 'export-error');
+      showComposeReport(err.transport ? 'No answer from eBL' : 'eBL refused it',
+        fail.blocks, 'export-error');
+      // And on the reports page, which is where a failed run is looked for
+      // afterwards — especially one that was left running unattended.
+      //
+      // Which sections wear the failure depends on where it fell. A line step
+      // that failed means none of them went, and each should say so in the
+      // score; a follow-up that failed means the lines are on eBL and only the
+      // chapter-wide part is outstanding.
+      const failedStep = running ? running.dataset.step : null;
+      const perSection = (failedStep === 'line' || failedStep === 'validate'
+        || failedStep === 'manuscripts')
+        ? (mode === 'range' ? (rangeNums || []) : (lineNum != null ? [lineNum] : []))
+        : [];
+      if (perSection.length && perSection.length <= 60) {
+        for (const n of perSection) {
+          supersedeExportIssues('send', n);
+          addExportIssue({
+            sec: n, part: 'send', kind: 'error',
+            title: '§' + n + ' — ' + fail.title,
+            detail: fail.detail, report: fail.blocks.join(''),
+          });
+        }
+      } else {
+        addExportIssue({
+          sec: (mode === 'line' && lineNum != null) ? lineNum : null,
+          part: 'send', kind: 'error', title: fail.title,
+          detail: fail.detail, report: fail.blocks.join(''),
+        });
+      }
+      updateReportsBadge();
+      saveScoreDataToFile();
+      keepScoreInView(renderScore);
       // eBL's own line numbers address the ATF we sent, which is what the
       // preview shows.
       if (validationErrors) {
@@ -13490,6 +14656,7 @@ async function runExport() {
           : 'Fix the ATF and export again.');
     }
   } finally {
+    for (const k of Object.keys(stepTimers)) clearInterval(stepTimers[k]);
     exportGoBtn.disabled = false;
   }
 }

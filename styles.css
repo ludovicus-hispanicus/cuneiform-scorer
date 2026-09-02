@@ -1283,6 +1283,24 @@ body.dark-mode .parallels-kwic-hit {
   border-bottom: 3px solid var(--border-color);
 }
 
+/* An omen long enough to fill the screen leaves its reading off the top of it,
+   and the witnesses below become a column of words measured against nothing
+   visible. While a section is being positioned or lemmatized, its reading
+   stays at the top of the scroll area for as long as the section is in view —
+   the next one pushes it off, which is the behaviour a reader expects.
+
+   Sticky rather than an overlay: an overlay is a second render path with its
+   own drag targets, keyboard and buttons to keep in step, and the problem is
+   only that the ruler scrolls away. */
+.score-line.is-working > .score-line-header {
+  position: sticky;
+  top: -0.25rem;
+  z-index: 5;
+  /* Opaque, or the witnesses show through as they pass under it. */
+  background: var(--accent-light);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
 .score-line:last-child {
   padding-bottom: 0;
   border-bottom: 0;
@@ -1830,6 +1848,83 @@ body.dark-mode .reconstructed-text:empty::before {
   font-family: "Consolas", "Monaco", monospace;
   opacity: 0.85;
   user-select: none;
+}
+
+/* One position, lifted out of the page. Hovering a witness word raises the
+   reading word it answers to; hovering a reading word raises every witness
+   word answering to it. The colour says which column — the relief says it
+   louder, and only for the word in hand. */
+.pos-word {
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+.pos-word.is-relief,
+.pos-word.is-held {
+  position: relative;
+  z-index: 2;
+  transform: translateY(-2px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35),
+              inset 0 0 0 1.5px rgba(255, 255, 255, 0.55);
+}
+body.dark-mode .pos-word.is-relief,
+body.dark-mode .pos-word.is-held {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.65),
+              inset 0 0 0 1.5px rgba(255, 255, 255, 0.35);
+}
+/* A word can be asked about — in the reading, or in any witness that places
+   one there. Both open the same count. */
+.reconstructed-text.is-positions .pos-word[data-pos] { cursor: pointer; }
+.witness-text.is-positions .pos-word:has(.pos-input) { cursor: pointer; }
+
+/* A witness spread over several lines gives its verdict once, under the last
+   of them. The lines above say only that the omen goes on. */
+.pos-tally.is-continues {
+  opacity: 0.35;
+  letter-spacing: 0.15em;
+}
+
+/* The count behind a click: 5/2 — five lines have a word here, two of them
+   twice — with the lines named. What an editor weighs when deciding between
+   the reconstruction and a variant. */
+.pos-usage-pop {
+  position: fixed;
+  z-index: 3000;
+  max-width: 26rem;
+  padding: 0.55rem 0.8rem 0.65rem;
+  background: var(--bg-white, #fff);
+  color: var(--text-dark, #2e2a24);
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+  font-size: 0.83rem;
+  line-height: 1.4;
+}
+.pos-usage-pop .pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.15rem;
+}
+.pos-usage-pop .pop-pos {
+  font-size: 0.72rem;
+  color: var(--text-muted, #8a8178);
+}
+.pos-usage-pop .pop-big {
+  font-size: 1.45rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.pos-usage-pop .pop-say {
+  color: var(--text-muted, #8a8178);
+  margin-bottom: 0.4rem;
+}
+.pos-usage-pop .pop-row { margin: 0.12rem 0; }
+.pos-usage-pop .pop-k {
+  display: inline-block;
+  min-width: 6.5rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #8a8178);
 }
 
 /* The box you type the position into. Sized for two digits and no more, so a
@@ -5233,8 +5328,11 @@ body.dark-mode {
 }
 
 /* Whether this section is on eBL, and whether it still reads as it did when it
-   went. Not a button — it reports, it does not act. */
-.line-sent {
+   went — and, beside it, whether a human editor has read it through. Two
+   ledgers, one dress: a tick for the machine's send, a pencil for the
+   editor's pass. */
+.line-sent,
+.line-revised {
   font: inherit;
   font-size: 0.8rem;
   line-height: 1;
@@ -5246,16 +5344,60 @@ body.dark-mode {
   cursor: pointer;
   user-select: none;
 }
-.line-sent:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.12)); border-radius: 3px; }
-.line-sent.is-never { color: var(--text-muted, #8a8178); }
-.line-sent.is-sent { color: var(--lem-hand, #2f7d4f); opacity: 1; }
-/* Sent, then edited. The tick stays — it did go — but it is struck through,
-   because what is on eBL is no longer what is here. */
-.line-sent.is-changed {
+.line-sent:hover,
+.line-revised:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.12)); border-radius: 3px; }
+.line-sent.is-never,
+.line-revised.is-never { color: var(--text-muted, #8a8178); }
+.line-sent.is-sent,
+.line-revised.is-revised { color: var(--lem-hand, #2f7d4f); opacity: 1; }
+/* Sent (or revised), then edited. The mark stays — it did happen — but it is
+   struck through, because what was approved is no longer what is here. */
+.line-sent.is-changed,
+.line-revised.is-changed {
   color: var(--lem-auto, #9a6b12);
   opacity: 1;
   text-decoration: line-through;
 }
+
+/* What the last send left broken: ✖ when nothing went through, ⚠ when parts
+   did. Clicking opens the report; the sign clears when the report is ticked
+   done — by a hand on eBL, or by a later send that succeeds. */
+.line-issue {
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  width: 1.1rem;
+  padding: 0.12rem 0;
+  border: 0;
+  background: transparent;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+.line-issue:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.12)); border-radius: 3px; }
+.line-issue.is-warning { color: var(--changed-accent, #9a6b12); }
+.line-issue.is-error { color: var(--issue-accent, #b3402f); }
+:root { --issue-accent: #b3402f; --issue-light: #f9e4e0; }
+body.dark-mode { --issue-accent: #e0806f; --issue-light: #3b2723; }
+
+/* The count of open export reports, worn by the Reports button. */
+.reports-badge {
+  display: inline-block;
+  min-width: 1.1em;
+  margin-left: 0.35em;
+  padding: 0.05em 0.35em;
+  border-radius: 999px;
+  font-size: 0.72em;
+  line-height: 1.4;
+  text-align: center;
+  background: var(--changed-light, #fbf1dc);
+  color: var(--changed-accent, #9a6b12);
+}
+.reports-badge.is-error {
+  background: var(--issue-light, #f9e4e0);
+  color: var(--issue-accent, #b3402f);
+}
+
 
 /* ---- A line wears whether it is on eBL ----------------------------------
    Blue is the ordinary state: nothing has been sent from here. Green means
@@ -5327,22 +5469,9 @@ body.dark-mode {
 }
 
 /* The ‡ eBL prints on a word some witness reads otherwise or has not got.
-   Shown here so the published line can be read before it is published. */
-/* The line as eBL will print it, under the reading it belongs to. Quieter than
-   the reading — it is not another reading, it is the same one seen from the
-   other side. */
-.ebl-line {
-  margin: 0.1rem 0 0.2rem calc(1.25rem + var(--score-rule-width) + var(--score-gutter));
-  font-size: 0.82rem;
-  color: var(--text-muted);
-  line-height: 1.35;
-}
-.ebl-marked { cursor: help; }
-.ebl-dagger {
-  color: var(--accent);
-  font-weight: 700;
-  padding-left: 0.05rem;
-}
+   It rides on the word itself in Positions and Lemmas mode; the repeated copy
+   of the whole reading that used to carry it said nothing the marks on the
+   words do not. */
 .pos-dagger {
   font-size: 0.72rem;
   opacity: 0.8;
@@ -5390,3 +5519,89 @@ body.is-moving-witness .score-line-header { transition: outline-color 0.1s; }
   margin-left: 0.6rem;
 }
 .export-range-to.hidden { display: none; }
+
+/* Toggles that had no rule to answer to.
+   styles.css carries no blanket `.hidden`, so a class added by script only
+   hides where a rule says it does. These two were toggled per mode and never
+   moved: the section box sat under every mode, and the line-only options
+   under modes that cannot use them. */
+.export-line-picker.hidden { display: none; }
+.export-opt-lines.hidden { display: none; }
+
+/* Said when the ATF could not be checked before it went. Never a quiet
+   omission: what eBL gets is then the first thing to have read it. */
+.export-unchecked {
+  margin-bottom: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid var(--changed-accent, #9a6b12);
+  background: var(--changed-light, #fbf1dc);
+  color: var(--changed-accent, #9a6b12);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* One rejected row, with the character it stumbled on under a caret. Counting
+   to column 69 by eye is not a thing anyone should have to do. */
+.export-problem {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+.export-problem pre {
+  margin: 0.25rem 0 0;
+  padding: 0.4rem 0.5rem;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  background: var(--hover-bg, rgba(122, 92, 62, 0.1));
+  border-radius: 4px;
+}
+
+/* How long a step has been working. The answer to "is this still alive?" */
+.step-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+/* Opens the read-only listing of what eBL holds, beside the line count it
+   summarises. */
+.ebl-lines-btn {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.45rem;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.ebl-lines-btn:hover { background: var(--hover-bg, rgba(122, 92, 62, 0.12)); }
+.ebl-lines-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* The trim picker's reminder of how far "the end" reaches. */
+.export-trim-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* The report and the confirm overlay share #compose-report, and both are
+   opened from on top of the export dialog — which sits later in the document
+   and so won, both being `.modal` at the same depth. A confirmation nobody
+   can see is a button that does nothing: the trim asked, the answer never
+   came, and the export looked broken. */
+#compose-report { z-index: 1100; }
+
+/* What eBL's API returned right after a write. Not the same thing as what its
+   cached chapter page is showing. */
+.export-readback {
+  margin-top: 0.6rem;
+  padding: 0.45rem 0.65rem;
+  border-left: 3px solid var(--sent-accent, #2f7d4f);
+  background: var(--sent-light, #e6f4ec);
+  color: var(--sent-accent, #2f7d4f);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
