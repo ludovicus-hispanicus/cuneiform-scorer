@@ -5605,3 +5605,43 @@ body.is-moving-witness .score-line-header { transition: outline-color 0.1s; }
   border-radius: 4px;
   font-size: 0.85rem;
 }
+
+/* A send's own line in the header.
+   It shares nothing with the save status beside it: an autosave lands
+   whenever anything is touched, and it used to write "Saved" straight over
+   "sending the lemmas…". */
+.export-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: var(--changed-light, #fbf1dc);
+  color: var(--changed-accent, #9a6b12);
+  white-space: nowrap;
+}
+.export-status.hidden { display: none; }
+.export-status .export-status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+  animation: export-status-pulse 1.2s ease-in-out infinite;
+}
+.export-status.is-done {
+  background: var(--sent-light, #e6f4ec);
+  color: var(--sent-accent, #2f7d4f);
+}
+.export-status.is-error {
+  background: var(--issue-light, #f9e4e0);
+  color: var(--issue-accent, #b3402f);
+}
+/* Finished or failed, it holds still — a pulse would say it was still working. */
+.export-status.is-done .export-status-dot,
+.export-status.is-error .export-status-dot { animation: none; }
+.export-status-time { font-variant-numeric: tabular-nums; opacity: 0.75; }
+@keyframes export-status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}

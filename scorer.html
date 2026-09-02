@@ -56,6 +56,13 @@
         <span id="status-indicator" class="gdrive-indicator connected"></span>
         <span id="status-text">Ready</span>
       </div>
+      <!-- A send has a line of its own. It shares nothing with the save
+           status, which used to overwrite it mid-export. -->
+      <div id="export-status" class="export-status hidden">
+        <span class="export-status-dot"></span>
+        <span id="export-status-text"></span>
+        <span id="export-status-time" class="export-status-time"></span>
+      </div>
       <button id="save-btn" title="Save (Ctrl+S)">Save</button>
       <button id="search-all-btn" title="Search all sources (Ctrl+Shift+F)">Search All</button>
       <button id="add-manuscript-btn">+ Add</button>

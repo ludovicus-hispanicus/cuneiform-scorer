@@ -169,6 +169,64 @@ function syncReconstructedToYjs(lineNum, text) {
 // STATUS INDICATOR
 // ===========================================
 
+// A send says what it is doing on a line of its own.
+//
+// The save status and the export used to share one element, so an autosave
+// landing mid-send — and one lands whenever anything is touched — wrote
+// "Saved" over "sending the lemmas…". The two say different kinds of thing
+// and neither should silence the other.
+//
+// It carries its own clock for the same reason the export steps do: the
+// slow parts are whole-chapter writes, and a line that has not changed for
+// two minutes is indistinguishable from a dead one without it.
+let exportStatusTimer = null;
+let exportStatusStarted = 0;
+
+function exportStatus(text, state) {
+  const box = document.getElementById('export-status');
+  const out = document.getElementById('export-status-text');
+  const clock = document.getElementById('export-status-time');
+  if (!box || !out) return;
+
+  if (text == null) {                       // done: put it away
+    clearInterval(exportStatusTimer);
+    exportStatusTimer = null;
+    box.classList.add('hidden');
+    return;
+  }
+
+  box.classList.remove('hidden', 'is-done', 'is-error');
+  if (state) box.classList.add('is-' + state);
+  out.textContent = text;
+
+  // A finished or failed send holds still, and clears itself shortly after.
+  if (state === 'done' || state === 'error') {
+    clearInterval(exportStatusTimer);
+    exportStatusTimer = null;
+    if (clock) clock.textContent = exportStatusStarted ? ' ' + elapsedWords(exportStatusStarted) : '';
+    setTimeout(() => {
+      const el = document.getElementById('export-status');
+      if (el && !exportStatusTimer) el.classList.add('hidden');
+    }, state === 'error' ? 20000 : 8000);
+    return;
+  }
+
+  if (!exportStatusTimer) {
+    exportStatusStarted = Date.now();
+    const tick = () => {
+      if (clock) clock.textContent = ' ' + elapsedWords(exportStatusStarted);
+    };
+    tick();
+    exportStatusTimer = setInterval(tick, 1000);
+  }
+}
+
+function elapsedWords(t0) {
+  const sec = Math.round((Date.now() - t0) / 1000);
+  return sec < 60 ? sec + 's'
+    : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
+}
+
 function setStatus(status, text) {
   const indicator = document.getElementById('status-indicator');
   const statusText = document.getElementById('status-text');
@@ -12443,11 +12501,11 @@ async function exportLemmatization() {
   ], 'Send', true);
   if (!ok) return;
 
-  setStatus('connected', 'Sending the lemmas...');
+  exportStatus('Sending the lemmas…');
   try {
     await EblClient.postLemmatization(target, built.payload);
   } catch (err) {
-    setStatus('connected', 'Ready');
+    exportStatus(label + ' — not sent', 'error');
     const detail = (err instanceof EblClient.EblError && err.validationErrors)
       ? err.validationErrors.map((e) => (e.line != null ? 'Line ' + e.line + ': ' : '') + e.message)
           .join(String.fromCharCode(10))
@@ -12459,7 +12517,7 @@ async function exportLemmatization() {
     return;
   }
 
-  setStatus('connected', 'Lemmas sent');
+  exportStatus('Lemmas sent', 'done');
   setTimeout(() => setStatus('connected', 'Ready'), 5000);
   showComposeReport('Lemmas sent', [
     outcomeBanner('sent', 'The chapter', s.lemmatized + ' word'
@@ -12622,7 +12680,7 @@ async function askAboutUncurated(only, what) {
 // Never throws. The line and the alignment are already committed by the time
 // this runs.
 async function sendLemmasFor(target, label, includeSuggested) {
-  setStatus('connected', label + ' — sending the lemmas…');
+  exportStatus(label + ' — sending the lemmas…');
   try {
     await Lemmatizer.load();
     const chapter = await EblClient.getChapter(target);
@@ -12702,7 +12760,7 @@ function lemmaOutcome(r) {
 // Never throws. The line is already committed by the time this runs, and a
 // failure here has to be reportable next to a success there.
 async function sendAlignmentFor(target, label) {
-  setStatus('connected', label + ' — sending the alignment…');
+  exportStatus(label + ' — sending the alignment…');
   try {
     const chapter = await EblClient.getChapter(target);
     const before = countAlignedTokens(chapter);
@@ -12859,17 +12917,17 @@ async function exportAlignment() {
     return;
   }
 
-  setStatus('connected', 'Reading the chapter…');
+  exportStatus('Reading the chapter…');
   let chapter, built;
   try {
     chapter = await EblClient.getChapter(target);
     built = await buildAlignmentPayload(chapter);
   } catch (err) {
-    setStatus('connected', 'Ready');
+    exportStatus('Alignment — the chapter could not be read', 'error');
     showComposeReport('Alignment', [noteBlock(String(err && err.message || err), 'bad')]);
     return;
   }
-  setStatus('connected', 'Ready');
+  exportStatus('Alignment — ready to send…');
 
   const before = countAlignedTokens(chapter);
   const s = built.summary;
@@ -12879,6 +12937,7 @@ async function exportAlignment() {
       noteBlock('Align a section first: turn on Positions and give the witness words their'
         + ' numbers, or compose a reading, which fills them in.'),
     ]);
+    exportStatus(null);
     return;
   }
 
@@ -12891,6 +12950,7 @@ async function exportAlignment() {
       rawBlock(problems.slice(0, 40).join(String.fromCharCode(10))),
       problems.length > 40 ? noteBlock('…and ' + (problems.length - 40) + ' more.') : '',
     ], 'alignment-problems');
+    exportStatus('Alignment — not sent', 'error');
     return;
   }
 
@@ -12919,13 +12979,13 @@ async function exportAlignment() {
           + (s.unmatched.length > 6 ? '; …' : ''), 'warn')
       : '',
   ], 'Send', true);
-  if (!ok) return;
+  if (!ok) { exportStatus(null); return; }
 
-  setStatus('connected', 'Sending the alignment…');
+  exportStatus('Sending the alignment…');
   try {
     await EblClient.postAlignment(target, built.payload);
   } catch (err) {
-    setStatus('connected', 'Ready');
+    exportStatus('Alignment — not sent', 'error');
     const fail = failureReport('The chapter alignment', err);
     const blocks = fail.blocks;
     supersedeExportIssues('alignment', null);
@@ -12944,7 +13004,7 @@ async function exportAlignment() {
   // Read it back: the only way to know what eBL kept.
   let after = null;
   try { after = countAlignedTokens(await EblClient.getChapter(target)); } catch (_) { /* not fatal */ }
-  setStatus('connected', 'Alignment sent');
+  exportStatus('Alignment sent', 'done');
   setTimeout(() => setStatus('connected', 'Ready'), 5000);
 
   const blocks = [
@@ -13870,7 +13930,7 @@ async function exportOmen(lineNum) {
     // Whole-chapter request: this decides for every section, not only this one.
     const withSuggested = !!(document.getElementById('send-suggested') || {}).checked;
 
-    setStatus('connected', label + ' — sending the line…');
+    exportStatus(label + ' — sending the line…');
     const res = await exportSingleLine(target, lineNum);
     const what = res.inserted ? 'added to' : 'updated on';
 
@@ -13966,7 +14026,7 @@ async function exportOmen(lineNum) {
     // Repaint, or the mark stays as it was until something else redraws.
     keepScoreInView(renderScore);
 
-    setStatus('connected', label + ' ' + what + ' eBL');
+    exportStatus(label + ' ' + what + ' eBL', 'done');
     setTimeout(() => setStatus('connected', 'Ready'), 5000);
 
     showComposeReport(label + ' — sent', blocks, 'export-' + lineNum);
@@ -14177,6 +14237,10 @@ async function runExport() {
   exportCancelBtn.textContent = 'Close';
   exportProgressEl.classList.remove('hidden');
   exportResultEl.classList.add('hidden');
+  // Its own line in the header, so an autosave landing mid-send cannot write
+  // over it. Ends in the finally, whichever way this goes.
+  let exportFailed = false;
+  exportStatus('Export — working…');
 
   // A step that is working says so, and for how long.
   //
@@ -14559,6 +14623,7 @@ async function runExport() {
     updateReportsBadge();
     await saveScoreDataToFile();
   } catch (err) {
+    exportFailed = true;
     // Figure out which step failed by looking for which step is currently running
     const running = exportProgressEl.querySelector('.export-step.running');
     if (running) setStep(running.dataset.step, 'error');
@@ -14657,6 +14722,8 @@ async function runExport() {
     }
   } finally {
     for (const k of Object.keys(stepTimers)) clearInterval(stepTimers[k]);
+    exportStatus(exportFailed ? 'Export — not completed' : 'Export finished',
+      exportFailed ? 'error' : 'done');
     exportGoBtn.disabled = false;
   }
 }
