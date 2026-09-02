@@ -9351,27 +9351,56 @@ async function readBackNote(target) {
 //
 // Called after the send, so it describes what actually happened; the sections
 // themselves are marked the moment their lines land, which is earlier.
-function fileExportReport(label, nums, res, afterBlocks) {
-  const warnings = (res && res.warnings) || [];
+function fileExportReport(label, nums, res, after, extraHtml) {
+  const lineWarnings = (res && res.warnings) || [];
   const added = ((res && res.results) || []).filter((r) => r.inserted);
-  const notes = warnings.slice(0, 40);
-  const kind = warnings.length ? 'notice' : 'ok';
+
+  // A follow-up that did not go makes this a warning, whatever the lines did.
+  // Both are whole-chapter writes, so one being refused leaves the chapter
+  // half-updated — the lines new, the alignment or the lemmas as they were.
+  const held = [];
+  const notes = lineWarnings.slice(0, 40);
+  for (const [name, r] of [['alignment', after && after.alignment],
+                           ['lemmas', after && after.lemmas]]) {
+    if (!r || r.skipped || r.sent) continue;
+    held.push(name);
+    if (r.problems && r.problems.length) {
+      for (const p of r.problems.slice(0, 20)) notes.push(name + ': ' + p);
+    } else if (r.failed) {
+      notes.push(name + ': ' + String(r.failed).slice(0, 300));
+    }
+  }
+
+  // Accepted, but worth a look on eBL afterwards.
+  const sum = (r, k) => ((r && r.summary && r.summary[k]) || []);
+  const checkLater = [
+    ...sum(after && after.alignment, 'doubled'),
+    ...sum(after && after.alignment, 'unmatched'),
+    ...sum(after && after.lemmas, 'mismatched'),
+  ];
+  for (const c of checkLater.slice(0, 40)) notes.push(c);
+
+  const kind = held.length ? 'warning' : (notes.length ? 'notice' : 'ok');
+  const title = label + (held.length
+    ? ' sent — the ' + held.join(' and ') + ' did not'
+    : (notes.length ? ' sent — ' + notes.length + ' to check' : ' sent'));
+
   const blocks = [
     outcomeBanner('sent', label, ((res && res.results) || []).length
       + ' line(s) written' + (added.length ? ', ' + added.length + ' new to the chapter' : '')),
-    ...(notes.length ? [rawBlock(notes.join(String.fromCharCode(10)))] : []),
-    ...(afterBlocks || []),
+    ...(lineWarnings.length ? [rawBlock(lineWarnings.join(String.fromCharCode(10)))] : []),
+    ...((after && after.blocks) || []),
+    extraHtml || '',
   ];
   for (const n of (nums || [])) supersedeExportIssues('send', n);
   addExportIssue({
     sec: (nums && nums.length === 1) ? nums[0] : null,
     part: 'send',
     kind,
-    title: label + ' sent' + (warnings.length
-      ? ' — ' + warnings.length + ' thing(s) to check on eBL' : ''),
+    title,
     notes,
     report: blocks.join(''),
-    done: !warnings.length,
+    done: kind === 'ok',
     how: 'sent clean',
   });
   updateReportsBadge();
@@ -10770,6 +10799,10 @@ function localAlignment(m, w, positions, omitted, convert) {
   }
 
   const map = alignmentFor(w.__lineNum, w.siglum + '|' + w.sourceLine);
+  // How many words the reading actually has, so a number beyond them can be
+  // recognised as stale rather than sent.
+  const positionCount = Object.keys(positions || {}).length;
+  const stale = [];
 
   // Worked out first, then emitted, because a word of the reading can only be
   // claimed once and that cannot be known while still walking left to right.
@@ -10779,6 +10812,15 @@ function localAlignment(m, w, positions, omitted, convert) {
     const partner = mine[next++];
     const at = partner ? map[partner.index] : null;
     if (at == null) return { t, at: null, partner: null, same: false };
+    // A position past the end of the reading is a number the reading has
+    // outgrown: it was typed when the line had more words, the line was
+    // composed shorter, and the number stayed behind. eBL refuses the whole
+    // chapter's alignment for one of these, so it is dropped here and
+    // counted, rather than sent to be refused.
+    if (at < 0 || at >= positionCount) {
+      stale.push(at);
+      return { t, at: null, partner: null, same: false };
+    }
     const reading = positions[at];
     // Paired but not equal: the witness reads something else here, and that is
     // what a token variant is for.
@@ -10826,7 +10868,12 @@ function localAlignment(m, w, positions, omitted, convert) {
   // A word cannot be both absent from a witness and pointed at by one of its
   // tokens. eBL stores the two side by side and refuses to save a line that
   // claims both, which leaves the line uneditable in its own editor.
-  return { alignment, omittedWords: omitted.filter((o) => !claimed.has(o)), doubled };
+  return {
+    alignment,
+    omittedWords: omitted.filter((o) => !claimed.has(o) && o >= 0 && o < positionCount),
+    doubled,
+    stale,
+  };
 }
 
 function clean(text) {
@@ -10861,7 +10908,7 @@ async function buildAlignmentPayload(chapter) {
   const bare = (x) => String(x || '').replace(/\.txt$/, '');
 
   const summary = { lines: 0, fromHere: [], tokens: 0, aligned: 0, variants: 0,
-    omitted: 0, unmatched: [], doubled: [] };
+    omitted: 0, unmatched: [], doubled: [], stale: [] };
 
   const payload = (chapter.lines || []).map((L) => {
     const sec = parseInt(L.number, 10);
@@ -10948,6 +10995,12 @@ async function buildAlignmentPayload(chapter) {
         summary.doubled.push('§' + L.number + ' ' + w.siglum + ' ' + w.sourceLine
           + ' — ' + built.doubled + ' repeated quotation'
           + (built.doubled === 1 ? '' : 's') + ' left unaligned');
+      }
+      if (built.stale && built.stale.length) {
+        summary.stale.push('§' + L.number + ' ' + w.siglum + ' ' + w.sourceLine
+          + ' — position ' + [...new Set(built.stale)].sort((a, b) => a - b).join(', ')
+          + ' is past the end of the reading (' + words.length
+          + ' words, 0–' + (words.length - 1) + '); left unaligned');
       }
       summary.tokens += built.alignment.length;
       summary.aligned += built.alignment.filter((t) => t.alignment != null).length;
@@ -12825,6 +12878,13 @@ function alignmentOutcome(r) {
       + ' the reading kept it; the repeat went out unaligned.'));
     out.push(rawBlock(s.doubled.slice(0, 10).join(String.fromCharCode(10))));
   }
+  if (s.stale && s.stale.length) {
+    out.push(noteBlock('Some witness words carry a position the reading no longer has —'
+      + ' numbered when the line was longer, and left behind when it was composed'
+      + ' shorter. They were left unaligned rather than sent, which eBL would have'
+      + ' refused. Renumber those words in Positions, or compose the line again.', 'warn'));
+    out.push(rawBlock(s.stale.slice(0, 10).join(String.fromCharCode(10))));
+  }
   return out;
 }
 
@@ -12870,7 +12930,8 @@ function alignmentProblems(chapter, payload) {
           if (a == null) continue;
           if (!(typeof a === 'number' && a >= 0 && a < n)) {
             out.push(at + 'points at word ' + a + ', but the reading has '
-              + n + ' word' + (n === 1 ? '' : 's'));
+              + n + ' word' + (n === 1 ? '' : 's') + ' — they are numbered 0'
+              + (n > 1 ? '–' + (n - 1) : '') + '.');
             continue;
           }
           claimed.set(a, (claimed.get(a) || 0) + 1);
@@ -14491,21 +14552,27 @@ async function runExport() {
     // endpoints rewrite the whole chapter, so one call each covers every line
     // just sent — and the lemmas go after the alignment, since a witness word
     // takes the lemma of whatever it is aligned to.
+    // Returns what happened as well as how it read. The report used to be
+    // handed only the rendered blocks, so it could not tell a send where the
+    // alignment was refused from one where everything went — and filed both
+    // as "sent clean".
     const followUp = async (label) => {
       const out = [];
+      let alignment = null;
+      let lemmas = null;
       if (exportOptAlignmentEl && exportOptAlignmentEl.checked) {
         setStep('align', 'running');
-        const r = await sendAlignmentFor(target, label);
-        setStep('align', r && r.sent ? 'done' : 'error');
-        out.push(...alignmentOutcome(r));
+        alignment = await sendAlignmentFor(target, label);
+        setStep('align', alignment && alignment.sent ? 'done' : 'error');
+        out.push(...alignmentOutcome(alignment));
       }
       if (exportOptLemmasEl && exportOptLemmasEl.checked) {
         setStep('lemmas', 'running');
-        const r = await sendLemmasFor(target, label, false);
-        setStep('lemmas', r && r.sent ? 'done' : 'error');
-        out.push(...lemmaOutcome(r));
+        lemmas = await sendLemmasFor(target, label, false);
+        setStep('lemmas', lemmas && lemmas.sent ? 'done' : 'error');
+        out.push(...lemmaOutcome(lemmas));
       }
-      return out;
+      return { blocks: out, alignment, lemmas };
     };
 
     if (mode === 'range') {
@@ -14539,9 +14606,9 @@ async function runExport() {
       const back = await readBackNote(target);
       exportResultEl.innerHTML = uncheckedNote + html
         + ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`
-        + after.join('') + back;
+        + after.blocks.join('') + back;
       fileExportReport('§' + rangeNums[0] + '–§' + rangeNums[rangeNums.length - 1],
-        rangeNums, res, after.concat([back]));
+        rangeNums, res, after, back);
       return;
     }
 
@@ -14572,8 +14639,8 @@ async function runExport() {
       const back = await readBackNote(target);
       exportResultEl.innerHTML = uncheckedNote + html +
         ` <a href="${url}" target="_blank" rel="noopener noreferrer">View chapter on eBL →</a>`
-        + after.join('') + back;
-      fileExportReport('§' + lineNum, [lineNum], res, after.concat([back]));
+        + after.blocks.join('') + back;
+      fileExportReport('§' + lineNum, [lineNum], res, after, back);
       return;
     }
 
