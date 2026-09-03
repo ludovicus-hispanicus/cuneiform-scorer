@@ -1752,6 +1752,21 @@ body.dark-mode .reconstructed-text:empty::before {
   padding-right: 1rem;
 }
 
+/* The siglum is a way into the tablet it names. Left undecorated until it is
+   pointed at: every witness row carries one, and underlining them all turns
+   the gutter into a column of blue. It keeps the type colour of its row. */
+.witness-siglum .source-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.witness-siglum .source-link:hover,
+.witness-siglum .source-link:focus-visible {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
 .witness-text {
   color: var(--text-dark);
   flex: 1;

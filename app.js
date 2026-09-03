@@ -2089,6 +2089,18 @@ function buildScore() {
   return { scoreLines, rulings, comments };
 }
 
+// The siglum in front of a witness names a tablet and a line of it, so it is
+// somewhere to go rather than a caption: clicking it opens that source in the
+// editor, at that very line, and marks it in the sidebar. draggable="false"
+// because a bare <a> drags its own href, which would fight the Ctrl-drag that
+// moves a witness between readings.
+function witnessRefLink(siglum, sourceLine, sec, ref) {
+  return `<a class="source-link witness-ref" href="#" draggable="false"`
+    + ` data-siglum="${escapeHtml(siglum)}" data-src="${escapeHtml(sourceLine || '')}"`
+    + ` data-sec="${sec == null ? '' : sec}"`
+    + ` title="Open ${escapeHtml(ref)} in the Source Text pane">${escapeHtml(ref)}</a>`;
+}
+
 // Render the score panel
 function renderScore() {
   const { scoreLines } = buildScore();
@@ -2302,14 +2314,16 @@ function renderScore() {
             ? displaySiglum(w.siglum) + ' ' + abbreviateSurface(w.surface) + ' ' + w.sourceLine
             : displaySiglum(w.siglum);
           html += `<div class="score-extra${typeClass(w.siglum)}">`;
-          html += `<span class="witness-siglum">${escapeHtml(ref)}</span>`;
+          html += `<span class="witness-siglum">`
+            + witnessRefLink(w.siglum, w.sourceLine, lineNum, ref) + `</span>`;
           html += `<span class="score-extra-text">${escapeHtml(w.content || ((w.rulingType || 'single') + ' ruling'))}</span>`;
           html += `</div>`;
           continue;
         }
         const ref = `${displaySiglum(w.siglum)} ${abbreviateSurface(w.surface)} ${w.sourceLine}`;
         html += `<div class="score-witness${typeClass(w.siglum)}">`;
-        html += `<span class="witness-siglum">${escapeHtml(ref)}`
+        html += `<span class="witness-siglum">`
+          + witnessRefLink(w.siglum, w.sourceLine, lineNum, ref)
           + witnessMoveControl(lineNum, vi, w, readings.length) + `</span>`;
         if (lemmasOn(lineNum)) {
           // A witness word takes its lemma from the reading word it aligns to,
@@ -3036,6 +3050,22 @@ document.addEventListener('drop', (e) => {
     (x) => x.type === 'line' && (x.siglum + '|' + x.sourceLine) === job.key);
   if (!w) return;
   moveWitnessTo(job.lineNum, w, target.vi);
+});
+
+// A siglum in the score is a reference to a tablet, so following it opens that
+// tablet. Delegated from the document because the score is thrown away and
+// written afresh on every render, and a listener bound to a row would go with
+// it. Covers the readings and the "$" directives alike.
+document.addEventListener('click', (e) => {
+  const link = e.target && e.target.closest
+    ? e.target.closest('.witness-siglum .source-link') : null;
+  if (!link) return;
+  e.preventDefault();
+  const siglum = link.dataset.siglum || '';
+  if (!openSource(siglum, link.dataset.src || '', link.dataset.sec || '')) {
+    setStatus('error', `"${siglum}" is not in this project`);
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
 });
 
 async function createVariant(lineNum, text, witnesses) {
@@ -5890,9 +5920,13 @@ function loadManuscript(id) {
   // Update active state
   activeManuscript = id;
 
-  // Update UI
+  // Update UI. Arriving from a siglum in the score, the source can be far down
+  // a long list, so it is brought into view — 'nearest' leaves the sidebar
+  // alone when the row is already on screen, which is the ordinary case.
   document.querySelectorAll('.manuscript-item').forEach(item => {
-    item.classList.toggle('active', item.dataset.id === id);
+    const isActive = item.dataset.id === id;
+    item.classList.toggle('active', isActive);
+    if (isActive) item.scrollIntoView({ block: 'nearest' });
   });
 
   // Load content into Ace Editor
@@ -10289,7 +10323,7 @@ function wireSourceLinks(root) {
   });
 }
 
-function openSource(siglum, sourceLine) {
+function openSource(siglum, sourceLine, sec) {
   // Manuscripts are keyed by "ms-<filename>" and the entries carry no id of
   // their own, so the key is the id — taking it off the object gives undefined.
   const id = Object.keys(manuscripts).find((k) => manuscripts[k].siglum === siglum);
@@ -10303,12 +10337,22 @@ function openSource(siglum, sourceLine) {
     // regex character would otherwise have to be escaped, and quietly is not.
     const rows = String(ms.content || '').split('\n');
     const want = String(sourceLine) + '.';
-    const at = rows.findIndex((row) => {
+    // A tablet numbers each surface from its own 1, so "3'" can be a line of
+    // the obverse and a line of the reverse at once. Where the caller knows
+    // which § the reading was filed under, that settles which of the two is
+    // meant; a caller that does not gets the first, as before.
+    const matches = (row, wantSec) => {
       const t = row.trim();
       if (t.charAt(0) !== '§') return false;
       const sp = t.indexOf(' ');
-      return sp > 0 && t.slice(sp + 1).trim().indexOf(want) === 0;
-    });
+      if (sp <= 0) return false;
+      if (wantSec != null && t.slice(1, sp).replace(/[a-z]$/, '') !== String(wantSec)) return false;
+      return t.slice(sp + 1).trim().indexOf(want) === 0;
+    };
+    let at = sec === undefined || sec === null || sec === ''
+      ? -1
+      : rows.findIndex((row) => matches(row, sec));
+    if (at < 0) at = rows.findIndex((row) => matches(row, null));
     if (at >= 0) {
       aceEditor.gotoLine(at + 1, 0, true);
       aceEditor.focus();
