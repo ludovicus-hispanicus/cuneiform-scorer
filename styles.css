@@ -2049,8 +2049,11 @@ body.dark-mode .pos-word.is-held {
   flex-direction: column;
 }
 
+/* Wide enough for the options it now carries, and never wider than the
+   window. It was a flat 700px when the row held two toggles; it holds four,
+   and the last of them — Signs — hung outside the card. */
 .search-modal {
-  width: 700px;
+  width: min(960px, 92vw);
 }
 
 .modal-header {
@@ -2082,16 +2085,25 @@ body.dark-mode .pos-word.is-held {
 }
 
 /* Search modal specific */
+/* The options wrap rather than overflowing.
+   Each toggle keeps its own words together (`white-space: nowrap` below), so
+   without wrapping here the row could only grow past the edge of the card —
+   which is what it did. Wrapping means another option can be added later
+   without pushing anything out again. */
 .search-input-row {
   display: flex;
-  gap: 1rem;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
   padding: 1rem;
   border-bottom: 1px solid var(--border-color);
   align-items: center;
 }
 
 .search-input-row input[type="text"] {
-  flex: 1;
+  /* Wide enough to stay usable when the row wraps, rather than collapsing to
+     the width of its placeholder. */
+  flex: 1 1 18rem;
+  min-width: 12rem;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--border-color);
   border-radius: 4px;
@@ -2128,6 +2140,7 @@ body.dark-mode .pos-word.is-held {
 /* Replace row */
 .replace-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--border-color);
