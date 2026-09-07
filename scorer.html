@@ -75,9 +75,11 @@
       </button>
       <button id="settings-btn" class="icon-btn" title="Project settings, eBL metadata and export"
         aria-label="Project settings">&#9881;</button>
-      <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes</button>
+      <button id="annotations-btn" title="Bugs &amp; Enhancements">Notes<span
+        id="notes-badge" class="notes-badge hidden"></span></button>
       <button id="reports-btn" title="Export reports — the log of every send, on a page of its own">Reports<span
         id="reports-badge" class="reports-badge hidden"></span></button>
+      <button id="help-btn" title="How the scorer works — every part of it, on a page of its own">Help</button>
       <span class="export-menu-wrap">
         <button id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
         <span id="export-menu" class="export-menu hidden">
@@ -131,6 +133,7 @@
             <button id="lemma-mode-btn" class="tab-header-btn" title="Give each word of a reading a dictionary lemma. Alt+Shift+L for the whole project, Alt+L for the omen under the cursor.">Lemmas</button>
             <button id="glossary-btn" class="tab-header-btn" title="The readings this project has settled for itself, ahead of the general dictionary. Alt+Shift+D.">Dictionary</button>
             <button id="position-mode-btn" class="tab-header-btn" title="Show each reading as numbered positions and align the witnesses to them. Alt+Shift+P for the whole project, Alt+P for the omen under the cursor.">Positions</button>
+            <button id="check-positions-btn" class="tab-header-btn" title="Find aligned rows whose boxes have drifted from the words they were set for — after a reading was edited or a witness moved — and slide them back.">Check positions</button>
             <button id="compose-all-btn" class="tab-header-btn" title="Compose every reading in the project from its witnesses. Overwrites what is there — never runs on its own.">Compose all</button>
           </span>
           <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
@@ -514,7 +517,7 @@
           <div class="export-options">
             <label class="export-opt-lines hidden"><input type="checkbox" id="export-opt-alignment" checked> &hellip;and the alignment after &mdash; sending a line replaces what eBL held for it</label>
             <label class="export-opt-lines hidden"><input type="checkbox" id="export-opt-lemmas" checked> &hellip;and the lemmas after &mdash; a witness word takes the lemma of what it is aligned to</label>
-            <label><input type="checkbox" id="export-opt-manuscripts" checked> Register manuscripts first</label>
+            <label><input type="checkbox" id="export-opt-manuscripts"> Register manuscripts first</label>
             <label><input type="checkbox" id="export-opt-save-atf"> Save a copy of the ATF in the project folder</label>
           </div>
         </fieldset>

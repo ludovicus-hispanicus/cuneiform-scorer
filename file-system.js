@@ -125,12 +125,88 @@ async function readProjectConfig(dirHandle) {
   }
 }
 
+// ---- Writing a file --------------------------------------------------------
+//
+// createWritable() never modifies a file: it writes a temporary one and swaps
+// it over the original on close. A sync client reads that swap as a delete and
+// a create, and on a shared Drive folder the create can be refused when the
+// file belongs to another account — the save lands in lost_and_found and the
+// cloud copy is pulled back over it. When the scorer is served by its own
+// server, the server writes into the existing file instead, which every sync
+// client reads as a plain modification. The page cannot learn a picked
+// folder's path, so the project is bound to its path once (bindProjectPath)
+// and the server writes only inside bound folders. Anything the server cannot
+// do falls back to the swap, so a save never fails for want of the server.
+const serverWrites = { projectId: null, on: false };
+
+function useServerWrites(projectId, on) {
+  serverWrites.projectId = projectId == null ? null : String(projectId);
+  serverWrites.on = !!on && !!serverWrites.projectId;
+}
+
+async function bindProjectPath(projectId, absPath) {
+  const res = await fetch('/api/projects/bind', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: String(projectId), path: absPath }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('bind failed: ' + res.status));
+  return data.path;
+}
+
+async function boundPath(projectId) {
+  try {
+    const res = await fetch('/api/project-path?id=' + encodeURIComponent(String(projectId)));
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && data.path || null;
+  } catch (_) { return null; }
+}
+
+// Whether the last write went through the server. Read by the status line.
+let lastWriteInPlace = false;
+function wroteInPlace() { return lastWriteInPlace; }
+
+async function serverWrite(relPath, content) {
+  const res = await fetch('/api/projects/write', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: serverWrites.projectId, relPath, content }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || ('write failed: ' + res.status));
+  }
+}
+
+// relPath is "score-data.json" or "manuscripts/K.2246.txt": the same path the
+// handles walk, so the two ways of writing name the same file.
+async function writeText(dirHandle, relPath, content) {
+  if (serverWrites.on) {
+    try {
+      await serverWrite(relPath, content);
+      lastWriteInPlace = true;
+      return;
+    } catch (err) {
+      console.warn('in-place write failed, falling back to the browser:', err.message);
+    }
+  }
+  lastWriteInPlace = false;
+  const parts = relPath.split('/');
+  let dir = dirHandle;
+  for (let i = 0; i < parts.length - 1; i++) {
+    dir = await dir.getDirectoryHandle(parts[i], { create: true });
+  }
+  const fileHandle = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
 // Write project.json to a folder handle
 async function writeProjectConfig(dirHandle, config) {
-  const configHandle = await dirHandle.getFileHandle('project.json', { create: true });
-  const writable = await configHandle.createWritable();
-  await writable.write(JSON.stringify(config, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'project.json', JSON.stringify(config, null, 2));
 }
 
 // Read index.json from manuscripts folder
@@ -148,11 +224,7 @@ async function readManuscriptIndex(dirHandle) {
 
 // Write index.json to manuscripts folder
 async function writeManuscriptIndex(dirHandle, sigla) {
-  const msHandle = await dirHandle.getDirectoryHandle('manuscripts', { create: true });
-  const indexHandle = await msHandle.getFileHandle('index.json', { create: true });
-  const writable = await indexHandle.createWritable();
-  await writable.write(JSON.stringify(sigla, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'manuscripts/index.json', JSON.stringify(sigla, null, 2));
 }
 
 // Read a manuscript file
@@ -170,11 +242,7 @@ async function readManuscript(dirHandle, siglum) {
 
 // Write a manuscript file
 async function writeManuscript(dirHandle, siglum, content) {
-  const msHandle = await dirHandle.getDirectoryHandle('manuscripts', { create: true });
-  const fileHandle = await msHandle.getFileHandle(`${siglum}.txt`, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
+  await writeText(dirHandle, `manuscripts/${siglum}.txt`, content);
 }
 
 // Delete a manuscript file
@@ -202,10 +270,7 @@ async function readScore(dirHandle) {
 
 // Write score.txt
 async function writeScore(dirHandle, content) {
-  const fileHandle = await dirHandle.getFileHandle('score.txt', { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
+  await writeText(dirHandle, 'score.txt', content);
 }
 
 // Read score-data.json (reconstructed text and translations)
@@ -222,20 +287,14 @@ async function readScoreData(dirHandle) {
 
 // Write score-data.json (reconstructed text and translations)
 async function writeScoreData(dirHandle, data) {
-  const fileHandle = await dirHandle.getFileHandle('score-data.json', { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(data, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'score-data.json', JSON.stringify(data, null, 2));
 }
 
 // Write an arbitrary file into the project folder. Used by the exporter for
 // the pre-overwrite chapter backup and for "save a copy of the ATF", both of
 // which are named after the moment they were taken rather than fixed files.
 async function writeProjectFile(dirHandle, name, content) {
-  const fileHandle = await dirHandle.getFileHandle(name, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
+  await writeText(dirHandle, name, content);
   return name;
 }
 
@@ -253,10 +312,7 @@ async function readParallelChecks(dirHandle) {
 }
 
 async function writeParallelChecks(dirHandle, checks) {
-  const fileHandle = await dirHandle.getFileHandle('parallels-checked.json', { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(checks, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'parallels-checked.json', JSON.stringify(checks, null, 2));
 }
 
 // Read manuscripts.json (eBL metadata per manuscript)
@@ -272,10 +328,7 @@ async function readManuscriptsMeta(dirHandle) {
 
 // Write manuscripts.json
 async function writeManuscriptsMeta(dirHandle, data) {
-  const fileHandle = await dirHandle.getFileHandle('manuscripts.json', { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(data, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'manuscripts.json', JSON.stringify(data, null, 2));
 }
 
 // Read annotations.json
@@ -292,10 +345,7 @@ async function readAnnotations(dirHandle) {
 
 // Write annotations.json
 async function writeAnnotations(dirHandle, annotations) {
-  const fileHandle = await dirHandle.getFileHandle('annotations.json', { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(annotations, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'annotations.json', JSON.stringify(annotations, null, 2));
 }
 
 // Scan manuscripts folder for new/removed .txt files vs index.json
@@ -494,11 +544,7 @@ async function readImagesIndex(dirHandle) {
 
 // Write images index to images/images-index.json
 async function writeImagesIndex(dirHandle, index) {
-  const imagesDir = await dirHandle.getDirectoryHandle('images', { create: true });
-  const indexHandle = await imagesDir.getFileHandle('images-index.json', { create: true });
-  const writable = await indexHandle.createWritable();
-  await writable.write(JSON.stringify(index, null, 2));
-  await writable.close();
+  await writeText(dirHandle, 'images/images-index.json', JSON.stringify(index, null, 2));
 }
 
 // Save an image file to images/<siglum>/<fileName>
@@ -551,12 +597,7 @@ async function readImageAnnotations(dirHandle, siglum, fileName) {
 
 // Write image annotations JSON to images/<siglum>/<fileName>.annotations.json
 async function writeImageAnnotations(dirHandle, siglum, fileName, data) {
-  const imagesDir = await dirHandle.getDirectoryHandle('images', { create: true });
-  const msDir = await imagesDir.getDirectoryHandle(siglum, { create: true });
-  const annHandle = await msDir.getFileHandle(fileName + '.annotations.json', { create: true });
-  const writable = await annHandle.createWritable();
-  await writable.write(JSON.stringify(data));
-  await writable.close();
+  await writeText(dirHandle, 'images/' + siglum + '/' + fileName + '.annotations.json', JSON.stringify(data));
 }
 
 // ===========================================
@@ -564,6 +605,10 @@ async function writeImageAnnotations(dirHandle, siglum, fileName, data) {
 // ===========================================
 
 window.FileSystem = {
+  useServerWrites,
+  bindProjectPath,
+  boundPath,
+  wroteInPlace,
   // Feature detection
   isSupported: isFileSystemAccessSupported,
 

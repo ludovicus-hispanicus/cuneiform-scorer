@@ -136,6 +136,7 @@ const server = http.createServer((req, res) => {
       validatorWhy: VALIDATOR.why || null,
       mode,
       app: 'cuneiform-scorer',
+      inPlaceWrites: true,
     }));
     return;
   }
@@ -865,6 +866,117 @@ const server = http.createServer((req, res) => {
           console.log('Saved: score.txt');
         }
       });
+    });
+    return;
+  }
+
+  // ===========================================
+  // IN-PLACE WRITES — the page's own file API cannot modify a file, only
+  // replace it: createWritable() writes a temporary file and swaps it over the
+  // original on close. On a synced folder that swap is a delete and a create,
+  // and when the file belongs to another account Drive may refuse the create
+  // (409), strand the save in lost_and_found and pull its own copy back. Node
+  // writes into the existing file, which every sync client reads as a plain
+  // modification. The page has no way to learn a picked folder's path, so a
+  // project is bound to its path once, and only bound folders are written to.
+  // ===========================================
+  const PROJECT_PATHS_FILE = path.join(__dirname, 'project-paths.json');
+  const readProjectPaths = () => {
+    try { return JSON.parse(fs.readFileSync(PROJECT_PATHS_FILE, 'utf8')) || {}; }
+    catch (_) { return {}; }
+  };
+  // Only the page served from here may write. A browser sends Origin on a
+  // cross-site POST, so any other origin is a foreign page asking.
+  const sameOrigin = () => {
+    const o = req.headers.origin;
+    if (!o) return true;
+    try {
+      const u = new URL(o);
+      return (u.hostname === '127.0.0.1' || u.hostname === 'localhost')
+        && String(u.port || (u.protocol === 'https:' ? 443 : 80)) === String(PORT);
+    } catch (_) { return false; }
+  };
+  const readJsonBody = (cb) => {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 64 * 1024 * 1024) req.destroy(); });
+    req.on('end', () => {
+      try { cb(null, JSON.parse(body || '{}')); } catch (e) { cb(e); }
+    });
+  };
+  const reply = (code, obj) => {
+    res.writeHead(code, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(obj));
+  };
+  const projectIdIn = (folder) => {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(folder, 'project.json'), 'utf8'));
+      return cfg && cfg.id != null ? String(cfg.id) : null;
+    } catch (_) { return null; }
+  };
+
+  if (req.method === 'POST' && req.url === '/api/projects/bind') {
+    if (!sameOrigin()) { reply(403, { error: 'foreign origin' }); return; }
+    readJsonBody((err, b) => {
+      if (err) { reply(400, { error: 'bad JSON' }); return; }
+      const id = String(b.id || '');
+      const folder = String(b.path || '').trim();
+      if (!id || !folder) { reply(400, { error: 'id and path are required' }); return; }
+      if (!path.isAbsolute(folder) || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
+        reply(400, { error: 'not a folder on this computer: ' + folder }); return;
+      }
+      // The folder must be the project it claims to be: its project.json
+      // carries the id the page is working under.
+      const found = projectIdIn(folder);
+      if (found !== id) {
+        reply(409, { error: found
+          ? 'that folder is project ' + found + ', not ' + id
+          : 'no project.json in that folder' });
+        return;
+      }
+      const all = readProjectPaths();
+      all[id] = path.resolve(folder);
+      fs.writeFileSync(PROJECT_PATHS_FILE, JSON.stringify(all, null, 2));
+      reply(200, { ok: true, path: all[id] });
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/api/project-path')) {
+    const id = new URL(req.url, 'http://x').searchParams.get('id') || '';
+    const folder = readProjectPaths()[id];
+    if (!folder) { reply(404, { error: 'not bound' }); return; }
+    // A binding is only as good as the folder still being that project.
+    if (projectIdIn(folder) !== id) { reply(404, { error: 'folder no longer holds this project' }); return; }
+    reply(200, { path: folder });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/projects/write') {
+    if (!sameOrigin()) { reply(403, { error: 'foreign origin' }); return; }
+    readJsonBody((err, b) => {
+      if (err) { reply(400, { error: 'bad JSON' }); return; }
+      const id = String(b.id || '');
+      const rel = String(b.relPath || '').replace(/\\/g, '/');
+      const content = typeof b.content === 'string' ? b.content : null;
+      if (!id || !rel || content == null) { reply(400, { error: 'id, relPath and content are required' }); return; }
+      const folder = readProjectPaths()[id];
+      if (!folder) { reply(404, { error: 'project not bound' }); return; }
+      if (projectIdIn(folder) !== id) { reply(409, { error: 'folder no longer holds this project' }); return; }
+      // Inside the project and nowhere else.
+      if (path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel) || rel.split('/').some((p) => p === '..' || p === '')) {
+        reply(400, { error: 'relPath must be a plain path inside the project' }); return;
+      }
+      const target = path.resolve(folder, rel);
+      if (!target.startsWith(path.resolve(folder) + path.sep)) { reply(400, { error: 'outside the project' }); return; }
+      try {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        // writeFileSync opens the existing file and truncates it: the same
+        // file, modified — never a new one swapped in.
+        fs.writeFileSync(target, content, 'utf8');
+        reply(200, { ok: true, bytes: Buffer.byteLength(content, 'utf8') });
+      } catch (e) {
+        reply(500, { error: e.message });
+      }
     });
     return;
   }

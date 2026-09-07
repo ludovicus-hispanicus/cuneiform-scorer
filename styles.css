@@ -1694,8 +1694,6 @@ body.dark-mode .recon-extra-text:focus {
   background: #1e1e1e;
 }
 
-
-
 /* Dark Mode Overrides for Score Components */
 body.dark-mode .translation-line {
   background: #2d333b;
@@ -5409,7 +5407,8 @@ body.dark-mode {
 body.dark-mode { --issue-accent: #e0806f; --issue-light: #3b2723; }
 
 /* The count of open export reports, worn by the Reports button. */
-.reports-badge {
+.reports-badge,
+.notes-badge {
   display: inline-block;
   min-width: 1.1em;
   margin-left: 0.35em;
@@ -5421,11 +5420,11 @@ body.dark-mode { --issue-accent: #e0806f; --issue-light: #3b2723; }
   background: var(--changed-light, #fbf1dc);
   color: var(--changed-accent, #9a6b12);
 }
-.reports-badge.is-error {
+.reports-badge.is-error,
+.notes-badge.is-error {
   background: var(--issue-light, #f9e4e0);
   color: var(--issue-accent, #b3402f);
 }
-
 
 /* ---- A line wears whether it is on eBL ----------------------------------
    Blue is the ordinary state: nothing has been sent from here. Green means
@@ -5673,3 +5672,88 @@ body.is-moving-witness .score-line-header { transition: outline-color 0.1s; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
+
+/* ---- The note markup rules, beside the note --------------------------------
+   A note on eBL is markup rather than free text, and the one rule that bites —
+   no bare braces — is invisible until a send is refused. The "?" sits on the
+   row itself, because that is the only moment the rules are wanted. */
+.recon-note-help {
+  flex-shrink: 0;
+  width: 1.15em;
+  height: 1.15em;
+  padding: 0;
+  border: 1px solid var(--border-color, #d5d5d5);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  opacity: 0.5;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: help;
+}
+.recon-note-help:hover,
+.recon-note-help:focus-visible {
+  opacity: 1;
+  background: var(--changed-light, #fbf1dc);
+}
+
+
+/* ---- A tablet named in a note ---------------------------------------------
+   "UrkHel1 o 59" in a note is somewhere to go, so it gets a chip beside the
+   note that opens the source at that line. The note text itself stays plain:
+   it is contenteditable, and a link inside it would fight the caret. */
+.recon-note-refs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  flex-shrink: 0;
+  align-self: center;
+}
+.note-ref {
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-light);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-family: "Consolas", "Monaco", monospace;
+  padding: 0.02rem 0.5rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.note-ref:hover,
+.note-ref:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+.witness-note .recon-note-refs {
+  margin-left: 0.4rem;
+}
+
+/* ---- Positions check ----------------------------------------------------
+   The report of rows whose boxes point a few words away from the words they
+   fit. A table, because it is compared across rows: the same shift on every
+   witness of a section says the reading moved, not the witnesses. */
+.pos-check { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.4rem 0; }
+.pos-check th, .pos-check td { text-align: left; padding: 0.3rem 0.5rem 0.3rem 0; border-top: 1px solid var(--border-color); vertical-align: top; }
+.pos-check th { border-top: none; font-weight: 600; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.pos-check-beyond { color: var(--issue-accent, #b3402f); font-size: 0.78rem; margin-left: 0.3rem; }
+.pos-check-done { color: var(--sent-accent, #2f7d4f); font-size: 0.85rem; }
+.pos-shift-apply { font-size: 0.78rem; padding: 0.1rem 0.5rem; }
+
+/* The report groups by witness row; each thing to look at is a line with
+   its own button. Loud things (a shift, nothing in common) are coloured. */
+.pos-check-row { margin: 0.6rem 0 0.9rem; padding: 0.4rem 0.6rem; border: 1px solid var(--border-color); border-radius: 6px; }
+.pos-check-head { font-weight: 600; margin-bottom: 0.25rem; }
+.pos-check-head a { color: var(--accent); text-decoration: none; margin-right: 0.35rem; }
+.pos-check-item { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.2rem 0; font-size: 0.85rem; }
+.pos-check-item + .pos-check-item { border-top: 1px dotted var(--border-color); }
+.pos-check-what { flex: 1; min-width: 12rem; }
+.pos-check-what code { font-family: "Consolas", "Monaco", monospace; font-size: 0.92em; }
+.pos-check-sim { color: var(--text-muted); font-size: 0.78rem; margin-left: 0.3rem; }
+.pos-check-item.is-none .pos-check-sim { color: var(--issue-accent, #b3402f); font-weight: 600; }
+.pos-check-item.is-shift { background: var(--changed-light, #fbf1dc); border-radius: 4px; padding: 0.3rem 0.4rem; }
+.pos-check-item.is-beyond, .pos-check-item.is-stale { color: var(--issue-accent, #b3402f); }
+.pos-check-item button { font-size: 0.78rem; padding: 0.1rem 0.5rem; }
+.pos-check-item.is-rowok { justify-content: flex-end; }
+
+.pos-check-item.is-dup, .pos-check-item.is-order { background: var(--changed-light, #fbf1dc); border-radius: 4px; padding: 0.3rem 0.4rem; }

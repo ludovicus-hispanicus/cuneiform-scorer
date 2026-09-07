@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Help — Manuscript Scorer</title>
+  <link rel="icon" href="favicon.svg">
+  <style>
+    /* A page of its own, meant to stand open beside the scorer, like the
+       reports. It borrows the scorer's palette by hand rather than by
+       stylesheet — styles.css lays out the whole scorer and would fight this
+       page's simpler frame. */
+    :root {
+      --bg: #faf7f2;
+      --panel: #ffffff;
+      --text: #2e2a24;
+      --muted: #8a8178;
+      --border: #ddd;
+      --hover: rgba(122, 92, 62, 0.12);
+      --accent: #4a6fa5;
+      --sent-accent: #2f7d4f;
+      --sent-light: #e6f4ec;
+      --changed-accent: #9a6b12;
+      --changed-light: #fbf1dc;
+      --issue-accent: #b3402f;
+      --issue-light: #f9e4e0;
+      --notice-accent: #2a6f8f;
+      --notice-light: #e2eff5;
+      --code-bg: #f1ece4;
+    }
+    body.dark-mode {
+      --bg: #1e1c19;
+      --panel: #262421;
+      --text: #e8e2d9;
+      --muted: #9a9187;
+      --border: #444;
+      --hover: rgba(200, 170, 140, 0.12);
+      --accent: #5c8bd6;
+      --sent-accent: #7fc79b;
+      --sent-light: #24352b;
+      --changed-accent: #e0b055;
+      --changed-light: #3a3222;
+      --issue-accent: #e0806f;
+      --issue-light: #3b2723;
+      --notice-accent: #7fb8d4;
+      --notice-light: #22313a;
+      --code-bg: #2f2c28;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      font-size: 14.5px;
+      line-height: 1.55;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      padding: 0.6rem 1.2rem;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+    header .app { color: var(--muted); font-weight: 400; }
+    header .spacer { flex: 1; }
+    header .hint { font-size: 0.8rem; color: var(--muted); }
+
+    .page {
+      display: grid;
+      grid-template-columns: 230px minmax(0, 1fr);
+      gap: 2.5rem;
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 1.5rem 1.2rem 4rem;
+    }
+    nav.toc {
+      position: sticky;
+      top: 3.6rem;
+      align-self: start;
+      max-height: calc(100vh - 4.5rem);
+      overflow: auto;
+      font-size: 0.86rem;
+    }
+    nav.toc ol { list-style: none; margin: 0; padding: 0; }
+    nav.toc li { margin: 0; }
+    nav.toc a {
+      display: block;
+      padding: 0.22rem 0.55rem;
+      border-left: 2px solid transparent;
+      color: var(--text);
+      text-decoration: none;
+      border-radius: 0 4px 4px 0;
+    }
+    nav.toc a:hover { background: var(--hover); }
+    nav.toc a.is-here { border-left-color: var(--accent); color: var(--accent); }
+    nav.toc .group { margin: 0.7rem 0 0.2rem 0.55rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+
+    article { max-width: 820px; min-width: 0; }
+    section { scroll-margin-top: 4rem; margin-bottom: 3rem; }
+    h2 {
+      font-size: 1.35rem;
+      margin: 0 0 0.6rem;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h2 a.anchor { color: var(--muted); text-decoration: none; font-weight: 400; margin-left: 0.4rem; opacity: 0; font-size: 0.9rem; }
+    h2:hover a.anchor { opacity: 1; }
+    h3 { font-size: 1.02rem; margin: 1.4rem 0 0.4rem; }
+    p { margin: 0.5rem 0 0.8rem; }
+    ul, ol { margin: 0.3rem 0 0.9rem; padding-left: 1.4rem; }
+    li { margin: 0.2rem 0; }
+    li p { margin: 0.2rem 0; }
+
+    code, kbd, pre {
+      font-family: "Consolas", "Monaco", "Menlo", monospace;
+      font-size: 0.92em;
+    }
+    code {
+      padding: 0.05em 0.3em;
+      border-radius: 3px;
+      background: var(--code-bg);
+    }
+    pre {
+      margin: 0.5rem 0 1rem;
+      padding: 0.7rem 0.9rem;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--code-bg);
+      line-height: 1.5;
+      white-space: pre;
+    }
+    pre code { padding: 0; background: none; }
+    pre .c { color: var(--muted); }
+    kbd {
+      display: inline-block;
+      padding: 0.05em 0.4em;
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      background: var(--panel);
+      font-size: 0.85em;
+      line-height: 1.4;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.5rem 0 1rem;
+      font-size: 0.92rem;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 0.35rem 0.6rem 0.35rem 0;
+      border-top: 1px solid var(--border);
+    }
+    th { font-weight: 600; border-top: none; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    td:first-child { white-space: nowrap; }
+    .tip, .warn {
+      margin: 0.8rem 0 1rem;
+      padding: 0.6rem 0.9rem;
+      border-left: 3px solid var(--notice-accent);
+      background: var(--notice-light);
+      border-radius: 0 6px 6px 0;
+    }
+    .warn { border-left-color: var(--issue-accent); background: var(--issue-light); }
+    .tip p, .warn p { margin: 0.2rem 0; }
+    .mark { display: inline-block; min-width: 1.4em; text-align: center; padding: 0 0.25em; border-radius: 4px; font-weight: 600; }
+    .mark.never { color: var(--notice-accent); background: var(--notice-light); }
+    .mark.sent { color: var(--sent-accent); background: var(--sent-light); }
+    .mark.changed { color: var(--changed-accent); background: var(--changed-light); }
+    .mark.bad { color: var(--issue-accent); background: var(--issue-light); }
+    .btn { display: inline-block; padding: 0 0.4em; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); font-size: 0.9em; }
+
+    @media (max-width: 820px) {
+      .page { grid-template-columns: 1fr; }
+      nav.toc { position: static; max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Help <span class="app">— Manuscript Scorer</span></h1>
+    <span class="spacer"></span>
+    <span class="hint">This page stays open beside the scorer. Sections are linkable: <code>help.html#positions</code></span>
+  </header>
+
+  <div class="page">
+    <nav class="toc" id="toc">
+      <ol>
+        <li class="group">Getting around</li>
+        <li><a href="#start">Projects and the folder</a></li>
+        <li><a href="#window">The window</a></li>
+        <li><a href="#sources">Sources</a></li>
+        <li><a href="#format">Writing a source</a></li>
+        <li class="group">The score</li>
+        <li><a href="#score">Reading the score</a></li>
+        <li><a href="#variants">Variants</a></li>
+        <li><a href="#notes">Notes and parallels</a></li>
+        <li><a href="#positions">Positions</a></li>
+        <li><a href="#lemmas">Lemmas and the Dictionary</a></li>
+        <li><a href="#compose">Composing a reading</a></li>
+        <li class="group">Beyond the score</li>
+        <li><a href="#tabs">The other tabs</a></li>
+        <li><a href="#search">Search All</a></li>
+        <li><a href="#annotations">The Notes panel</a></li>
+        <li><a href="#marks">Marks and Reports</a></li>
+        <li class="group">eBL</li>
+        <li><a href="#export">Export</a></li>
+        <li><a href="#settings">Settings</a></li>
+        <li class="group">Housekeeping</li>
+        <li><a href="#saving">Saving, syncing, shared folders</a></li>
+        <li><a href="#shortcuts">Keyboard shortcuts</a></li>
+      </ol>
+    </nav>
+
+    <article>
+
+      <!-- ============================================================ -->
+      <section id="start">
+        <h2>Projects and the folder <a class="anchor" href="#start">#</a></h2>
+        <p>A project is a folder on disk. The Projects page (<code>index.html</code>) lists the folders you have opened before; <span class="btn">+ New Project</span> creates one, <span class="btn">Open Project</span> points at an existing folder. The browser asks for permission to read and write the folder the first time each session — that is the "requires permission" click on a project card.</p>
+        <p>Everything the scorer knows lives in that folder, in plain files you can read and back up:</p>
+        <table>
+          <tr><th>File</th><th>What it holds</th></tr>
+          <tr><td><code>manuscripts/*.txt</code></td><td>One file per source — the transliteration with its § assignments. This is the text you edit in the Source Text pane. See <a href="#format">Writing a source</a>.</td></tr>
+          <tr><td><code>manuscripts/index.json</code></td><td>The order of the sources in the sidebar.</td></tr>
+          <tr><td><code>manuscripts.json</code></td><td>Per-source metadata: type, provenance, period, the eBL siglum parts. Edited in <a href="#settings">Settings</a> and in the "Describe this source" dialog.</td></tr>
+          <tr><td><code>score-data.json</code></td><td>The edition itself: every reading and variant, translations, notes and parallels on readings, the alignments from Positions, the lemmas, the project Dictionary, and the sent / revised marks.</td></tr>
+          <tr><td><code>score.txt</code></td><td>The synoptic score as plain text, rewritten on every save. Handy to read, not something to edit.</td></tr>
+          <tr><td><code>annotations.json</code></td><td>The <a href="#annotations">Notes panel</a>.</td></tr>
+          <tr><td><code>project.json</code></td><td>Name, eBL target chapter, siglum mapping.</td></tr>
+          <tr><td><code>images/</code></td><td>Photographs and PDF pages per source, with their drawings.</td></tr>
+          <tr><td><code>export-*.atf</code>, <code>ebl-chapter-backup-*.json</code></td><td>Written by <a href="#export">Export</a>: a copy of the ATF that was sent, and eBL's copy of the chapter as it was before a destructive send.</td></tr>
+        </table>
+        <div class="tip"><p>The folder can sit in Google Drive, OneDrive or Dropbox and be shared. Read <a href="#saving">Saving, syncing, shared folders</a> before two people work in it at once — the rules are simple but they matter.</p></div>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="window">
+        <h2>The window <a class="anchor" href="#window">#</a></h2>
+        <p>Three columns: the <strong>Sources</strong> list on the left, the <strong>Source Text</strong> editor in the middle, the <strong>Score</strong> on the right. The bar between editor and score drags to resize them.</p>
+        <h3>The header</h3>
+        <table>
+          <tr><td>Status dot</td><td>Green <em>Ready</em>; amber <em>Unsaved changes</em>; blue while saving or syncing; red on an error. <em>Synced</em> means the folder poll picked up a change made outside this window.</td></tr>
+          <tr><td><span class="btn">Save</span></td><td>Writes everything — the open source, <code>score.txt</code>, <code>score-data.json</code>. <kbd>Ctrl</kbd>+<kbd>S</kbd>. There is no autosave; see <a href="#saving">why</a>.</td></tr>
+          <tr><td><span class="btn">Search All</span></td><td>Search and replace across every source, or the composite text. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>. See <a href="#search">Search All</a>.</td></tr>
+          <tr><td><span class="btn">+ Add</span></td><td>A new source: create, import, or fetch from eBL. See <a href="#sources">Sources</a>.</td></tr>
+          <tr><td>☾</td><td>Dark / light mode. Remembered per browser, and followed by this page and the Reports page.</td></tr>
+          <tr><td>⚙</td><td><a href="#settings">Settings</a> — the project's eBL connection and manuscript metadata, on a page of its own.</td></tr>
+          <tr><td><span class="btn">Notes</span></td><td>The <a href="#annotations">Notes panel</a>; the badge counts open notes and turns red when one is a bug.</td></tr>
+          <tr><td><span class="btn">Reports</span></td><td>The log of every send to eBL, on its own page; the badge counts what is still open. See <a href="#marks">Marks and Reports</a>.</td></tr>
+          <tr><td><span class="btn">Export ▾</span></td><td><em>Export .txt</em> downloads the synoptic score; <em>Export to eBL</em> opens the <a href="#export">export dialog</a>.</td></tr>
+          <tr><td><span class="btn">Help</span></td><td>This page.</td></tr>
+        </table>
+        <p>The pill beside the project name says whether an eBL token is present. Without one everything works except sending; reading from eBL (fetching sources, pulling transliterations, the Parallels sweep) needs no token.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="sources">
+        <h2>Sources <a class="anchor" href="#sources">#</a></h2>
+        <p>Each row in the sidebar is one manuscript file. Click it to open it in the editor; the score does not change, since the score is always built from every source at once.</p>
+        <h3>What a row shows</h3>
+        <ul>
+          <li>The name — museum number or eBL siglum. <span class="btn">M#</span> at the top of the list switches between the two for the whole app, score included.</li>
+          <li>Its period, and <code>used/total</code>: how many of its numbered lines carry a § assignment. A file reading <code>0/12</code> is a tablet not yet placed anywhere. Hover for the full count.</li>
+          <li>A colour band by <strong>type</strong> — library, commentary, excerpt, school… — with a legend at the foot of the list. The same colour marks its rows in the score.</li>
+          <li><kbd>Ctrl</kbd>-click (or middle-click) the name to open the tablet in eBL's Fragmentarium in a new tab.</li>
+          <li>× removes the file from the project. It asks first.</li>
+        </ul>
+        <h3>Adding one</h3>
+        <p><span class="btn">+ Add</span> offers three ways:</p>
+        <ul>
+          <li><strong>Create New</strong> — asks for a filename (the museum number, e.g. <code>K.3547</code>) and starts the file with its name, <code>@obverse</code> and an empty <code>§1 1.</code>.</li>
+          <li><strong>Import Files</strong> — <code>.txt</code> files from your computer, already in the <a href="#format">source format</a>. Settings has a drag-and-drop version.</li>
+          <li><strong>Fetch from eBL</strong> — type a museum number and the Fragmentarium transliteration is written as a new source. Nothing is assigned to a § yet: that is the editorial work, and the file is ready for it.</li>
+        </ul>
+        <p>After any of these the <strong>Describe this source</strong> dialog asks for type, provenance, period and modifier — prefilled from eBL when it fetched the tablet. These four become the eBL siglum on export (<code>Nin</code> + <code>NA</code> + <code>Ex</code> + a number), so it is worth answering; <em>Skip</em> is there for when you do not yet know.</p>
+        <h3>The Source Text pane</h3>
+        <p>The editor colours the file's structure — surface markers, § markers, line numbers, <code>$</code> directives, notes, parallels — and marks every bracket that has no partner on its line. The pane header counts them (<em>3 unmatched brackets</em>, hover for the line numbers). A bracket that only balances once a <code>/</code> alternative is expanded — <code>m]i?-iq#-[tu₂/tu₄]</code> — is accepted; only a line that balances under no reading is reported.</p>
+        <p><span class="btn">eBL entry ↗</span> opens the tablet in the Fragmentarium. <span class="btn">Pull ↓</span> compares the file with eBL's transliteration line by line and shows what differs; you tick the lines to take. A pull rewrites only the transliteration after the <code>§N n.</code> prefix — every § assignment stays as it was, because those are yours, not eBL's.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="format">
+        <h2>Writing a source <a class="anchor" href="#format">#</a></h2>
+        <p>A source file is the tablet's transliteration, one line per tablet line, with a <code>§</code> in front of each line saying which chapter line it attests. That prefix is the whole mechanism: the score is nothing but every source's lines grouped by their §.</p>
+<pre><code>K.2246
+@obverse
+§1 1. DIŠ ina {iti}BARA₂ {mul}UDU.IDIM IGI-ir ina KUR DU₃.A-[B]I ŠE u ŠE.GIŠ.I₃ SI.SA₂
+§2 2. DIŠ {mul}UDU.IDIM ina {iti}BARA₂ it-tan-mar GU₇-ti {d}U.GUR a-bu-bu
+§3 3. DIŠ {mul}UDU.IDIM ina {iti}KIN it-tan-mar GU₇-ti {d}U.GUR a-bu-bu
+$ single ruling
+§32 19. DIŠ {mul}UDU.IDIM ša₂ {d}nin.urta MU-NI ina GU₄.UD-iṭ {d}UTU-ši KI {d}30 it-tan-mar#
+#note: alternatively KI 20 ŠU₂ IGI
+§32 20. ($___$) KIMIN KI 30 SIG IGI ina {iti}KIN U₄.7.KAM@v lu U₄.14.KAM@v
+50. DIŠ {mul}UDU.IDIM SA₅ ana A₂-šu₂ {mul}G[E₆ ...] GE₆
+@reverse
+§74 1'. [...] x [...]
+§83b 8. [DIŠ ṣal-lu-mu]-u₂ ša₂ {mul}UDU.IDIM IGI DU₃.A.BI MU BI KUR₂ ZI-ma
+// F K.3547 r 13'
+@colophon
+45'. [DUB.5]6.KAM@v DIŠ U₄ AN {d}+en.lil₂ x [...]
+</code></pre>
+        <table>
+          <tr><th>Line</th><th>Meaning</th></tr>
+          <tr><td>first line</td><td>The source's name. Kept as the file's title; not a tablet line.</td></tr>
+          <tr><td><code>@obverse</code></td><td>Surface marker: <code>@obverse</code>, <code>@reverse</code>, <code>@edge</code>, <code>@left edge</code>, <code>@right edge</code>, <code>@top</code>, <code>@bottom</code>, <code>@colophon</code>. The score shows the surface abbreviated beside the line number (<code>K.2246 r 28'</code>).</td></tr>
+          <tr><td><code>§32 19. text</code></td><td>Tablet line <code>19</code>, attesting chapter line <code>§32</code>. Primed numbers are fine: <code>§74 1'.</code>. Any label before the dot is accepted — <code>§5 iv 3.</code> — though plain numbers sort best.</td></tr>
+          <tr><td><code>§83b 8. text</code></td><td>The letter puts this line under the chapter line's <strong>second reading</strong> rather than its main one: <code>b</code> is the second, <code>c</code> the third. See <a href="#variants">Variants</a>. You rarely type this by hand — the variant dialog and dragging write it for you.</td></tr>
+          <tr><td><code>($___$) text</code></td><td>A continuation: the tablet line runs on into this one. It is shown under its witness in the score, indented, and counts as part of the same reading in Positions.</td></tr>
+          <tr><td><code>50. text</code></td><td>A line with no §: transcribed, but not yet placed. It appears nowhere in the score and counts in the sidebar's <code>used/total</code>.</td></tr>
+          <tr><td><code>$ single ruling</code></td><td>A ruling on the tablet (<code>single</code>, <code>double</code>, <code>triple</code>). Shown under the witness whose lines it follows. Any other <code>$</code> line — <code>$ rest of tablet blank</code>, <code>$ broken</code> — is a tablet remark, shown the same way.</td></tr>
+          <tr><td><code>§18 $ single ruling</code></td><td>A ruling assigned to a chapter line directly, for when it should sit under a particular § rather than follow the previous witness line. <code>§18 18. $ single ruling</code> is the same with the tablet line named.</td></tr>
+          <tr><td><code>#note: text</code></td><td>A note on the witness line above it. Shown under that witness in the score and sent to eBL as that manuscript line's note. More than one is allowed. Notes on the <em>reading</em> are written in the score, not here — see <a href="#notes">Notes and parallels</a>.</td></tr>
+          <tr><td><code>// F K.3547 r 13'</code></td><td>A parallel for the witness line above it, in eBL's form: <code>F</code> a fragment by museum number, <code>C</code> a composition, then the line. Collapsed under the witness in the score.</td></tr>
+          <tr><td><code>@colophon</code></td><td>Everything after it is the colophon. It is left out of the score and collected in the <a href="#tabs">Colophons</a> tab; the Parallels sweep uses it to find tablets from the same scribe.</td></tr>
+        </table>
+        <div class="tip"><p>A note or parallel attaches to the line directly above it. If that line has no § — an unplaced line — they attach to it and stay out of the score with it.</p></div>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="score">
+        <h2>Reading the score <a class="anchor" href="#score">#</a></h2>
+        <p>The score is one block per chapter line, in § order. The score is always rebuilt from the source files: nothing in it is stored separately except what you write into it — the reading, the translation, notes, parallels, and everything Positions and Lemmas record.</p>
+        <h3>One block</h3>
+        <ol>
+          <li><strong>Translation</strong> — the line above the reading. Editable in place; it becomes <code>#tr.en:</code> on export.</li>
+          <li><strong>§ number and reading</strong> — the composite text. Editable in place: click into it and type. While you are not editing, brackets and determinatives are set in colour so the line reads like the edition; while you edit, it is plain text so the caret behaves.</li>
+          <li><strong>Marks</strong> — <span class="mark never">·</span> or <span class="mark sent">✓</span> for <em>sent to eBL</em>, <span class="mark never">·</span> or <span class="mark sent">✎</span> for <em>revised</em>, and <span class="mark bad">✖</span> / <span class="mark changed">⚠</span> when a send left something to repair. Explained in <a href="#marks">Marks and Reports</a>.</li>
+          <li><strong>A numbered dot</strong> when the Notes panel has open notes anchored to this §; click it to see them.</li>
+          <li><strong>Actions</strong> — <span class="btn">#</span> <a href="#positions">Positions</a>, <span class="btn">L</span> <a href="#lemmas">Lemmas</a>, <span class="btn">⇗</span> validate and send this one § to eBL, and <span class="btn">+</span>.</li>
+          <li><strong>Witnesses</strong> — one row per source line, coloured by the source's type. The siglum is a link: it opens that source in the editor, at that very line. Continuations, witness notes, rulings and parallels follow their witness.</li>
+        </ol>
+        <h3>The + menu</h3>
+        <table>
+          <tr><td>Note</td><td>A <code>#note:</code> row under this reading. One per reading, so the entry greys out once there is one. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> while the caret is in the reading does the same.</td></tr>
+          <tr><td>Parallel</td><td>A <code>//</code> row. As many as needed. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> in the reading.</td></tr>
+          <tr><td>Compose from witnesses</td><td>Writes the reading from the witnesses' majority, sign by sign. See <a href="#compose">Composing</a>.</td></tr>
+          <tr><td>Compose from…</td><td>The same, from a chosen group of witnesses only.</td></tr>
+          <tr><td>Report on this reading</td><td>What the reading you have chosen costs in attestation, without changing it.</td></tr>
+          <tr><td>Check positions of this omen</td><td>The <a href="#positions">positions check</a> for this § alone — every reading and every witness of it.</td></tr>
+          <tr><td>Variant</td><td>A second reading of this line. See <a href="#variants">Variants</a>.</td></tr>
+          <tr><td>Delete this variant</td><td>On a variant row only. Its witnesses go back to the main reading.</td></tr>
+        </table>
+        <p>To delete a note or parallel row, clear it and click away. The prefix chip is not text — you cannot type over it or lose it.</p>
+        <h3>Order within a block</h3>
+        <p>Witnesses sort by type, then by source. A ruling sits under the last line of the witness it follows. Where a witness was moved to a variant before its ruling was, the ruling is shown where the lines are, not where the file happens to say.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="variants">
+        <h2>Variants <a class="anchor" href="#variants">#</a></h2>
+        <p>A variant is a whole second reading of a chapter line, with its own witnesses — not a word in an apparatus. This is eBL's model too: a line has readings, each reading has manuscripts. §12 with two readings looks like this in the score:</p>
+<pre><code>§ 12   DIŠ {mul}UDU.IDIM ina {iti}GAN iṣ-ru-uh-ma MU₂.MU₂ DINGIR-MEŠ UB.DA.LIMMU₂.BA LU₃-MEŠ
+       K.2173 o 12   DIŠ {mul}UDU.IDIM ina {iti}GAN iṣ-ru-uh-ma ...
+§ 12b  DIŠ {mul}UDU.IDIM ina SAG {iti}GAN iṣ-ru-ur-ma MU₂.MU₂ DINGIR-MEŠ ... KIMIN ina {iti}KIN
+       K.2246 o 12   [DIŠ {mul}]UDU.IDIM ina SAG {iti}GAN iṣ-ru-ur-ma ...
+</code></pre>
+        <h3>Making one</h3>
+        <p><span class="btn">+</span> → <strong>Variant</strong>. Select part of the reading first and the dialog opens with that text prefilled. Tick the witnesses that attest the new reading; their <code>§12</code> becomes <code>§12b</code> in their files. The main reading keeps the plain number.</p>
+        <h3>Moving a witness between readings</h3>
+        <p>Once a line has two readings, each witness row grows a handle at its right. Drag the handle — or hold <kbd>Ctrl</kbd> and drag anywhere on the row — onto the reading it belongs under. The § letter is rewritten in the file; a witness spread over several lines moves with all of them, and its rulings follow.</p>
+        <div class="tip"><p>The letter is this app's own device. eBL numbers the chapter line once and keeps the readings in order under it, so <code>§12b</code> never appears on eBL — but the second reading and its manuscripts do.</p></div>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="notes">
+        <h2>Notes and parallels on a reading <a class="anchor" href="#notes">#</a></h2>
+        <p>Both are added from the <span class="btn">+</span> menu and edited in place. They go to eBL with the reading. The <span class="btn">?</span> beside a note row brings you here.</p>
+        <h3>A note is markup, not free text</h3>
+        <p>eBL parses a <code>#note:</code> line as a sequence of tagged and untagged runs. Outside a tag the text may not contain <code>@</code>, <code>{</code> or <code>}</code> — one stray brace and eBL refuses the <em>whole line</em>, not just the word it sits in. That is why any transliteration in a note, and any determinative in particular, has to be wrapped.</p>
+        <table>
+          <tr><th>Tag</th><th>For</th></tr>
+          <tr><td><code>@akk{…}</code></td><td>Akkadian transliteration. Required for anything with braces: <code>@akk{{mul}UDU.IDIM}</code>. The content is parsed as ATF and shown in the transliteration font, so it has to be well formed.</td></tr>
+          <tr><td><code>@sux{…}</code></td><td>Sumerian.</td></tr>
+          <tr><td><code>@es{…}</code></td><td>Emesal.</td></tr>
+          <tr><td><code>@i{…}</code></td><td>Italics, for a word of prose.</td></tr>
+          <tr><td><code>@bib{KEY@pages}</code></td><td>A bibliography entry by its eBL id; the pages are optional.</td></tr>
+          <tr><td><code>@url{https://…}{label}</code></td><td>A link; the label is optional.</td></tr>
+        </table>
+        <p>Tag each citation on its own. One <code>@akk{}</code> around a whole sentence would ask eBL to parse the English as ATF.</p>
+<pre><code>#note: § 83 and § 86 differ only in the body named. UrkHel1 r 8 names @akk{{mul}UDU.IDIM} and could stand with § 83, but its wording is this omen's — @akk{i-da-aš}, and @akk{KUR₂ BI} before @akk{DUGUD-šu₂} — against § 83's @akk{KUR DU₃.A-BI TUR-ar₂} and @akk{ina DUGUD-šu₂}; it is edited here.
+</code></pre>
+        <h3>A parallel is a reference, not prose</h3>
+        <p>A <code>//</code> row names another text in eBL's grammar: <code>F</code> for a fragment, <code>C</code> for a composition, then where.</p>
+<pre><code>// F K.3547 r 13'
+// F BM.35903 4'
+// C D 1 4 SB 55 12
+</code></pre>
+        <p>A <code>cf.</code> before the letter marks a looser parallel: <code>// cf. F K.7180 3'</code>.</p>
+        <h3>Pointing at a tablet</h3>
+        <p>Name a source and a line in a note — <code>UrkHel1 o 59</code>, <code>K.2246 r 28'</code>, <code>AO.6450 8</code> — and a chip appears beside the note that opens that source at that line, surface and all. A name counts only if the project has it: the museum number the file is named by, or the eBL siglum the project maps it to. The surface is optional but worth giving, since a tablet numbers each side from its own 1.</p>
+        <p>On eBL the note stays as written. Note markup has no tag for a fragment; the only link it allows is <code>@url{https://www.ebl.lmu.de/library/AO.6450}{UrkHel1 o 59}</code>, which you can write by hand if a clickable reference matters there. A <code>//</code> parallel row is what eBL renders as a link to a fragment — use that when the reference <em>is</em> a parallel rather than a remark about one.</p>
+        <h3>Notes on a witness</h3>
+        <p>A note that is about one tablet's reading rather than the chapter line is typed in the source file, as a <code>#note:</code> line under that witness line (<a href="#format">Writing a source</a>). The same markup rules apply, and references in it get chips the same way.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="positions">
+        <h2>Positions <a class="anchor" href="#positions">#</a></h2>
+        <p>Positions mode is where you say which word of a witness answers to which word of the reading. This alignment is what eBL's hover follows, what marks omissions with <code>‡</code>, what lets a witness word inherit a lemma, and what the tallies and statistics measure. It is worth doing for every line you send.</p>
+        <p>Turn it on for one line with <span class="btn">#</span> in its header, or <kbd>Alt</kbd>+<kbd>P</kbd> with the line under the cursor; for the whole project with <span class="btn">Positions</span> in the score's header bar, or <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>.</p>
+        <h3>What you see</h3>
+        <p>The reading becomes a ruler: each word numbered from 0 and coloured. Dividers (<code>:</code>) and placeholders (<code>[...]</code>, <code>x</code>) are numbered too, because eBL numbers them, but shown grey — nothing aligns to them. Under it, every witness word carries a small box.</p>
+        <h3>Filling it in</h3>
+        <ul>
+          <li>Type the number of the reading word each witness word answers to. The word takes that position's colour as you type, so a misnumbering is visible at once.</li>
+          <li><kbd>Enter</kbd> commits and steps to the next box; <kbd>Shift</kbd>+<kbd>Enter</kbd> steps back. <kbd>Tab</kbd> works as well.</li>
+          <li>Leave a box empty for a word that answers to nothing — a plus, a gloss, something the witness adds.</li>
+          <li>Two witness words may point at one position (a word written twice; a commentary quoting its lemma and then quoting it again). The tally names it.</li>
+        </ul>
+        <p>The quickest start is <span class="btn">+</span> → <strong>Compose from witnesses</strong>, which writes the reading <em>and</em> its alignment in one go, so Positions opens already filled in and you only correct. See <a href="#compose">Composing</a>.</p>
+        <h3>The tally</h3>
+        <p>Under the last line of each witness, the verdict for the whole omen:</p>
+        <table>
+          <tr><td><code>✓</code></td><td>Every position accounted for; nothing differs.</td></tr>
+          <tr><td><code>omits 5,6,8</code></td><td>Positions the witness preserves the stretch around, but has no word for. A claim about the tablet.</td></tr>
+          <tr><td><code>lost 20–24</code></td><td>Positions inside a break. Not a claim — a broken tablet says nothing.</td></tr>
+          <tr><td><code>reads otherwise at 1,3,14</code></td><td>A word is there, but its signs differ from the reading's. Compared as signs, so <code>{iti}BAR₂</code> against <code>{iti}BARA₂</code> is one word and <code>IGI</code> against <code>IGI-ir</code> is a complement, not a difference.</td></tr>
+          <tr><td><code>two words at 7</code></td><td>Two witness words point at position 7.</td></tr>
+          <tr><td><code>1 unplaced</code></td><td>A witness word with an empty box.</td></tr>
+          <tr><td><code>⋯</code></td><td>On the earlier lines of a witness that spreads the omen over several — the verdict is under its last line.</td></tr>
+        </table>
+        <h3>The daggers</h3>
+        <p>A <code>‡</code> before a reading word is what eBL will print there: some witness either reads that word differently or has not got it. It is shown in the score so the published line can be seen before it is published. Hover for which witnesses.</p>
+        <p>Click any reading word to see, omen by omen, who has a word there, who omits it, who is broken, and who reads otherwise.</p>
+        <div class="tip"><p>Alignments are stored per witness <em>line</em>, so two lines of one tablet under one § never share one. When a tablet gives an omen over several lines, the tally reads them as one stream.</p></div>
+        <h3>When the reading changes</h3>
+        <p>A box holds a position <em>number</em>, and so does a lemma. Insert a word into the reading and every number after it would point at a different word — which is what happened to §88 and §89 while they were being rebuilt. So the numbers now follow the words: when a reading is edited, its old and new tokens are paired up and every box and lemma is carried across. A respelt word keeps its boxes and its lemma (the lemma drops back to <em>suggested</em>, since someone should look at it again); a word that disappears takes its boxes with it, leaving those witness words unplaced. The same carrying happens when a witness is <a href="#variants">moved to another reading</a>, whose words are numbered differently.</p>
+        <p>For anything aligned before this existed, and for anything that slips past it, <span class="btn">Check positions</span> in the score header asks three questions of every aligned row in the project — or, from a reading's <span class="btn">+</span> menu, <em>Check positions of this omen</em> asks them of one § alone, which is the way to work a long omen while its reading is still moving:</p>
+        <ul>
+          <li><strong>Does each witness word resemble the reading word its box points at?</strong> Tolerantly: a plural marker (<code>-MEŠ</code>, <code>-ME</code>, <code>HI.A</code>), a phonetic complement (<code>IGI</code> against <code>IGI-ir</code>), a determinative and damage marks do not count, a spelling that shares nine tenths of its signs passes, and so does a witness word the dictionary would give the same lemma the reading word carries — <code>ti-bu</code> against <code>ZI-ut</code>, both <em>tību</em> — once the reading word has been lemmatized. Below that the pairing is raised — <em>73 % alike</em> — and a pairing with <strong>nothing in common</strong> is raised louder, since that is what a box left over from an older reading looks like.</li>
+          <li><strong>Do the words fit better a few positions over?</strong> Asked strictly, because EAE repeats its phrases and a coincidence four words away is common: only a run of boxes that all agree on the same shift, and fit clearly better than in place, is reported, with an <em>Apply</em> that slides the boxes from the first drifting word onward. A box that would leave the reading is emptied rather than pointed at nothing.</li>
+          <li><strong>Does any box point past the end of the reading, or belong to a word the line no longer has?</strong> Each can be emptied with one press.</li>
+          <li><strong>Is a position taken twice?</strong> Asked of the whole omen, across every line the witness gives it, since a tablet that needs three lines for one omen numbers them as one stream. The first word keeps the position; each later one is raised — a commentary quoting its lemma twice is the honest case, and gets <em>OK</em>.</li>
+          <li><strong>Does the numbering run backwards?</strong> Read in tablet order, line after line, the positions should climb; <code>28, 29, 12</code> is raised at the 12, and so is a second line that starts below where the first ended.</li>
+        </ul>
+        <p>Nothing changes until you press something. A pairing that is right as it stands — a genuine variant, a syllabic spelling of a logogram — gets <em>OK</em>, which declares those two writings one word <strong>for the whole project</strong>: <code>IGI-ir</code> against <code>it-tan-mar</code>, accepted once, is never raised again in any omen, either way round, and every other pairing of the two in the open report is settled with it. <em>Only here</em> accepts one box without saying anything about the words elsewhere — for the scribal slip you have decided to live with. A whole row can be accepted at once. The acceptances are saved with the project (<code>acceptedPairs</code> and <code>alignmentOk</code> in <code>score-data.json</code>), so they survive closing the app and a collaborator's check honours them too.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="lemmas">
+        <h2>Lemmas and the Dictionary <a class="anchor" href="#lemmas">#</a></h2>
+        <p>Lemmas mode gives each word of the reading its dictionary word — <code>amāru I</code>, <code>bibbu I</code>. Witness words are not lemmatized separately: each takes the lemma of the reading word it is <a href="#positions">aligned</a> to, which is why aligning a line first makes the lemmas come with it.</p>
+        <p>Turn it on for one line with <span class="btn">L</span> or <kbd>Alt</kbd>+<kbd>L</kbd>; for the project with <span class="btn">Lemmas</span> or <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>.</p>
+        <h3>What you see</h3>
+        <p>Each word of the reading becomes a chip with its lemma written under it, in one of four states:</p>
+        <table>
+          <tr><td><em>no lemma</em></td><td>Nothing chosen yet.</td></tr>
+          <tr><td>suggested</td><td>The dictionary's proposal, not yet confirmed. Shown lighter.</td></tr>
+          <tr><td>confirmed</td><td>Chosen or accepted by an editor.</td></tr>
+          <tr><td>blank</td><td>Nothing to lemmatize — a divider, a number, a placeholder. Skipped by Tab.</td></tr>
+        </table>
+        <p>With the mode off, a line that has lemmas shows them in a thin strip under the reading, so they stay readable without the chips.</p>
+        <h3>The picker</h3>
+        <p>Click a chip, or <kbd>Tab</kbd> to it and press <kbd>Enter</kbd>. A list opens under the word — the dictionary's candidates for that spelling, each with a guide word and, when it applies, why it was suggested.</p>
+        <table>
+          <tr><td>type</td><td>Filters the list. Type a lemma id the list does not offer and it is taken as written.</td></tr>
+          <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>Move in the list.</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>Choose the highlighted lemma and confirm the word.</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Choose it <em>and record it in the Dictionary</em> for the project — from now on this spelling suggests this lemma first, everywhere.</td></tr>
+          <tr><td>the pin</td><td>Same as <kbd>Ctrl</kbd>+<kbd>Enter</kbd>, by mouse.</td></tr>
+          <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Accept what is in the box and open the next (previous) word. This is the whole of the work: read the suggestion, accept it or change it, move on. Accepting counts as confirming.</td></tr>
+          <tr><td><span class="btn">+</span></td><td>Adds a slot: a compound logogram is one writing for two words, and after the <code>+</code> the candidates are offered again for the second — <code>ṣītu I + šamšu I</code> in two picks.</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Close without changing anything.</td></tr>
+        </table>
+        <h3>Filling a chapter</h3>
+        <p><kbd>Shift</kbd>-click the <span class="btn">L</span> of a line to prefill suggestions from that line to the end of the chapter. Prefill only fills what is empty, so it is safe to run again; it never overwrites a choice.</p>
+        <h3>The Dictionary</h3>
+        <p><span class="btn">Dictionary</span> in the score header, or <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd>. The general dictionary knows what <code>IGI</code> can mean; it cannot know that in this edition it is always <code>amāru</code>. Recorded here — as <em>Written</em> → <em>Read as</em> — the decision is made once instead of on every line, and it outranks everything the shipped dictionary would offer. Spelling is normalised, so <code>IGI</code>, <code>igi</code> and <code>{d}IGI</code> are one entry.</p>
+        <p>The Dictionary lives in <code>score-data.json</code> beside the lemmas. <em>Export for another project</em> and <em>Import a dictionary</em> carry it between editions: the readings you settle for one text are usually the ones you will settle for the next.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="compose">
+        <h2>Composing a reading <a class="anchor" href="#compose">#</a></h2>
+        <p>Composing writes a reading from its witnesses, taking at each position what the majority reads, sign by sign, and writes the alignment behind it at the same time. It never runs on its own: it replaces text an editor may have weighed for a long time, so it runs only when asked, and asks again if the reading is not empty.</p>
+        <table>
+          <tr><td>Compose from witnesses</td><td>All witnesses of this reading vote.</td></tr>
+          <tr><td>Compose from…</td><td>A picker of scopes: every witness, one provenance, one period, one type, or a single tablet — each with the number of witnesses it would take. Options that would select nothing are not offered. For "give me the Nineveh text" or "what does the Uruk copy alone say".</td></tr>
+          <tr><td><span class="btn">Compose all</span></td><td>Every reading in the project. Overwrites what is there; asks first.</td></tr>
+          <tr><td>Report on this reading</td><td>For when you have chosen a reading the witnesses do not most attest — a <em>lectio difficilior</em>, a form the majority corrupted, a house spelling. That is a decision, not a mistake, and the report shows exactly what it costs in attestation without offering to overwrite it. It writes nothing.</td></tr>
+        </table>
+        <p>Every composition ends in a report: what was taken from whom, where the witnesses split, and which words were set aside as illegible. Read it before trusting the line.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="tabs">
+        <h2>The other tabs <a class="anchor" href="#tabs">#</a></h2>
+        <h3>Colophons</h3>
+        <p>Everything after <code>@colophon</code> in each source, gathered in one place, with the source named. Nothing to edit here; edit the file.</p>
+        <h3>Parallels</h3>
+        <p>A sweep of the whole Fragmentarium against this project's sources, to find fragments that transmit the same composition or come from the same scribe. The corpus is eBL's sign dump, cached locally on first use, so a sweep costs no requests and can be re-run freely.</p>
+        <ul>
+          <li><strong>Sign run</strong> — how many signs in a row must match. 3 is the default and the safe one: what is being hunted is broken fragments preserving short stretches, and longer runs lose them. Raise it when a list comes back too noisy.</li>
+          <li><strong>Weighting</strong> — <em>Rare sequences</em> scores a match by how unusual its sign runs are; <em>Plain overlap</em> just counts them. Rare sequences finds the known pieces better and is the default.</li>
+          <li><strong>Source</strong> — pool every source into one query (the default, because the union of the witnesses is what finds missing ones), ask with a single tablet, or ask with the composite text alone.</li>
+          <li><strong>Range</strong> — restrict to chapter lines (<code>35-60</code>, <code>§40</code>) or one tablet line of the chosen source (<code>o 59</code>, <code>r 12'</code>).</li>
+          <li><strong>Ignore fragments under</strong> — drops tiny fragments that match by chance.</li>
+        </ul>
+        <p>Each hit scores on two channels: <strong>Text</strong> — shared composition, so another witness — and <strong>Colophon</strong> — shared scribe or library, so a join candidate. Click a hit to read the whole fragment in a tab of its own beside Images, without it becoming a source; <span class="btn">Add as source</span> when you are sure. <em>Mark as checked</em> records that someone has been through it, with the date, so the list can be worked down across sessions.</p>
+        <h3>Paradigms</h3>
+        <p>Template twins of one chapter line across the corpus: lines that agree with it for three signs on either side of a short middle that differs. The distinct middles, decoded and ranked by how many contexts attest them, are the paradigm of that slot — planets in a planet slot, verbs in a verb slot. For "what else was written here in this formula".</p>
+        <h3>Statistics</h3>
+        <p>Every section measured against its own witnesses at once — how many attest it, how far they agree — so the edition can be read as a whole rather than one omen at a time. The sections where the witnesses disagree are where the editorial work is, and this is the only place that is visible without opening each one. It writes nothing.</p>
+        <h3>Images</h3>
+        <p>Photographs, hand copies and PDF pages, per source. Open a source, then <span class="btn">+ Upload</span>: PNG and JPG are stored as they are; for a PDF a page picker opens and the chosen page is saved as an image. Thumbnails open the viewer.</p>
+        <table>
+          <tr><td>Select / Pan</td><td>Drag to move the image; scroll or <span class="btn">+</span> <span class="btn">−</span> to zoom; <span class="btn">Fit</span>.</td></tr>
+          <tr><td>Draw, Line</td><td>Freehand strokes, or click-to-place points and double-click to finish. Colour, thickness and opacity beside them. Drawings are saved with the image and reload with it.</td></tr>
+          <tr><td>Erase, Undo</td><td>Delete the selected drawing; undo the last one.</td></tr>
+          <tr><td>‹ ›</td><td>Previous and next image of this source.</td></tr>
+          <tr><td>✓</td><td>Mark the image as transliterated. The thumbnail wears the mark, so the pile of what is still to do is visible from the grid.</td></tr>
+        </table>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="search">
+        <h2>Search All <a class="anchor" href="#search">#</a></h2>
+        <p><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>, or the header button. Results update as you type; click one to open that source at that line.</p>
+        <table>
+          <tr><td>Scope</td><td><em>All sources</em> searches every file; <em>Composite text</em> searches the readings alone.</td></tr>
+          <tr><td>Regex</td><td>The pattern is a regular expression, left exactly as typed. <code>^</code> and <code>$</code> anchor to lines.</td></tr>
+          <tr><td>Case sensitive</td><td>Off by default.</td></tr>
+          <tr><td>Ignore [ ] # ?</td><td>On by default. Brackets, half brackets, damage and collation marks, erasures, determinative and parenthesis braces are ignored on both sides, so <code>ina KUR</code> finds <code>ina# K[UR</code>.</td></tr>
+          <tr><td>Signs</td><td>Match by sign rather than by reading, as eBL does: <code>dele-bat</code> finds <code>DIL.BAD</code>, since both write the same signs. This subsumes the option above.</td></tr>
+        </table>
+        <h3>Replace</h3>
+        <p><span class="btn">Replace</span> changes the selected hit, <span class="btn">Replace All</span> every hit in the current scope, <span class="btn">Undo</span> puts the last replacement back. Replace is unavailable while <em>Ignore [ ] # ?</em> is on: a match found in the stripped text may span brackets that were dropped inside it, and writing over it would leave an unbalanced bracket in the source. Untick the option to replace.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="annotations">
+        <h2>The Notes panel <a class="anchor" href="#annotations">#</a></h2>
+        <p>Working notes for the project — things to check, questions, references, bugs in the app — kept in <code>annotations.json</code>, never exported. Not to be confused with the <code>#note:</code> rows in the score, which are part of the edition and go to eBL.</p>
+        <p>A note has a type (commentary, reference, bug, enhancement), a title, an optional description, and optionally an anchor: a source, a §, or both. Anchored notes show chips that jump to the source or the score line, and the § line in the score wears a numbered dot while any note on it is open.</p>
+        <p>A note anchored to a § remembers what the line read when it was written. If the text changes afterwards, the note shows <em>text changed</em> with the old reading on hover — notes are references, not tethers, so on a mismatch the panel flags it rather than guessing where the line went.</p>
+        <p>The filter narrows by state or type; clicking a dot in the score narrows to that §. Resolve a note when it is done; it stays reachable under <em>Resolved</em>. The badge on the button counts open notes and turns red while any of them is a bug.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="marks">
+        <h2>Marks and Reports <a class="anchor" href="#marks">#</a></h2>
+        <p>Each § header carries two marks that answer, reading down the page, "what still needs sending?" and "what still needs reading?" — without anything having to be opened.</p>
+        <h3>Sent <span class="mark never">·</span> <span class="mark sent">✓</span> <span class="mark changed">✓</span></h3>
+        <table>
+          <tr><td><span class="mark never">·</span> blue</td><td>Nothing has been sent from here.</td></tr>
+          <tr><td><span class="mark sent">✓</span> green</td><td>Sent, and the section still reads as it did.</td></tr>
+          <tr><td><span class="mark changed">✓</span> amber</td><td>Sent, then edited. It wants sending again.</td></tr>
+        </table>
+        <p>The mark can only speak for sends made from this app, so a chapter that reached eBL some other way starts out all blue. Click a mark to say "this is on eBL already"; <kbd>Shift</kbd>-click to carry that down from the last mark you set, so a run of omens takes two clicks. From then on it behaves like any other mark and clears itself when the section changes.</p>
+        <h3>Revised <span class="mark never">·</span> <span class="mark sent">✎</span></h3>
+        <p>The human counterpart: a pencil for "an editor has read this through", worked and worn exactly the same way — green while the text stands, amber once it is edited after.</p>
+        <h3>Issues <span class="mark bad">✖</span> <span class="mark changed">⚠</span></h3>
+        <p>What the last send left broken: <span class="mark bad">✖</span> when nothing went through, <span class="mark changed">⚠</span> when parts did. Clicking opens the Reports page on that section's reports, which say what to repair on eBL by hand; the sign clears when the report is ticked.</p>
+        <h3>The Reports page</h3>
+        <p><span class="btn">Reports</span> opens it in its own window, so it can stand beside the scorer. Every send is logged — what was sent, what eBL answered, what was left to check. Filter <em>All / Open / Done</em>; tick a report when you have checked or repaired it on eBL, and the section's sign clears with it. A newer send of the same thing closes the reports the older one left open. <span class="btn">+ Add</span> writes a report by hand, for things you noticed yourself.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="export">
+        <h2>Export <a class="anchor" href="#export">#</a></h2>
+        <h3>Export .txt</h3>
+        <p>Downloads the synoptic score as plain text — the same as <code>score.txt</code> in the folder:</p>
+<pre><code>SYNOPTIC SCORE
+==============
+
+#tr.en: If a comet from Mars is seen, in the whole country, in that year, ...
+§ 86 DIŠ ṣal-lum-mu-u₂ ša₂ {mul}ṣal-bat-a-nu IGI ina KUR DU₃.A-BI ina MU BI KUR₂ ZI-ma ...
+  K.2246 r 28'          DIŠ ṣal-lum-mu-u₂ ša₂ {mul}ṣal-bat#-a-nu IGI ina KUR DU₃.A-BI ...
+  K.7180 3'             [DIŠ ṣal-lum-m]u-u₂ ša₂ {mul}ṣal-bat-a-nu IGI-ir ina# [KUR ...
+                        i#-da#-aš₂ TUR-ar₂ {lu₂}KUR₂ BI ina DUGU[D-šu₂ ZAH₂ ...]
+  K.7180                $ single ruling
+</code></pre>
+        <h3>Export to eBL</h3>
+        <p>The dialog first shows what it is about to act on: the target chapter, whether a token is present, the manuscripts and their state, and <strong>On eBL now</strong> — how many lines the chapter currently holds, with <em>list them</em> to see them in eBL's order. Reading only; nothing is sent by opening the dialog.</p>
+        <table>
+          <tr><th>What to do</th><th>Effect</th></tr>
+          <tr><td>Validate only</td><td>Checks the ATF with eBL's own parser. Nothing is sent. Run this first, always.</td></tr>
+          <tr><td>Replace all lines</td><td>Backs up the chapter, deletes every existing line, then imports these. Lemmatization and alignment eBL held on the old lines are lost — for a chapter's first upload, or a deliberate reset.</td></tr>
+          <tr><td>Update one line</td><td>Replaces a single § in place. Every other line keeps its lemmatization and alignment. The everyday send.</td></tr>
+          <tr><td>Update a range of lines</td><td>The same for §a to §b in one request.</td></tr>
+          <tr><td>Send the alignment</td><td>The Positions data for the whole chapter — which witness word answers to which, and what it reads if it differs. This is what eBL's hover follows, and a line export cannot carry it, which is why it is a step of its own.</td></tr>
+          <tr><td>Send the lemmas</td><td>The Lemmas data for the whole chapter. Witness words take the lemma of what they are aligned to, so align first.</td></tr>
+          <tr><td>Remove lines from the end</td><td>Deletes a run of lines from a chosen position down to the last. Only ever a tail, never a gap in the middle, so nothing left behind can shift. Use it to cut off strays appended out of order, then send those sections again.</td></tr>
+        </table>
+        <p>Options under the modes:</p>
+        <ul>
+          <li><strong>…and the alignment after</strong>, <strong>…and the lemmas after</strong> — for a line send. eBL rebuilds a line's tokens from the ATF it is sent, so the alignment and lemmas it held for that line are gone the moment the line lands; sending them again is what keeps the line whole. On by default.</li>
+          <li><strong>Register manuscripts first</strong> — a witness eBL does not know is left out of every line that quotes it, so a new tablet has to be registered before its lines can go. Off by default; tick it the first time a tablet goes. Settings does the same with more control.</li>
+          <li><strong>Save a copy of the ATF in the project folder</strong> — <code>export-&lt;time&gt;.atf</code>, a full snapshot of what was sent. Cheap insurance.</li>
+        </ul>
+        <p><strong>What will be sent</strong> shows the exact ATF. Below it the steps light up as they run, and the result says what happened — and writes a report. A destructive mode backs the chapter up first as <code>ebl-chapter-backup-&lt;time&gt;.json</code>, eBL's own copy of it, so a bad send can be undone from the folder.</p>
+        <p>The <span class="btn">⇗</span> on a § header is <em>Update one line</em> for that § alone, with the same validation and the same report.</p>
+        <div class="warn"><p>A send replaces the whole line object on eBL. Anything on that line that this project does not carry — an <code>‡</code> omission an editor marked by hand on the site, an intertext — is read from eBL first and sent back as it stands, but only if the send goes through here. Editing the same chapter on the site and from the scorer at the same time is the one thing that cannot be made safe.</p></div>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="settings">
+        <h2>Settings <a class="anchor" href="#settings">#</a></h2>
+        <p>⚙ opens the project's management page. It holds what changes rarely.</p>
+        <h3>Source Files</h3>
+        <p>The <code>.txt</code> files in the folder, with create and fetch-from-eBL, and a way back to the scorer.</p>
+        <h3>eBL Manuscript Metadata</h3>
+        <p>One row per source: museum number, provenance, period, modifier, type, disambiguator — and the siglum they add up to, <code>provenance + period + type + number</code>: <code>NinNA2</code>, <code>UrkHel1</code>, <code>NinNAEx4</code>. <span class="btn">Auto-fill from eBL</span> pulls the fields from the target chapter if the tablet is registered there, and from the Fragmentarium otherwise.</p>
+        <h3>eBL Export</h3>
+        <ul>
+          <li><strong>Token</strong> — sending needs a bearer token from a logged-in eBL session with the <code>write:texts</code> scope. On www.ebl.lmu.de open DevTools → Network, click around, and copy the <code>Authorization: Bearer eyJ…</code> value from any request to <code>/api</code>. It is stored in this browser only. <span class="btn">Test connection</span> says whether it works.</li>
+          <li><strong>Target chapter</strong> — the coordinates from the chapter's URL: <code>/corpus/D/1/4/SB/56</code> is genre <code>D</code>, category <code>1</code>, index <code>4</code>, stage <code>SB</code>, name <code>56</code>. <span class="btn">Fetch chapter info</span> confirms it exists and what it holds.</li>
+          <li><strong>Registering the manuscripts</strong> — <span class="btn">Compare with eBL</span> shows which of the project's sources the chapter already knows, which are new, and whose sigla clash. <span class="btn">Take eBL's numbering</span> adopts the chapter's existing ids. <span class="btn">Give the clashing tablets a free number</span> resolves clashes. <span class="btn">Renumber sigla per group</span> numbers each provenance–period–type group on its own, so the tenth excerpt is <code>Ex10</code>, not <code>Ex37</code>. <span class="btn">Register manuscripts</span> sends the result.</li>
+        </ul>
+        <h3>Import Sources</h3>
+        <p>Drop <code>.txt</code> files here to add them to the project.</p>
+        <h3>Danger Zone</h3>
+        <p>Removes the project from the list. The files on disk are not touched; the folder can be opened again later.</p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="saving">
+        <h2>Saving, syncing, shared folders <a class="anchor" href="#saving">#</a></h2>
+        <h3>Saving</h3>
+        <p>Edits land in memory at once — the score follows a keystroke a moment later — but reach the disk only on <span class="btn">Save</span> or <kbd>Ctrl</kbd>+<kbd>S</kbd>. The status turns amber the moment something is unsaved, and the browser warns before the window is closed with unsaved changes.</p>
+        <p>There is deliberately no autosave. On a cloud-synced folder a file rewritten every few seconds is a file the sync client keeps duplicating as "conflicted copies"; one write per intentional save is what keeps the folder clean. Position boxes and lemma picks, which used to write on every entry, now save a moment after you stop; <span class="btn">Save</span> flushes anything pending first.</p>
+        <h3>How a file is written, and why it matters on Drive</h3>
+        <p>A browser cannot modify a file on disk; it can only write a new one and swap it over the old. A sync client sees that swap as <em>delete, then create</em>. On a shared Google Drive folder, when the file belongs to another account, the create is sometimes refused — Drive then moves your save to its <code>lost_and_found</code> folder and pulls its own copy back, and the scorer's folder poll reloads that copy. The save looks done and is gone.</p>
+        <p>When the scorer runs as the desktop app (or from its own server), saves go through the server instead, which writes <em>into</em> the existing file — a plain modification, which any sync client accepts and which keeps the file's identity and version history. The page cannot learn where a picked folder lives, so the first time a project is opened this way it asks for the folder's path, once per computer; after that the choice is remembered. Decline, and the browser's swap is used as before. Nothing else changes: the same files, the same folder.</p>
+        <h3>Syncing</h3>
+        <p>The folder is polled for changes made outside this window — by a collaborator, by the sync client, by you in another tab. A changed source is reloaded and the score rebuilt (the status says <em>Synced</em>); the source you are typing in is left alone while the editor has focus. A rebuild that arrives while a lemma picker or a position box is open waits until you are done with it, so nothing half-typed is lost.</p>
+        <p>Two things the poll will not do. It will not mistake your own save for a change: a sync client rewrites a file's time a few seconds after the save, once the cloud has it, and the app recognises the file it wrote itself by its stamp. And it will never reload a file over edits you have not saved: if <code>score-data.json</code> really has changed underneath you — another window, another person — the status turns red and says so, your edits stay, and you choose: <span class="btn">Save</span> to overwrite the file with yours, or reload the page to take theirs.</p>
+        <p>Two windows of the same project on one machine talk to each other directly: a save in one reaches the other at once.</p>
+        <h3>Working in a shared folder</h3>
+        <div class="warn">
+          <p><strong>One person per file at a time.</strong> A save writes whole files — a source file, or all of <code>score-data.json</code>. Two people saving the same file are not merged; the second save replaces the first. Agree who has the score open, and who has which tablets.</p>
+        </div>
+        <ul>
+          <li>Before starting, save and wait for the sync client to finish; after finishing, save and wait again. The folder poll then hands your work to the other side cleanly.</li>
+          <li>Google Drive keeps a version history per file (right-click on drive.google.com → <em>File information → Manage versions</em>). It works as long as the file keeps its identity; a client that deletes and recreates a file on save starts that file's history over, and the old one goes to the trash for 30 days. If a folder shows two files of one name, that has happened.</li>
+          <li>The export ATF snapshots and chapter backups in the folder are the other safety net: every send leaves behind a complete copy of the score as it was.</li>
+        </ul>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="shortcuts">
+        <h2>Keyboard shortcuts <a class="anchor" href="#shortcuts">#</a></h2>
+        <table>
+          <tr><th>Anywhere</th><th></th></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save.</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Search All. <kbd>Esc</kbd> closes it.</td></tr>
+          <tr><td><kbd>Alt</kbd>+<kbd>P</kbd> / <kbd>Alt</kbd>+<kbd>L</kbd></td><td>Positions / Lemmas for the § under the cursor.</td></tr>
+          <tr><td><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd></td><td>Positions / Lemmas for the whole project.</td></tr>
+          <tr><td><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd></td><td>The Dictionary.</td></tr>
+          <tr><th>In a reading</th><th></th></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd></td><td>Add a note row.</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Add a parallel row.</td></tr>
+          <tr><th>In the lemma picker</th><th></th></tr>
+          <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>Move in the list.</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>Choose and confirm.</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Choose, and record it in the Dictionary.</td></tr>
+          <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Accept and move to the next / previous word.</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Close without changing.</td></tr>
+          <tr><th>In a position box</th><th></th></tr>
+          <tr><td><kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>Commit and step to the next / previous box.</td></tr>
+          <tr><th>With the mouse</th><th></th></tr>
+          <tr><td><kbd>Ctrl</kbd>-click a source</td><td>Open it in the Fragmentarium.</td></tr>
+          <tr><td><kbd>Ctrl</kbd>-drag a witness row</td><td>Move it to another reading of the line.</td></tr>
+          <tr><td><kbd>Shift</kbd>-click a ✓ mark</td><td>Mark as sent from the last mark set to here.</td></tr>
+          <tr><td><kbd>Shift</kbd>-click an <span class="btn">L</span></td><td>Prefill lemma suggestions from that § to the end.</td></tr>
+          <tr><td>Select text, then + → Variant</td><td>The selection becomes the variant's text.</td></tr>
+        </table>
+      </section>
+
+    </article>
+  </div>
+
+  <script>
+    // The scorer's theme, read the way the reports page reads it.
+    if (localStorage.getItem('dark_mode') === 'true') document.body.classList.add('dark-mode');
+
+    // The table of contents follows the reader: the section nearest the top of
+    // the viewport is the one marked.
+    (() => {
+      const links = [...document.querySelectorAll('nav.toc a[href^="#"]')];
+      const byId = new Map(links.map((a) => [a.getAttribute('href').slice(1), a]));
+      const sections = [...document.querySelectorAll('article section[id]')];
+      let current = null;
+      const mark = () => {
+        const top = 90;
+        let best = sections[0];
+        for (const s of sections) {
+          if (s.getBoundingClientRect().top - top <= 0) best = s; else break;
+        }
+        if (best === current) return;
+        current = best;
+        links.forEach((a) => a.classList.remove('is-here'));
+        const a = byId.get(best.id);
+        if (a) a.classList.add('is-here');
+      };
+      document.addEventListener('scroll', mark, { passive: true });
+      mark();
+    })();
+  </script>
+</body>
+</html>

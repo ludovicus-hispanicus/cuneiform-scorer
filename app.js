@@ -277,6 +277,15 @@ const variantLines = {};
 // projected onto "absent or not". The pairings themselves, and the
 // substitutions they reveal, live here and nowhere else.
 const lineAlignments = {};
+// Pairings a reader has looked at and accepted, so the positions check does
+// not raise them again: [lineNum][witness key][witness index] = { w, r }, the
+// two words as compared; and [lineNum][witness key].shift = the row as it
+// stood when its alignment was declared right despite fitting elsewhere.
+const alignmentOk = {};
+// Pairs of writings a reader has declared one word — IGI-ir and it-tan-mar —
+// for the project as a whole: keyed by the two words as compared, either way
+// round, and never raised again anywhere.
+const acceptedPairs = {};
 
 // Lemmas chosen for the reading, as lemmaChoices[section][variant][position]
 // = [lemma id]. Only the reading is lemmatized here; a witness word takes the
@@ -949,6 +958,35 @@ const exportBtn = document.getElementById('export-btn');
 const saveBtn = document.getElementById('save-btn');
 const searchAllBtn = document.getElementById('search-all-btn');
 
+// The score is built from every manuscript at once and its whole panel is
+// thrown away and made again, so on a chapter of this size one rebuild per
+// keystroke is what makes typing crawl.
+//
+// The edit itself is never deferred: saveCurrentManuscript() puts it in memory
+// on the spot, and that — not the rendered panel — is what a save, an export
+// and a search all read. Only the redraw waits, so a run of keystrokes costs
+// one rebuild instead of one each.
+let scoreUpdateTimeout = null;
+const SCORE_UPDATE_DELAY = 300;
+
+function scheduleScoreUpdate(id) {
+  if (scoreUpdateTimeout) clearTimeout(scoreUpdateTimeout);
+  scoreUpdateTimeout = setTimeout(() => {
+    scoreUpdateTimeout = null;
+    syncManuscriptToYjs(id);
+    renderScore();
+    updateSourceHeader(id);   // bracket count follows the edits
+  }, SCORE_UPDATE_DELAY);
+}
+
+// Whoever rebuilds the score itself drops the pending one. Loading another
+// manuscript is the case that matters: a timer left over from the tablet being
+// left would write its header and its brackets over the one arriving.
+function cancelScoreUpdate() {
+  if (scoreUpdateTimeout) clearTimeout(scoreUpdateTimeout);
+  scoreUpdateTimeout = null;
+}
+
 // Initialize Ace Editor
 let aceEditor = null;
 function initAceEditor() {
@@ -972,15 +1010,14 @@ function initAceEditor() {
   // Enable search box extension
   ace.require('ace/ext/searchbox');
 
-  // Handle changes
+  // Handle changes. The edit lands in memory at once; the score catches up
+  // when the typing stops — see scheduleScoreUpdate().
   aceEditor.session.on('change', () => {
     markUnmatchedBrackets(aceEditor);
     if (isPollingUpdate || isLoadingContent) return; // Skip programmatic content changes
     saveCurrentManuscript();
-    syncManuscriptToYjs(activeManuscript);
-    renderScore();
-    updateSourceHeader(activeManuscript);   // bracket count follows the edits
     markUnsaved();
+    scheduleScoreUpdate(activeManuscript);
   });
 
   return aceEditor;
@@ -1057,6 +1094,102 @@ function keepScoreInView(run) {
   if (!again) return;
   // Measured after the new layout, so the same § sits where it sat before.
   pane.scrollTop += again.getBoundingClientRect().top - top - offset;
+}
+
+// Keep the keyboard where it was across a rebuild.
+//
+// renderScore() replaces the panel's innerHTML, so whatever had focus is
+// detached and the browser drops focus to <body>. The next Tab then starts
+// from the top of the document — which is why working through a line with the
+// keyboard would suddenly land back at §1. The rebuild is not always asked
+// for: the folder poll runs one whenever a collaborator saves, right under
+// the hands.
+//
+// Held as coordinates, never as a node, for the same reason the lemma
+// dropdown holds its neighbour that way: the node is gone by the time it
+// would be used.
+function scoreFocusDescriptor() {
+  const el = document.activeElement;
+  if (!el || !scorePanel.contains(el)) return null;
+  // The lemma picker is an input inside the word; the word is what to come
+  // back to, since the dropdown itself does not survive the rebuild.
+  const lem = el.closest ? el.closest('.lem-word') : null;
+  if (lem) {
+    return { kind: 'lem', line: lem.dataset.line,
+      variant: lem.dataset.variant, pos: lem.dataset.pos };
+  }
+  if (el.classList && el.classList.contains('pos-input')) {
+    return { kind: 'pos', line: el.dataset.line, key: el.dataset.key,
+      index: el.dataset.index, start: el.selectionStart, end: el.selectionEnd };
+  }
+  return null;
+}
+
+// Matched by scanning rather than by a selector: a witness key is a siglum
+// like "AO.6450", which a CSS attribute selector would have to be taught to
+// escape.
+function restoreScoreFocus(d) {
+  if (!d) return;
+  if (d.kind === 'lem') {
+    const el = findLemWord(d);
+    // No preventScroll: the panel scrolled back to the top when it was
+    // rebuilt, and focusing brings the word — and the reader — back down to it.
+    if (el) el.focus();
+    return;
+  }
+  const el = [...scorePanel.querySelectorAll('.pos-input')].find((x) =>
+    x.dataset.line === d.line && x.dataset.key === d.key && x.dataset.index === d.index);
+  if (!el) return;
+  el.focus();
+  // The focus handler selects the whole box; put the caret back where it was.
+  try { el.setSelectionRange(d.start, d.end); } catch (err) { /* not selectable */ }
+}
+
+function findLemWord(where) {
+  if (!where) return null;
+  return [...document.querySelectorAll('.lem-word')].find((x) =>
+    x.dataset.line === where.line && x.dataset.variant === where.variant
+    && x.dataset.pos === where.pos) || null;
+}
+
+// A rebuild nobody asked for waits while a word is being tagged.
+//
+// restoreScoreFocus() puts the keyboard back, but it cannot put back what was
+// only ever in the DOM. The lemma picker is an input the score does not own:
+// what is typed into it lives nowhere else until it is committed. A position
+// box holds the same half-finished text between a keystroke and the "change"
+// that commits it. Everything else in the score writes to the model as it is
+// typed, so it loses a caret at worst.
+//
+// Only the background callers go through here — the folder poll and the other
+// tab. A render the reader's own action asked for still runs at once.
+let deferredScoreRender = false;
+
+function scoreEditInProgress() {
+  if (document.querySelector('.lem-edit')) return true;
+  const el = document.activeElement;
+  if (!el || !el.classList || !el.classList.contains('pos-input')) return false;
+  if (!scorePanel.contains(el)) return false;
+  // Only when the box holds something the model has not been told about. A box
+  // merely left focused would otherwise hold the score stale for as long as it
+  // sat there.
+  const stored = (alignmentFor(el.dataset.line, el.dataset.key) || {})[el.dataset.index];
+  return el.value.trim() !== (stored == null ? '' : String(stored));
+}
+
+function renderScoreInBackground() {
+  if (scoreEditInProgress()) { deferredScoreRender = true; return; }
+  deferredScoreRender = false;
+  renderScore();
+}
+
+// The waiting rebuild, run once the work that held it is finished. Both doors
+// out of the picker call it: the restoring one leaves the score showing the
+// text it had before the update landed, which is exactly as stale.
+function flushDeferredScoreRender() {
+  if (!deferredScoreRender) return;
+  deferredScoreRender = false;
+  renderScore();
 }
 
 // Say a section is already on eBL, or take that back.
@@ -2089,6 +2222,95 @@ function buildScore() {
   return { scoreLines, rulings, comments };
 }
 
+// A tablet named in a note is somewhere to go as well. "UrkHel1 o 59",
+// "K.2246 r 28'", "AO.6450 8" — a source the project has, an optional
+// surface, a line — each becomes a chip beside the note that opens that
+// source at that line. The note itself is left as written: on eBL a note
+// cannot link a fragment except by @url{}, and a bare reference reads better
+// there than a URL would. Names are matched against the project — a museum
+// number as the file is named, or the eBL siglum the project maps it to — so
+// prose that merely looks like a reference is not turned into one.
+const NOTE_SURFACES = {
+  obverse: 'o', 'obv.': 'o', obv: 'o', o: 'o',
+  reverse: 'r', 'rev.': 'r', rev: 'r', r: 'r',
+  'left edge': 'le', 'l.e.': 'le', le: 'le',
+  'right edge': 're', 'r.e.': 're', re: 're',
+  top: 't', 't.e.': 't', t: 't',
+  bottom: 'b', 'b.e.': 'b', b: 'b',
+  edge: 'e', e: 'e',
+  colophon: 'col', 'col.': 'col', col: 'col',
+};
+
+function normSurface(text) {
+  return NOTE_SURFACES[String(text || '').trim().toLowerCase()] || '';
+}
+
+const escapeRegex = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function noteReferences(text) {
+  const src = String(text || '');
+  if (!src.trim()) return [];
+  // Every name this project answers to, longest first so "K.2246" is not
+  // found inside "K.22460".
+  const byName = new Map();
+  for (const ms of Object.values(manuscripts)) {
+    if (!ms || !ms.siglum) continue;
+    byName.set(ms.siglum, ms.siglum);
+    const ebl = siglaMappings[ms.siglum];
+    if (ebl) byName.set(ebl, ms.siglum);
+  }
+  if (!byName.size) return [];
+  const names = [...byName.keys()].sort((a, b) => b.length - a.length).map(escapeRegex).join('|');
+  const surfaces = Object.keys(NOTE_SURFACES).sort((a, b) => b.length - a.length).map(escapeRegex).join('|');
+  const rx = new RegExp(
+    '(?<![\\w.\\-])(' + names + ')\\s+(?:(' + surfaces + ')\\s+)?(\\d+[a-z]?[\'\u2019]?)(?![\\w\'\u2019])', 'g');
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = rx.exec(src))) {
+    const line = m[3].replace('\u2019', "'");
+    const surface = normSurface(m[2]);
+    const key = m[1] + '|' + surface + '|' + line;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name: m[1], siglum: byName.get(m[1]), surface, line, label: m[0].replace(/\s+/g, ' ') });
+  }
+  return out;
+}
+
+function noteRefChips(text) {
+  const refs = noteReferences(text);
+  if (!refs.length) return '';
+  return '<span class="recon-note-refs">' + refs.map((r) =>
+    `<a class="note-ref" href="#" draggable="false"`
+      + ` data-siglum="${escapeHtml(r.siglum)}" data-src="${escapeHtml(r.line)}"`
+      + ` data-surface="${escapeHtml(r.surface)}"`
+      + ` title="Open ${escapeHtml(r.siglum)} at ${escapeHtml((r.surface ? r.surface + ' ' : '') + r.line)}">`
+      + `\u2197 ${escapeHtml(r.label)}</a>`).join('') + '</span>';
+}
+
+// A note being edited does not rebuild the score, so its chips are redone in
+// place when the note is left.
+function refreshNoteRefChips(el, text) {
+  const row = el.closest ? el.closest('.recon-extra') : null;
+  if (!row) return;
+  const old = row.querySelector('.recon-note-refs');
+  if (old) old.remove();
+  const html = noteRefChips(text);
+  if (html) row.insertAdjacentHTML('beforeend', html);
+}
+
+document.addEventListener('click', (e) => {
+  const a = e.target && e.target.closest ? e.target.closest('.note-ref') : null;
+  if (!a) return;
+  e.preventDefault();
+  const siglum = a.dataset.siglum || '';
+  if (!openSource(siglum, a.dataset.src || '', '', a.dataset.surface || '')) {
+    setStatus('error', `"${siglum}" is not in this project`);
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
+});
+
 // The siglum in front of a witness names a tablet and a line of it, so it is
 // somewhere to go rather than a caption: clicking it opens that source in the
 // editor, at that very line, and marks it in the sidebar. draggable="false"
@@ -2103,6 +2325,7 @@ function witnessRefLink(siglum, sourceLine, sec, ref) {
 
 // Render the score panel
 function renderScore() {
+  const returnFocusTo = scoreFocusDescriptor();
   const { scoreLines } = buildScore();
   const sortedLineNumbers = Object.keys(scoreLines).map(Number).sort((a, b) => a - b);
   // The sidebar counts follow the score, so they are refreshed with it rather
@@ -2260,6 +2483,7 @@ function renderScore() {
       html += `<button class="recon-add-item" data-kind="compose" data-line="${lineNum}" data-variant="${vi}">Compose from witnesses<em>↻</em></button>`;
       html += `<button class="recon-add-item" data-kind="compose-from" data-line="${lineNum}" data-variant="${vi}">Compose from…<em>⌥</em></button>`;
       html += `<button class="recon-add-item" data-kind="report" data-line="${lineNum}" data-variant="${vi}">Report on this reading<em>≡</em></button>`;
+      html += `<button class="recon-add-item" data-kind="check-positions" data-line="${lineNum}" data-variant="${vi}">Check positions of this omen<em>#?</em></button>`;
       html += `<button class="recon-add-item" data-kind="variant" data-line="${lineNum}" data-variant="${vi}">Variant<em>§${lineNum}${variantLetterOf(readings.length)}</em></button>`;
       if (vi > 0) {
         html += `<button class="recon-add-item danger" data-kind="drop-variant" data-line="${lineNum}" data-variant="${vi}">Delete this variant<em>✕</em></button>`;
@@ -2282,7 +2506,12 @@ function renderScore() {
       if (reading.note != null) {
         html += `<div class="recon-extra recon-note">`;
         html += `<span class="recon-extra-prefix">#note:</span>`;
+        // Beside the chip rather than in a menu: the rules are only ever
+        // wanted at the moment a note is being written.
+        html += `<button type="button" class="recon-note-help"`
+          + ` title="What a note may contain" aria-label="What a note may contain">?</button>`;
         html += `<span class="recon-extra-text" contenteditable="true" data-kind="note" data-line="${lineNum}" data-variant="${vi}">${escapeHtml(reading.note)}</span>`;
+        html += noteRefChips(reading.note);
         html += `</div>`;
       }
       for (let pi = 0; pi < reading.parallels.length; pi++) {
@@ -2373,6 +2602,7 @@ function renderScore() {
             html += `<div class="score-witness witness-note${typeClass(w.siglum)}">`;
             html += `<span class="witness-siglum"></span>`;
             html += `<span class="witness-text"><span class="witness-note-prefix">#note:</span> ${escapeHtml(note)}</span>`;
+            html += noteRefChips(note);
             html += `</div>`;
           }
         }
@@ -2467,7 +2697,10 @@ function renderScore() {
       refreshPositionTally(el);
       refreshSentMark(el.dataset.line);
       markUnsaved();
-      saveScoreDataToFile();
+      scheduleScoreDataSave();
+      // Out of the event, so the rebuild does not run under a blur that is
+      // still moving the focus.
+      setTimeout(flushDeferredScoreRender, 0);
     };
     el.addEventListener('change', commit);
     // Enter commits and steps to the next box, so a row can be typed straight
@@ -2511,6 +2744,9 @@ function renderScore() {
       if (btn.dataset.kind === 'report') {
         analyseReading(parseInt(lineNum, 10), vi);
       }
+      else if (btn.dataset.kind === 'check-positions') {
+        checkPositions({ lineNum: parseInt(lineNum, 10) });
+      }
       else if (btn.dataset.kind === 'compose-from') {
         const n = parseInt(lineNum, 10);
         askScope(n, vi).then((scope) => { if (scope) composeOmen(n, vi, scope); });
@@ -2547,6 +2783,7 @@ function renderScore() {
       if (!e.target.isConnected) return;
       const text = e.target.innerText.trim();
       writeReconExtra(e.target, text);
+      if (e.target.dataset.kind === 'note') refreshNoteRefChips(e.target, text);
       if (!text) {
         removeReconExtra(e.target);
         renderScore();
@@ -2554,9 +2791,22 @@ function renderScore() {
       saveScoreDataToFile();
     });
   });
+
+  restoreScoreFocus(returnFocusTo);
 }
 
 // ---- Note / parallel rows under a reading ----
+
+// The note markup rules, from beside the note: the "?" opens the help page at
+// its Notes section. Delegated, because the score is rebuilt whenever
+// anything changes and the button goes with it.
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.recon-note-help') : null;
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();   // the row it sits on is contenteditable
+  openHelpPage('notes');
+});
 
 function closeReconAddMenus() {
   document.querySelectorAll('.recon-add-menu').forEach(m => m.classList.add('hidden'));
@@ -2732,6 +2982,477 @@ function readReading(lineNum, vi) {
   return (slot ? slot.text : reconstructedLines[lineNum]) || '';
 }
 
+// ---- Keeping positions honest when the reading moves ----------------------
+//
+// An alignment box and a lemma are both tied to a position number in the
+// reading. Nothing else in the data says which word that number meant, so when
+// a word is inserted, dropped or moved, every number after it points at a
+// different word and nothing notices — §88 lost its whole tail to this twice.
+//
+// The moment a reading is edited the app holds both texts, so the old numbers
+// can be carried to the new ones then and there. Tokens are paired by the
+// longest common subsequence; what is left unpaired between two anchors is
+// paired in order, so a respelt word keeps its boxes and its lemma. A token
+// with no counterpart at all takes its boxes and its lemma with it.
+//
+// The same carrying happens when a witness moves between readings: its boxes
+// were numbered against the reading it came from.
+function tokenRemap(oldTokens, newTokens) {
+  const n = oldTokens.length, m = newTokens.length;
+  // LCS table.
+  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      L[i][j] = oldTokens[i] === newTokens[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    }
+  }
+  const map = new Map();
+  const replaced = new Set();
+  let i = 0, j = 0;
+  const pairGap = (i0, i1, j0, j1) => {
+    // Unmatched old i0..i1 against unmatched new j0..j1: pair in order.
+    for (let a = i0, b = j0; a < i1 && b < j1; a++, b++) { map.set(a, b); replaced.add(b); }
+  };
+  let gi = 0, gj = 0;   // start of the current unmatched gap
+  while (i < n && j < m) {
+    if (oldTokens[i] === newTokens[j]) {
+      pairGap(gi, i, gj, j);
+      map.set(i, j);
+      i++; j++; gi = i; gj = j;
+    } else if (L[i + 1][j] >= L[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  pairGap(gi, n, gj, m);
+  return { map, replaced };
+}
+
+const readingTokens = (text) => positionWords(text).map((t) => t.text);
+
+// Carry one witness row's boxes from one token list to another.
+function remapAlignmentRow(row, remap) {
+  const out = {};
+  for (const k of Object.keys(row)) {
+    const p = Number(row[k]);
+    if (!Number.isFinite(p)) continue;
+    if (remap.map.has(p)) out[k] = remap.map.get(p);
+    // else: the word it answered to is gone; the box is left empty.
+  }
+  return out;
+}
+
+function rebaseReading(lineNum, vi, oldText, newText) {
+  const oldT = readingTokens(oldText), newT = readingTokens(newText);
+  if (oldT.length === newT.length && oldT.every((t, i) => t === newT[i])) return;
+  const remap = tokenRemap(oldT, newT);
+
+  // Boxes of every witness under this reading.
+  const rows = omensOf(lineNum, vi).flatMap((o) => o.rows);
+  const store = lineAlignments[lineNum] || {};
+  for (const w of rows) {
+    const key = w.siglum + '|' + w.sourceLine;
+    if (store[key] && Object.keys(store[key]).length) store[key] = remapAlignmentRow(store[key], remap);
+  }
+
+  // Lemmas of the reading itself.
+  const line = lemmaChoices[lineNum];
+  const slot = line && line[vi];
+  if (slot) {
+    const convert = positionConverter();
+    const moved = {};
+    for (const k of Object.keys(slot)) {
+      const p = Number(k);
+      if (!remap.map.has(p)) continue;                 // the word is gone
+      const q = remap.map.get(p);
+      const entry = slot[k];
+      if (!remap.replaced.has(q)) { moved[q] = entry; continue; }
+      // The token changed. A respelling — ŠE.GU.NU for ŠE.GUN₃.NU, IGI-šu₂
+      // for pa-ni-šu₂ — keeps its lemma, unconfirmed, for someone to look at
+      // again. A different word — GAZ where GU₇ stood — does not: carrying
+      // akālu onto GAZ is worse than leaving it blank.
+      const alike = typeof wordSimilarity === 'function'
+        ? wordSimilarity(oldT[p], newT[q], convert) >= 0.5 : false;
+      if (!alike) continue;
+      moved[q] = entry && typeof entry === 'object' ? { ...entry, by: 'auto' } : entry;
+    }
+    line[vi] = moved;
+  }
+}
+
+// A witness's boxes, carried from the reading it is leaving to the one it
+// joins. Called for each witness a move touches, before the file is rewritten.
+function rebaseWitnessRow(lineNum, w, fromVi, toVi) {
+  if (fromVi === toVi) return;
+  const store = lineAlignments[lineNum];
+  const key = w.siglum + '|' + w.sourceLine;
+  if (!store || !store[key] || !Object.keys(store[key]).length) return;
+  const remap = tokenRemap(readingTokens(readReading(lineNum, fromVi)), readingTokens(readReading(lineNum, toVi)));
+  store[key] = remapAlignmentRow(store[key], remap);
+}
+
+// ---- The check ---------------------------------------------------------------
+//
+// Three questions asked of every aligned row:
+//   - does each witness word resemble the reading word its box points at?
+//     Tolerantly — a plural marker, a phonetic complement, a determinative
+//     and damage marks do not count — but a word with little in common
+//     with its partner is raised, and one with nothing in common raised
+//     louder, since that is what a stale box looks like.
+//   - do the words fit the reading better a few positions over than where
+//     the boxes point? Asked strictly, because EAE repeats its phrases and a
+//     coincidence four words away is common; only a run of boxes that all
+//     agree on the same shift, and agree more than they do in place, counts.
+//   - does any box point past the end of the reading, or belong to a word the
+//     line no longer has?
+// A pairing the reader accepts is remembered and not raised again while the
+// two words stay what they were.
+const POSITION_CHECK_RANGE = 4;
+const PAIR_OK_THRESHOLD = 0.9;
+const PLURAL_MARKERS = /(?:[-.])?(?:MEŠ|ME|HI\.A|DIDLI)$/;
+
+// A word reduced to what should count when two are compared.
+function comparableWord(text) {
+  return String(text || '')
+    .replace(/[#?!*\[\]⸢⸣<>]/g, '')
+    .replace(/\{[^}]*\}/g, '')
+    .replace(/\.\.\./g, '')
+    .replace(PLURAL_MARKERS, '')
+    .replace(/^[-.]+|[-.]+$/g, '');
+}
+
+// 0..1 — as signs when the converter is loaded, as sign-pieces of the
+// transliteration otherwise. Dice over the multiset, so a word that is the
+// other plus one sign scores two thirds, not zero.
+function wordSimilarity(a, b, convert) {
+  const A = comparableWord(a), B = comparableWord(b);
+  if (!A && !B) return 1;
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  let xa = null, xb = null;
+  if (convert) { try { xa = convert(A); xb = convert(B); } catch (_) { xa = xb = null; } }
+  if (!xa || !xb || !xa.length || !xb.length) {
+    xa = A.split(/[-.]/).filter(Boolean);
+    xb = B.split(/[-.]/).filter(Boolean);
+  }
+  const count = (xs) => xs.reduce((m, x) => (m.set(String(x), (m.get(String(x)) || 0) + 1), m), new Map());
+  const ca = count(xa), cb = count(xb);
+  let common = 0;
+  for (const [k, n] of ca) common += Math.min(n, cb.get(k) || 0);
+  return (2 * common) / (xa.length + xb.length);
+}
+
+// The reading word's lemma, if it has one, against what the dictionary would
+// offer for the witness word. ZI-ut and ti-bu share no sign, but both are
+// tību — and that is what the reader means by "the same word".
+function sameLemma(lineNum, vi, pos, witnessText) {
+  try {
+    if (!window.Lemmatizer || !Lemmatizer.loaded() || typeof lemmasAt !== 'function') return false;
+    const ids = lemmasAt(lineNum, vi, pos) || [];
+    if (!ids.length) return false;
+    const cands = Lemmatizer.candidates(comparableWord(witnessText), 12) || [];
+    return cands.some((c) => ids.indexOf(c.id) >= 0);
+  } catch (_) { return false; }
+}
+
+function pairKey(a, b) {
+  return a <= b ? a + ' \u2194 ' + b : b + ' \u2194 ' + a;
+}
+
+function okSlot(lineNum, key, create) {
+  if (!alignmentOk[lineNum]) { if (!create) return null; alignmentOk[lineNum] = {}; }
+  if (!alignmentOk[lineNum][key]) { if (!create) return null; alignmentOk[lineNum][key] = {}; }
+  return alignmentOk[lineNum][key];
+}
+
+async function checkPositions(scope) {
+  const only = scope && scope.lineNum != null ? Number(scope.lineNum) : null;
+  try { await ensureAtfConverter(); } catch (_) { /* pieces of the transliteration then */ }
+  const convert = positionConverter();
+  const C = window.Compositor;
+  const alike = (readingText, witnessText) => {
+    if (readingText == null || witnessText == null) return false;
+    if (convert && C) {
+      const v = C.compareWords(readingText, witnessText, convert);
+      if (v === 'same' || v === 'complement') return true;
+    }
+    return wordSimilarity(readingText, witnessText, convert) >= PAIR_OK_THRESHOLD;
+  };
+
+  const { scoreLines } = buildScore();
+  const rowsOut = [];
+  let nItems = 0;
+  for (const lineNum of Object.keys(scoreLines).map(Number).filter((n) => only == null || n === only).sort((a, b) => a - b)) {
+    const readings = variantsFor(lineNum);
+    for (let vi = 0; vi < readings.length; vi++) {
+      const rw = positionWords(readings[vi].text || '');
+      const atPos = (p) => (p >= 0 && p < rw.length && !rw[p].divider) ? rw[p].text : null;
+      for (const om of omensOf(lineNum, vi, scoreLines)) {
+        // Across every line the witness gives the omen, in tablet order: a
+        // position taken by two words, and boxes that run backwards. Both are
+        // asked of the omen rather than the line, because a tablet that needs
+        // three lines for one omen numbers them as one stream.
+        const omenItems = new Map();
+        {
+          const seq = [];
+          for (const w of om.rows) {
+            const key = w.siglum + '|' + w.sourceLine;
+            const row = (lineAlignments[lineNum] || {})[key];
+            if (!row) continue;
+            const textAt = new Map(witnessWords(w.content).filter((t) => t.index != null).map((t) => [t.index, t.text]));
+            for (const i of Object.keys(row).map(Number).sort((a, b) => a - b)) {
+              if (!textAt.has(i)) continue;
+              seq.push({ key, index: i, pos: Number(row[i]), text: textAt.get(i), line: w.sourceLine });
+            }
+          }
+          const add = (key, it) => { if (!omenItems.has(key)) omenItems.set(key, []); omenItems.get(key).push(it); };
+          const byPos = new Map();
+          for (const b of seq) { if (!byPos.has(b.pos)) byPos.set(b.pos, []); byPos.get(b.pos).push(b); }
+          for (const [pos, list] of byPos) {
+            if (list.length < 2) continue;
+            // The first word keeps the position; every later one is raised.
+            for (const b of list.slice(1)) {
+              const ok = okSlot(lineNum, b.key, false) || {};
+              if (ok.dup && ok.dup[b.index] === pos) continue;
+              add(b.key, { kind: 'dup', index: b.index, pos, word: b.text, other: list[0], reading: atPos(pos) });
+            }
+          }
+          let prev = null;
+          for (const b of seq) {
+            if (prev && b.pos < prev.pos) {
+              const ok = okSlot(lineNum, b.key, false) || {};
+              if (!(ok.order && ok.order[b.index] === b.pos)) add(b.key, { kind: 'order', index: b.index, pos: b.pos, word: b.text, prev });
+            }
+            prev = b;
+          }
+        }
+        for (const w of om.rows) {
+          const key = w.siglum + '|' + w.sourceLine;
+          const row = (lineAlignments[lineNum] || {})[key];
+          if (!row || !Object.keys(row).length) continue;
+          const textAt = new Map(witnessWords(w.content).filter((t) => t.index != null).map((t) => [t.index, t.text]));
+          const ok = okSlot(lineNum, key, false) || {};
+          const items = [...(omenItems.get(key) || [])];
+
+          const all = Object.keys(row).map(Number).sort((a, b) => a - b);
+          const boxes = all.filter((i) => textAt.has(i));
+          // Boxes with no word behind them: left over from an older reading of the line.
+          for (const i of all.filter((i) => !textAt.has(i))) {
+            items.push({ kind: 'stale', index: i, pos: Number(row[i]) });
+          }
+          if (!boxes.length) { if (items.length) rowsOut.push({ lineNum, vi, key, w, items }); continue; }
+
+          // Past the end of the reading.
+          for (const i of boxes) {
+            const p = Number(row[i]);
+            if (p >= rw.length) items.push({ kind: 'beyond', index: i, pos: p, word: textAt.get(i) });
+          }
+
+          // A shift: the same offset making a run of boxes fit, and fit better
+          // than in place. It may begin part-way along the row — a word put
+          // into the reading after the row was aligned moves only the boxes
+          // after it — so every starting box is tried, and the tail from there
+          // is what has to fit: at least three boxes, nearly all of them, and
+          // clearly more than fit where they stand.
+          const fits = (k) => boxes.map((i) => alike(atPos(Number(row[i]) + k), textAt.get(i)));
+          const at0 = fits(0);
+          const n0 = at0.filter(Boolean).length;
+          let found = null;
+          for (let k = -POSITION_CHECK_RANGE; k <= POSITION_CHECK_RANGE; k++) {
+            if (k === 0) continue;
+            const f = fits(k);
+            for (let j = 0; j <= boxes.length - 3; j++) {
+              const tail = boxes.length - j;
+              let nk = 0, n0t = 0;
+              for (let idx = j; idx < boxes.length; idx++) { if (f[idx]) nk++; if (at0[idx]) n0t++; }
+              if (nk < 3 || nk < Math.ceil(tail * 0.75) || nk - n0t < 2) continue;
+              const gain = nk - n0t;
+              if (!found || gain > found.gain || (gain === found.gain && Math.abs(k) < Math.abs(found.shift))) {
+                found = { shift: k, from: boxes[j], nk, n0t, tail, gain };
+              }
+            }
+          }
+          if (found) {
+            const sig = JSON.stringify(row);
+            if (ok.shift !== sig) {
+              items.push({ kind: 'shift', shift: found.shift, n0: found.n0t, nBest: found.nk, boxes: found.tail, from: found.from, sig });
+            }
+          }
+
+          // Each pairing on its own.
+          for (const [idx, i] of boxes.entries()) {
+            const p = Number(row[i]);
+            if (p >= rw.length) continue;
+            const readingText = atPos(p);
+            if (readingText == null) continue;       // a divider: nothing to compare
+            if (at0[idx]) continue;
+            const W = comparableWord(textAt.get(i)), R = comparableWord(readingText);
+            if (ok[i] && ok[i].w === W && ok[i].r === R) continue;
+            if (acceptedPairs[pairKey(W, R)]) continue;
+            if (sameLemma(lineNum, vi, p, textAt.get(i))) continue;
+            const sim = wordSimilarity(readingText, textAt.get(i), convert);
+            items.push({ kind: 'pair', index: i, pos: p, word: textAt.get(i), reading: readingText, sim, W, R });
+          }
+
+          if (items.length) { nItems += items.length; rowsOut.push({ lineNum, vi, key, w, items }); }
+        }
+      }
+    }
+  }
+
+  // Loudest first: a shift or a word with nothing in common outranks a mere difference.
+  const weight = (r) => Math.max(...r.items.map((it) => it.kind === 'shift' ? 3 : it.kind === 'pair' && it.sim === 0 ? 2 : it.kind === 'pair' ? 1 : 2));
+  rowsOut.sort((a, b) => weight(b) - weight(a) || a.lineNum - b.lineNum);
+
+  const blocks = [];
+  if (!rowsOut.length) {
+    blocks.push(noteBlock((only != null ? '§' + only + ': every' : 'Every') + ' box points at a word that resembles the one it holds, nothing fits better shifted, and nothing points past the end. Nothing to look at.', 'good'));
+  } else {
+    blocks.push(noteBlock(nItems + ' thing' + (nItems === 1 ? '' : 's') + ' to look at in ' + rowsOut.length + ' row' + (rowsOut.length === 1 ? '' : 's')
+      + '. OK on a pairing accepts it and it is not raised again while the two words stay the same; Apply moves boxes; nothing changes until you press something.'));
+    for (const r of rowsOut) {
+      const sec = '§' + r.lineNum + variantLetterOf(r.vi);
+      let html = '<div class="pos-check-row" data-line="' + r.lineNum + '" data-key="' + escapeHtml(r.key) + '">'
+        + '<div class="pos-check-head"><a href="#" class="pos-check-goto" data-line="' + r.lineNum + '">' + escapeHtml(sec) + '</a> '
+        + escapeHtml(displaySiglum(r.w.siglum) + ' ' + r.w.sourceLine) + '</div>';
+      for (const it of r.items) {
+        if (it.kind === 'shift') {
+          const sh = (it.shift > 0 ? '+' : '') + it.shift;
+          html += '<div class="pos-check-item is-shift">'
+            + '<span class="pos-check-what">From word ' + it.from + ' on: ' + it.n0 + ' of ' + it.boxes + ' boxes fit in place, ' + it.nBest + ' fit shifted ' + escapeHtml(sh) + '.</span>'
+            + '<button type="button" class="pos-shift-apply" data-from="' + it.from + '" data-shift="' + it.shift + '">Apply ' + escapeHtml(sh) + '</button>'
+            + '<button type="button" class="pos-shift-keep" data-sig="' + escapeHtml(it.sig) + '">It is right as it is</button>'
+            + '</div>';
+        } else if (it.kind === 'pair') {
+          const pct = Math.round(it.sim * 100);
+          html += '<div class="pos-check-item is-pair' + (it.sim === 0 ? ' is-none' : '') + '" data-index="' + it.index + '">'
+            + '<span class="pos-check-what"><code>' + escapeHtml(it.word) + '</code> → ' + it.pos + ' <code>' + escapeHtml(it.reading) + '</code> '
+            + '<span class="pos-check-sim">' + (it.sim === 0 ? 'nothing in common' : pct + '% alike') + '</span></span>'
+            + '<button type="button" class="pos-pair-ok" data-index="' + it.index + '" data-w="' + escapeHtml(it.W) + '" data-r="' + escapeHtml(it.R) + '" title="These two writings are one word, anywhere in the project">OK</button>'
+            + '<button type="button" class="pos-pair-ok-here" data-index="' + it.index + '" data-w="' + escapeHtml(it.W) + '" data-r="' + escapeHtml(it.R) + '" title="Accept this one box only; the same two words elsewhere are still raised">only here</button>'
+            + '</div>';
+        } else if (it.kind === 'dup') {
+          html += '<div class="pos-check-item is-dup" data-index="' + it.index + '">'
+            + '<span class="pos-check-what"><code>' + escapeHtml(it.word) + '</code> → ' + it.pos + ' <code>' + escapeHtml(it.reading == null ? '' : it.reading) + '</code>'
+            + ' — a position already taken by <code>' + escapeHtml(it.other.text) + '</code>' + (it.other.line !== r.w.sourceLine ? ' on line ' + escapeHtml(String(it.other.line)) : '') + '.</span>'
+            + '<button type="button" class="pos-omen-ok" data-kind="dup" data-index="' + it.index + '" data-pos="' + it.pos + '">OK</button>'
+            + '</div>';
+        } else if (it.kind === 'order') {
+          html += '<div class="pos-check-item is-order" data-index="' + it.index + '">'
+            + '<span class="pos-check-what"><code>' + escapeHtml(it.word) + '</code> → ' + it.pos + ' comes after <code>' + escapeHtml(it.prev.text) + '</code> → ' + it.prev.pos
+            + (it.prev.line !== r.w.sourceLine ? ' on line ' + escapeHtml(String(it.prev.line)) : '') + ': the numbering runs backwards.</span>'
+            + '<button type="button" class="pos-omen-ok" data-kind="order" data-index="' + it.index + '" data-pos="' + it.pos + '">OK</button>'
+            + '</div>';
+        } else if (it.kind === 'beyond') {
+          html += '<div class="pos-check-item is-beyond" data-index="' + it.index + '">'
+            + '<span class="pos-check-what"><code>' + escapeHtml(it.word) + '</code> → ' + it.pos + ', past the last word of the reading.</span>'
+            + '<button type="button" class="pos-box-drop" data-index="' + it.index + '">Empty the box</button>'
+            + '</div>';
+        } else if (it.kind === 'stale') {
+          html += '<div class="pos-check-item is-stale" data-index="' + it.index + '">'
+            + '<span class="pos-check-what">A box for word ' + it.index + ', which the line no longer has (→ ' + it.pos + ').</span>'
+            + '<button type="button" class="pos-box-drop" data-index="' + it.index + '">Remove it</button>'
+            + '</div>';
+        }
+      }
+      if (r.items.filter((it) => it.kind === 'pair').length > 1) {
+        html += '<div class="pos-check-item is-rowok"><button type="button" class="pos-pair-ok-row">OK, all of this row</button></div>';
+      }
+      html += '</div>';
+      blocks.push(html);
+    }
+  }
+  showComposeReport('Positions check' + (only != null ? ' — §' + only : ''), blocks, 'positions-check');
+}
+
+function applyPositionShift(lineNum, key, fromIndex, shift) {
+  const store = lineAlignments[lineNum];
+  if (!store || !store[key]) return 0;
+  const vi = (() => {
+    const { scoreLines } = buildScore();
+    const w = (scoreLines[lineNum] || []).find((x) => x.type === 'line' && x.siglum + '|' + x.sourceLine === key);
+    return w ? (w.variant || 0) : 0;
+  })();
+  const len = positionWords(readReading(lineNum, vi)).length;
+  const row = store[key];
+  const out = {};
+  let moved = 0;
+  for (const k of Object.keys(row)) {
+    const i = Number(k), p = Number(row[k]);
+    if (i >= fromIndex) {
+      const q = p + shift;
+      if (q >= 0 && q < len) { out[k] = q; moved++; }
+    } else out[k] = p;
+  }
+  store[key] = out;
+  return moved;
+}
+
+// The report's buttons. Each acts on the row it sits in, tells the item what
+// happened, and saves; the score is repainted underneath.
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!t || !t.closest) return;
+  const go = t.closest('.pos-check-goto');
+  if (go) { e.preventDefault(); hideComposeReport(); goToSection(parseInt(go.dataset.line, 10)); return; }
+  const btn = t.closest('.pos-shift-apply, .pos-shift-keep, .pos-pair-ok, .pos-pair-ok-here, .pos-pair-ok-row, .pos-box-drop, .pos-omen-ok');
+  if (!btn) return;
+  const rowEl = btn.closest('.pos-check-row');
+  if (!rowEl) return;
+  e.preventDefault();
+  const lineNum = parseInt(rowEl.dataset.line, 10);
+  const key = rowEl.dataset.key;
+  const item = btn.closest('.pos-check-item');
+  const done = (el, text) => { if (el) el.innerHTML = '<span class="pos-check-done">' + escapeHtml(text) + '</span>'; };
+  // One word in two writings, for the whole project — and every other
+  // pairing of those two words in this report is settled by it at once.
+  const acceptPairEverywhere = (w, r) => {
+    const k = pairKey(w, r);
+    acceptedPairs[k] = true;
+    for (const b of document.querySelectorAll('.pos-pair-ok')) {
+      if (pairKey(b.dataset.w, b.dataset.r) === k) done(b.closest('.pos-check-item'), 'accepted for the whole project');
+    }
+  };
+  let touchedScore = false;
+
+  if (btn.classList.contains('pos-shift-apply')) {
+    const moved = applyPositionShift(lineNum, key, parseInt(btn.dataset.from, 10), parseInt(btn.dataset.shift, 10));
+    done(item, moved + ' box' + (moved === 1 ? '' : 'es') + ' moved');
+    touchedScore = true;
+  } else if (btn.classList.contains('pos-shift-keep')) {
+    okSlot(lineNum, key, true).shift = btn.dataset.sig;
+    done(item, 'kept — not raised again while the row stays as it is');
+  } else if (btn.classList.contains('pos-pair-ok')) {
+    acceptPairEverywhere(btn.dataset.w, btn.dataset.r);
+  } else if (btn.classList.contains('pos-pair-ok-here')) {
+    okSlot(lineNum, key, true)[btn.dataset.index] = { w: btn.dataset.w, r: btn.dataset.r };
+    done(item, 'accepted here');
+  } else if (btn.classList.contains('pos-pair-ok-row')) {
+    for (const b of rowEl.querySelectorAll('.pos-pair-ok')) acceptPairEverywhere(b.dataset.w, b.dataset.r);
+    done(item, 'all accepted');
+  } else if (btn.classList.contains('pos-omen-ok')) {
+    const slot = okSlot(lineNum, key, true);
+    const kind = btn.dataset.kind;
+    slot[kind] = slot[kind] || {};
+    slot[kind][btn.dataset.index] = Number(btn.dataset.pos);
+    done(item, 'accepted');
+  } else if (btn.classList.contains('pos-box-drop')) {
+    const store = lineAlignments[lineNum];
+    if (store && store[key]) delete store[key][btn.dataset.index];
+    done(item, 'box emptied');
+    touchedScore = true;
+  }
+  markUnsaved();
+  scheduleScoreDataSave();
+  if (touchedScore) keepScoreInView(renderScore);
+});
+
+(() => {
+  const btn = document.getElementById('check-positions-btn');
+  if (btn) btn.addEventListener('click', () => checkPositions());
+})();
+
 function writeReading(lineNum, vi, text) {
   // Whatever this changes, the section no longer matches what was sent.
   if (typeof refreshSentMark === 'function') refreshSentMark(lineNum);
@@ -2744,9 +3465,12 @@ function writeReading(lineNum, vi, text) {
   // editable span, it stops here rather than in an export.
   text = String(text == null ? '' : text).replace(/‡/g, '');
   if (window.EblAtf && EblAtf.normaliseAtfText) text = EblAtf.normaliseAtfText(text);
+  const before = readReading(lineNum, vi);
   const slot = variantSlot(lineNum, vi);
   if (slot) slot.text = text;
   else reconstructedLines[lineNum] = text;
+  // The numbers follow the words. See tokenRemap.
+  if (before !== text) rebaseReading(lineNum, vi, before, text);
 }
 
 // Add a note or a parallel to one reading, then put the caret in it.
@@ -2882,6 +3606,8 @@ async function assignWitnessesToVariant(witnesses, lineNum, variantIndex) {
       if (res.ok) {
         content = res.content;
         from.add(variantLetterOf(w.variant || 0));
+        // Its boxes were numbered against the reading it is leaving.
+        rebaseWitnessRow(lineNum, w, w.variant || 0, variantIndex);
       }
     }
     // A ruling belongs under the line it follows, so it goes where the lines
@@ -5276,6 +6002,7 @@ async function saveAll() {
   if (!dirHandle) return;
   try {
     setStatus('syncing', 'Saving...');
+    if (scoreDataSaveTimer) { clearTimeout(scoreDataSaveTimer); scoreDataSaveTimer = null; }
     if (activeManuscript) {
       await saveToFile(activeManuscript);
     }
@@ -5417,17 +6144,42 @@ async function saveScoreDataToFile() {
       variants: variantLines,
       alignments: lineAlignments,
       lemmas: lemmaChoices,
+      alignmentOk,
+      acceptedPairs,
       glossary: projectGlossary,
       exported: exportedSections,
       revised: revisedSections,
       issues: exportIssues,
-      savedAt: new Date().toISOString()
+      savedAt: (lastScoreDataSavedAt = new Date().toISOString())
     };
     await FileSystem.writeScoreData(dirHandle, data);
     console.log('Saved score-data.json');
   } catch (err) {
     console.error('Score data save error:', err);
   }
+}
+
+// Every position box and every lemma pick used to write score-data.json on
+// the spot — a hundred rewrites in an hour of aligning. Harmless on a disk;
+// on a synced folder each one is an upload, and each upload is a chance for
+// the sync client to lose a race. A save is scheduled instead and the last
+// one wins; an explicit Save flushes it first so nothing is left pending.
+let scoreDataSaveTimer = null;
+const SCORE_DATA_SAVE_DELAY = 1500;
+
+function scheduleScoreDataSave() {
+  if (scoreDataSaveTimer) clearTimeout(scoreDataSaveTimer);
+  scoreDataSaveTimer = setTimeout(() => {
+    scoreDataSaveTimer = null;
+    saveScoreDataToFile();
+  }, SCORE_DATA_SAVE_DELAY);
+}
+
+async function flushScoreDataSave() {
+  if (!scoreDataSaveTimer) return;
+  clearTimeout(scoreDataSaveTimer);
+  scoreDataSaveTimer = null;
+  await saveScoreDataToFile();
 }
 
 // Load score data from local folder
@@ -5451,6 +6203,8 @@ async function loadScoreData() {
       if (data.variants) Object.assign(variantLines, data.variants);
       if (data.alignments) Object.assign(lineAlignments, data.alignments);
       if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
+      if (data.alignmentOk) Object.assign(alignmentOk, data.alignmentOk);
+      if (data.acceptedPairs) Object.assign(acceptedPairs, data.acceptedPairs);
       if (data.exported) Object.assign(exportedSections, data.exported);
       if (data.revised) Object.assign(revisedSections, data.revised);
       if (Array.isArray(data.issues)) exportIssues.push(...data.issues);
@@ -5916,6 +6670,7 @@ function updateSourceHeader(id) {
 function loadManuscript(id) {
   // Save current first
   saveCurrentManuscript();
+  cancelScoreUpdate();   // this load renders the score itself
 
   // Update active state
   activeManuscript = id;
@@ -7374,7 +8129,22 @@ const ANNOTATION_BADGE = {
   bug: 'Bug', enhancement: 'Enh', reference: 'Ref', commentary: 'Com',
 };
 
+// The count on the Notes button — the same reading the Reports badge gives:
+// what is still open. Bugs turn it red, because an open bug is a different
+// kind of waiting from an open reference or a note to self.
+function updateNotesBadge() {
+  const badge = document.getElementById('notes-badge');
+  if (!badge) return;
+  const open = annotations.filter((a) => a.status === 'open');
+  badge.textContent = open.length ? String(open.length) : '';
+  badge.classList.toggle('hidden', !open.length);
+  badge.classList.toggle('is-error', open.some((a) => a.type === 'bug'));
+}
+
 function renderAnnotations() {
+  // Counted off the whole list, not the rendered one: the badge answers for
+  // the project, and the panel below it may be narrowed to one § or one type.
+  updateNotesBadge();
   const filter = annotationsFilter.value;
   let filtered = annotations;
 
@@ -8514,6 +9284,12 @@ let filePollingInterval = null;
 const FILE_POLL_INTERVAL = 5000; // Check every 5 seconds
 let lastKnownTimestamps = {}; // { filename: lastModified }
 let isSaving = false; // Flag to skip polling during our own saves
+// The savedAt of the last score-data.json written from here. A sync client
+// rewrites a file's time once the cloud has it, seconds after the save, and
+// the poll would take that for a change and reload the file over whatever had
+// been edited since. The stamp says whether a changed file is our own coming
+// back.
+let lastScoreDataSavedAt = null;
 let isPollingUpdate = false; // Flag to suppress saves triggered by polling updates
 
 // Mark saving state so polling doesn't conflict
@@ -8609,9 +9385,66 @@ async function collectTimestamps() {
   return timestamps;
 }
 
+// Route saves through the server's in-place write when there is one. The
+// browser's own file API can only swap a new file over the old, which a
+// synced folder reads as delete-and-create — and which Drive refuses often
+// enough, when the file belongs to someone else, to strand saves in
+// lost_and_found. The server writes into the file. It needs to be told where
+// the project is, once per computer, because the page never learns the path
+// of a folder the reader picked.
+async function enableInPlaceWrites() {
+  if (!projectId || !window.FileSystem || !FileSystem.useServerWrites) return;
+  let health = null;
+  try {
+    const res = await fetch('/api/health');
+    if (res.ok) health = await res.json();
+  } catch (_) { /* no server: the browser writes, as before */ }
+  if (!health || !health.inPlaceWrites) return;
+
+  const key = 'scorer-folder-path:' + projectId;
+  let folder = await FileSystem.boundPath(projectId);
+  if (!folder) {
+    // Asked once per session: a reader who backs out is not nagged on every
+    // save, and the browser's own writing still works.
+    if (sessionStorage.getItem('in-place-declined:' + projectId)) return;
+    const remembered = localStorage.getItem(key) || '';
+    const typed = prompt(
+      'Saves can go straight into the project files instead of replacing them, '
+      + 'which keeps Google Drive from losing them. To do that the app needs the '
+      + 'folder of this project on this computer, once.\n\n'
+      + 'Paste the folder path (e.g. G:\\My Drive\\EAE Collaboration\\EAE-56-A):',
+      remembered);
+    if (typed == null || !typed.trim()) {
+      sessionStorage.setItem('in-place-declined:' + projectId, '1');
+      return;
+    }
+    try {
+      // The id a project runs under lives in the browser's own registry, not
+      // in the folder. The server binds a folder only if its project.json
+      // carries the page's id — that is the proof that this page and that
+      // folder are the same project — so the id is written there first,
+      // through the handle the reader picked.
+      const cfg = (await FileSystem.readProjectConfig(dirHandle)) || {};
+      if (cfg.id !== projectId) {
+        cfg.id = projectId;
+        await FileSystem.writeProjectConfig(dirHandle, cfg);
+      }
+      folder = await FileSystem.bindProjectPath(projectId, typed.trim());
+      localStorage.setItem(key, folder);
+    } catch (err) {
+      setStatus('error', 'Could not use that folder: ' + (err.message || err));
+      setTimeout(() => setStatus('connected', 'Ready'), 8000);
+      return;
+    }
+  }
+  FileSystem.useServerWrites(projectId, true);
+  console.log('In-place writes on:', folder);
+}
+
 // Initialize baseline timestamps
 async function initFilePolling() {
   if (!dirHandle) return;
+  await enableInPlaceWrites();
   lastKnownTimestamps = await collectTimestamps();
   filePollingInterval = setInterval(pollForChanges, FILE_POLL_INTERVAL);
   console.log('File polling started');
@@ -8635,9 +9468,21 @@ async function pollForChanges() {
 
     // Check score-data.json
     if (currentTimestamps['score-data.json'] !== lastKnownTimestamps['score-data.json']) {
-      console.log('score-data.json changed on disk, reloading...');
       const data = await FileSystem.readScoreData(dirHandle);
-      if (data) {
+      const ownEcho = !!(data && data.savedAt && data.savedAt === lastScoreDataSavedAt);
+      const unsavedHere = hasUnsavedChanges || !!scoreDataSaveTimer;
+      if (ownEcho) {
+        console.log('score-data.json: own save echoed back with a new time; nothing to reload');
+      } else if (data && unsavedHere) {
+        // Somebody else's version, and edits here not yet written. Reloading
+        // would throw the edits away without a word.
+        console.warn('score-data.json changed on disk while there are unsaved changes here; kept the unsaved changes');
+        setStatus('error', 'score-data.json changed on disk (saved ' + (data.savedAt || 'at an unknown time')
+          + ') — your unsaved changes are kept. Save to overwrite it, or reload the page to take it.');
+      } else if (data) {
+        console.log('score-data.json changed on disk, reloading...');
+      }
+      if (data && !ownEcho && !unsavedHere) {
         // Clear and reload
         Object.keys(reconstructedLines).forEach(k => delete reconstructedLines[k]);
         Object.keys(translationLines).forEach(k => delete translationLines[k]);
@@ -8647,6 +9492,8 @@ async function pollForChanges() {
         // Cleared like the rest, or a reload leaves stale alignments behind.
         Object.keys(lineAlignments).forEach(k => delete lineAlignments[k]);
         Object.keys(lemmaChoices).forEach(k => delete lemmaChoices[k]);
+        Object.keys(alignmentOk).forEach(k => delete alignmentOk[k]);
+        Object.keys(acceptedPairs).forEach(k => delete acceptedPairs[k]);
         Object.keys(exportedSections).forEach(k => delete exportedSections[k]);
         Object.keys(revisedSections).forEach(k => delete revisedSections[k]);
         exportIssues.length = 0;
@@ -8657,6 +9504,8 @@ async function pollForChanges() {
         if (data.variants) Object.assign(variantLines, data.variants);
       if (data.alignments) Object.assign(lineAlignments, data.alignments);
       if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
+      if (data.alignmentOk) Object.assign(alignmentOk, data.alignmentOk);
+      if (data.acceptedPairs) Object.assign(acceptedPairs, data.acceptedPairs);
       if (data.exported) Object.assign(exportedSections, data.exported);
       if (data.revised) Object.assign(revisedSections, data.revised);
       if (Array.isArray(data.issues)) exportIssues.push(...data.issues);
@@ -8666,7 +9515,7 @@ async function pollForChanges() {
       }
       migrateSentMarks();
       updateReportsBadge();
-        renderScore();
+        renderScoreInBackground();
         hasChanges = true;
       }
     }
@@ -8802,9 +9651,12 @@ async function pollForChanges() {
           continue;
         }
 
-        console.log(`${ms.siglum}.txt changed on disk, reloading...`);
         const content = await FileSystem.readManuscript(dirHandle, ms.siglum);
-        if (content !== null) {
+        if (content !== null && content === ms.content) {
+          // Reads as it does here already: our own save, its time rewritten by
+          // the sync client. Nothing to reload, and nothing to redraw.
+        } else if (content !== null) {
+          console.log(`${ms.siglum}.txt changed on disk, reloading...`);
           ms.content = content;
           // Update editor if this is the displayed manuscript
           if (id === activeManuscript) {
@@ -8822,7 +9674,7 @@ async function pollForChanges() {
 
     if (hasChanges) {
       if (!hasUnsavedChanges) setStatus('connected', 'Synced');
-      renderScore();
+      renderScoreInBackground();
     }
   } catch (err) {
     console.error('Polling error:', err);
@@ -8863,12 +9715,15 @@ try {
             setEditorContent(content);
             isPollingUpdate = false;
           }
-          renderScore();
+          renderScoreInBackground();
         }
       }
     } else if (msg.type === 'score-data-saved' && msg.projectId === projectId) {
       const data = await FileSystem.readScoreData(dirHandle);
-      if (data) {
+      if (data && (hasUnsavedChanges || scoreDataSaveTimer)) {
+        setStatus('error', 'Another window saved score-data.json — your unsaved changes here are kept. Save to overwrite it, or reload the page to take it.');
+      }
+      if (data && !hasUnsavedChanges && !scoreDataSaveTimer) {
         Object.keys(reconstructedLines).forEach(k => delete reconstructedLines[k]);
         Object.keys(translationLines).forEach(k => delete translationLines[k]);
         Object.keys(noteLines).forEach(k => delete noteLines[k]);
@@ -8877,6 +9732,8 @@ try {
         // Cleared like the rest, or a reload leaves stale alignments behind.
         Object.keys(lineAlignments).forEach(k => delete lineAlignments[k]);
         Object.keys(lemmaChoices).forEach(k => delete lemmaChoices[k]);
+        Object.keys(alignmentOk).forEach(k => delete alignmentOk[k]);
+        Object.keys(acceptedPairs).forEach(k => delete acceptedPairs[k]);
         Object.keys(exportedSections).forEach(k => delete exportedSections[k]);
         Object.keys(revisedSections).forEach(k => delete revisedSections[k]);
         exportIssues.length = 0;
@@ -8887,6 +9744,8 @@ try {
         if (data.variants) Object.assign(variantLines, data.variants);
       if (data.alignments) Object.assign(lineAlignments, data.alignments);
       if (data.lemmas) Object.assign(lemmaChoices, data.lemmas);
+      if (data.alignmentOk) Object.assign(alignmentOk, data.alignmentOk);
+      if (data.acceptedPairs) Object.assign(acceptedPairs, data.acceptedPairs);
       if (data.exported) Object.assign(exportedSections, data.exported);
       if (data.revised) Object.assign(revisedSections, data.revised);
       if (Array.isArray(data.issues)) exportIssues.push(...data.issues);
@@ -8896,7 +9755,7 @@ try {
       }
       migrateSentMarks();
       updateReportsBadge();
-        renderScore();
+        renderScoreInBackground();
       }
     } else if (msg.type === 'annotations-saved' && msg.projectId === projectId) {
       annotations = await FileSystem.readAnnotations(dirHandle) || [];
@@ -10323,7 +11182,7 @@ function wireSourceLinks(root) {
   });
 }
 
-function openSource(siglum, sourceLine, sec) {
+function openSource(siglum, sourceLine, sec, surface) {
   // Manuscripts are keyed by "ms-<filename>" and the entries carry no id of
   // their own, so the key is the id — taking it off the object gives undefined.
   const id = Object.keys(manuscripts).find((k) => manuscripts[k].siglum === siglum);
@@ -10338,21 +11197,33 @@ function openSource(siglum, sourceLine, sec) {
     const rows = String(ms.content || '').split('\n');
     const want = String(sourceLine) + '.';
     // A tablet numbers each surface from its own 1, so "3'" can be a line of
-    // the obverse and a line of the reverse at once. Where the caller knows
-    // which § the reading was filed under, that settles which of the two is
-    // meant; a caller that does not gets the first, as before.
-    const matches = (row, wantSec) => {
-      const t = row.trim();
-      if (t.charAt(0) !== '§') return false;
-      const sp = t.indexOf(' ');
-      if (sp <= 0) return false;
-      if (wantSec != null && t.slice(1, sp).replace(/[a-z]$/, '') !== String(wantSec)) return false;
-      return t.slice(sp + 1).trim().indexOf(want) === 0;
-    };
-    let at = sec === undefined || sec === null || sec === ''
-      ? -1
-      : rows.findIndex((row) => matches(row, sec));
-    if (at < 0) at = rows.findIndex((row) => matches(row, null));
+    // the obverse and a line of the reverse at once. A caller that knows the
+    // surface — a reference in a note — gets that surface; one that knows
+    // which § the reading was filed under gets that §; one that knows neither
+    // gets the first, as before. A line with no § yet can be reached too, but
+    // never ahead of a placed one with the same number.
+    const wantSurface = normSurface(surface);
+    const wantSec = sec === undefined || sec === null || sec === '' ? null : String(sec);
+    let cur = '';
+    let at = -1;
+    let best = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const t = rows[i].trim();
+      if (t.charAt(0) === '@') { cur = normSurface(t.slice(1)); continue; }
+      let rest = t;
+      let rowSec = null;
+      if (t.charAt(0) === '§') {
+        const sp = t.indexOf(' ');
+        if (sp <= 0) continue;
+        rowSec = t.slice(1, sp).replace(/[a-z]$/, '');
+        rest = t.slice(sp + 1).trim();
+      }
+      if (rest.indexOf(want) !== 0) continue;
+      let score = rowSec != null ? 1 : 0;
+      if (wantSurface && cur === wantSurface) score += 4;
+      if (wantSec != null && rowSec === wantSec) score += 2;
+      if (score > best) { best = score; at = i; }
+    }
     if (at >= 0) {
       aceEditor.gotoLine(at + 1, 0, true);
       aceEditor.focus();
@@ -11505,6 +12376,19 @@ function openReportsPage(sec) {
   if (btn) btn.addEventListener('click', () => openReportsPage(null));
 })();
 
+// The help has a page of its own for the same reason the reports do: it is
+// read beside the scorer, not instead of it. One named window; a section
+// anchor lands the reader on the part that was asked about.
+function openHelpPage(section) {
+  const w = window.open('help.html' + (section ? '#' + section : ''), 'scorer-help');
+  if (w && w.focus) w.focus();
+}
+
+(() => {
+  const btn = document.getElementById('help-btn');
+  if (btn) btn.addEventListener('click', () => openHelpPage(null));
+})();
+
 // The ⚠ / ✖ a section wears opens the page on that section's reports.
 document.addEventListener('click', (e) => {
   const mark = e.target && e.target.closest ? e.target.closest('.line-issue') : null;
@@ -12352,7 +13236,7 @@ async function openLemmaDropdown(el) {
         setTimeout(() => setStatus('connected', 'Ready'), 4000);
       });
     } else {
-      saveScoreDataToFile();
+      scheduleScoreDataSave();
     }
     close(false);
   };
@@ -12365,7 +13249,11 @@ async function openLemmaDropdown(el) {
     if (restore && previous) {
       const edit = el.querySelector('.lem-edit');
       if (edit) edit.outerHTML = previous;
+      // Putting the word back does not take in anything that landed while the
+      // picker was open, so a waiting rebuild runs now.
+      flushDeferredScoreRender();
     } else {
+      deferredScoreRender = false;   // this rebuild answers for it
       renderScore();
     }
   }
@@ -12388,19 +13276,25 @@ async function openLemmaDropdown(el) {
   // The next word to tag, as coordinates rather than as an element: committing
   // rebuilds the score, so anything held by reference is gone by the time it
   // would be used.
+  // Walked from the open word through the full list, skipping what cannot be
+  // tagged, rather than searched for in a pre-filtered one. A word that is
+  // itself skipped or a divider can still be opened by clicking it, and in the
+  // filtered list it had no index at all — so Tab from there found no
+  // neighbour and let go of the keyboard entirely.
   const neighbour = (dir) => {
-    const all = [...document.querySelectorAll('.lem-word')].filter((x) =>
-      !x.classList.contains('is-divider') && !x.classList.contains('is-skip'));
+    const all = [...document.querySelectorAll('.lem-word')];
     const at = all.indexOf(el);
-    const to = at < 0 ? null : all[at + dir];
-    return to ? { line: to.dataset.line, variant: to.dataset.variant, pos: to.dataset.pos } : null;
+    if (at < 0) return null;
+    for (let i = at + dir; i >= 0 && i < all.length; i += dir) {
+      const x = all[i];
+      if (x.classList.contains('is-divider') || x.classList.contains('is-skip')) continue;
+      return { line: x.dataset.line, variant: x.dataset.variant, pos: x.dataset.pos };
+    }
+    return null;
   };
 
   const openAt = (where) => {
-    if (!where) return;
-    const next = [...document.querySelectorAll('.lem-word')].find((x) =>
-      x.dataset.line === where.line && x.dataset.variant === where.variant
-      && x.dataset.pos === where.pos);
+    const next = findLemWord(where);
     if (next) openLemmaDropdown(next);
   };
 
@@ -12421,10 +13315,18 @@ async function openLemmaDropdown(el) {
       // and an edition.
       e.preventDefault();
       const where = neighbour(e.shiftKey ? -1 : 1);
+      // Where to stand if this was the last word: the rebuild detaches this
+      // one, and letting focus fall to <body> is what sent the next Tab back
+      // to the top of the document.
+      const here = { line: el.dataset.line, variant: el.dataset.variant, pos: el.dataset.pos };
       if (active >= 0 && rows[active]) pick(rows[active].id);
       else commit(null);
       // After the re-render, not before it.
-      setTimeout(() => openAt(where), 0);
+      setTimeout(() => {
+        if (where) { openAt(where); return; }
+        const last = findLemWord(here);
+        if (last) last.focus();
+      }, 0);
     } else if (e.key === 'Escape') { e.preventDefault(); close(true); }
   });
 
