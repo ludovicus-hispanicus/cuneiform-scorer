@@ -112,6 +112,8 @@
                hidden>eBL entry &#8599;</a>
             <button id="ebl-pull-btn" class="ebl-entry-link ebl-pull-btn" type="button"
                     title="Compare this source with its eBL transliteration" hidden>Pull &#8595;</button>
+            <button id="ebl-joins-btn" class="ebl-entry-link ebl-pull-btn" type="button"
+                    title="Rank the Fragmentarium against this tablet by its line structure — eBL&rsquo;s join finder. Reads only; needs an eBL login." hidden>Joins &#8644;</button>
           </div>
         </div>
         <div id="editor" class="editor"></div>
@@ -125,10 +127,19 @@
             <button class="pane-tab active" data-tab="score">Score</button>
             <button class="pane-tab" data-tab="colophons">Colophons</button>
             <button class="pane-tab" data-tab="parallels">Parallels</button>
+            <button class="pane-tab" data-tab="joins" title="eBL&rsquo;s join finder: the Fragmentarium ranked against one tablet by its line structure">Joins</button>
             <button class="pane-tab" data-tab="paradigms">Paradigms</button>
             <button class="pane-tab" data-tab="stats">Statistics</button>
             <button class="pane-tab" data-tab="images">Images</button>
           </div>
+          <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
+        </div>
+        <!-- Tablets opened from Parallels get their own row: they come and go,
+             and mixing them into the fixed tabs above pushes those around. -->
+        <div id="tablet-tabs" class="tablet-tabs hidden"></div>
+        <!-- The score's own tools. A tab-content of the score tab, so they come and go
+             with it and the tab bar keeps its width for the tabs. -->
+        <div id="score-tools" class="tab-content score-tools active" data-tab="score">
           <span class="tab-header-split">
             <button id="lemma-mode-btn" class="tab-header-btn" title="Give each word of a reading a dictionary lemma. Alt+Shift+L for the whole project, Alt+L for the omen under the cursor.">Lemmas</button>
             <button id="glossary-btn" class="tab-header-btn" title="The readings this project has settled for itself, ahead of the general dictionary. Alt+Shift+D.">Dictionary</button>
@@ -136,14 +147,11 @@
             <button id="check-positions-btn" class="tab-header-btn" title="Find aligned rows whose boxes have drifted from the words they were set for — after a reading was edited or a witness moved — and slide them back.">Check positions</button>
             <button id="compose-all-btn" class="tab-header-btn" title="Compose every reading in the project from its witnesses. Overwrites what is there — never runs on its own.">Compose all</button>
           </span>
-          <button id="upload-file-btn" class="tab-header-btn hidden" title="Upload image or PDF">+ Upload</button>
         </div>
-        <!-- Tablets opened from Parallels get their own row: they come and go,
-             and mixing them into the fixed tabs above pushes those around. -->
-        <div id="tablet-tabs" class="tablet-tabs hidden"></div>
         <div id="score" class="score tab-content active" data-tab="score"></div>
         <div id="colophons" class="score tab-content" data-tab="colophons"></div>
         <div id="parallels" class="score tab-content" data-tab="parallels"></div>
+        <div id="joins-tab" class="score tab-content" data-tab="joins"></div>
         <div id="paradigms-tab" class="score tab-content" data-tab="paradigms"></div>
         <div id="stats-tab" class="score tab-content" data-tab="stats"></div>
         <div id="images-tab" class="tab-content" data-tab="images">

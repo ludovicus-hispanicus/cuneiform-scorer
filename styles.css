@@ -5757,3 +5757,50 @@ body.is-moving-witness .score-line-header { transition: outline-color 0.1s; }
 .pos-check-item.is-rowok { justify-content: flex-end; }
 
 .pos-check-item.is-dup, .pos-check-item.is-order { background: var(--changed-light, #fbf1dc); border-radius: 4px; padding: 0.3rem 0.4rem; }
+
+/* ---- Join candidates (eBL LineToVec) ------------------------------------
+   Two rankings side by side, because they answer differently: plain overlap
+   finds the long match, the weighted one the match that crosses rulings. */
+.joins-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 720px) { .joins-cols { grid-template-columns: 1fr; } }
+.joins-col h4 { margin: 0.2rem 0 0.4rem; font-size: 0.9rem; }
+.joins-row { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; padding: 0.25rem 0; border-top: 1px solid var(--border-color); font-size: 0.85rem; }
+.joins-row .joins-num { font-family: "Consolas", "Monaco", monospace; min-width: 8rem; }
+.joins-row .joins-num a { color: var(--accent); text-decoration: none; }
+.joins-row .joins-period { color: var(--text-muted); flex: 1; min-width: 6rem; }
+.joins-row .joins-score { font-variant-numeric: tabular-nums; min-width: 2.2rem; text-align: right; }
+.joins-row .joins-flag { font-size: 0.72rem; border-radius: 999px; padding: 0.02rem 0.45rem; background: var(--sent-light, #e6f4ec); color: var(--sent-accent, #2f7d4f); }
+.joins-row .joins-flag.is-joined { background: var(--changed-light, #fbf1dc); color: var(--changed-accent, #9a6b12); }
+.joins-row button { font-size: 0.75rem; padding: 0.08rem 0.45rem; }
+
+#joins-tab .joins-cols { padding: 0.6rem 0.9rem; }
+#joins-tab .parallels-message, #joins-tab .report-note { margin: 0.8rem 0.9rem; }
+
+/* ---- The score tools row -----------------------------------------------------
+   Lemmas, Dictionary, Positions, Check positions, Compose all: things done to
+   the score, so they live with the score rather than in the tab bar, which
+   needs its width for the tabs. Shown and hidden with the Score tab. */
+.score-tools { padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--border-color); background: var(--bg-light); }
+.score-tools.active { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.score-tools .tab-header-split { margin-left: 0; margin-right: 0; }
+
+/* ---- Join candidates as a table ----------------------------------------------- */
+.joins-controls { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; padding: 0.5rem 0.9rem 0; font-size: 0.85rem; }
+.joins-controls input[type="search"] { padding: 0.15rem 0.45rem; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-white); color: var(--text-dark); min-width: 12rem; }
+#joins-tab .joins-table-wrap { padding: 0.4rem 0.9rem 1rem; overflow-x: auto; }
+.joins-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.joins-table th, .joins-table td { text-align: left; padding: 0.3rem 0.5rem 0.3rem 0; border-top: 1px solid var(--border-color); vertical-align: middle; }
+.joins-table th { border-top: none; font-weight: 600; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; user-select: none; white-space: nowrap; }
+.joins-table th.is-sorted { color: var(--accent); }
+.joins-table th .sort-arrow { font-size: 0.7em; margin-left: 0.2em; }
+.joins-table td.num { font-family: "Consolas", "Monaco", monospace; white-space: nowrap; }
+.joins-table td.num a { color: var(--accent); text-decoration: none; }
+.joins-table td.score { font-variant-numeric: tabular-nums; text-align: right; padding-right: 1rem; }
+.joins-table th.score { text-align: right; padding-right: 1rem; }
+.joins-table td.acts { white-space: nowrap; }
+.joins-table td.acts button { font-size: 0.75rem; padding: 0.08rem 0.45rem; margin-right: 0.3rem; }
+
+.joins-table td.genre { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.joins-site { color: var(--text-muted); font-size: 0.78rem; margin-left: 0.3rem; }
+.joins-pending { color: var(--text-muted); }
+.joins-controls select { padding: 0.12rem 0.3rem; }

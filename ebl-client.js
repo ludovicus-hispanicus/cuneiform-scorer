@@ -162,7 +162,10 @@
   // whole-chapter write is minutes of honest work, but finite.
   const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
-  async function authedRequest(method, path, body) {
+  // opts.timeoutMs: a longer wait for a request known to be slow, such as a
+  // line with dozens of witness lines, which eBL checks one by one.
+  async function authedRequest(method, path, body, opts = {}) {
+    const timeoutMs = opts.timeoutMs || REQUEST_TIMEOUT_MS;
     const jwt = getToken();
     if (!jwt) throw new EblError('No eBL token configured', 0, '');
 
@@ -183,7 +186,7 @@
     let signal;
     try {
       if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-        signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+        signal = AbortSignal.timeout(timeoutMs);
       }
     } catch (_) { signal = undefined; }
 
@@ -206,12 +209,13 @@
       const timedOut = err && (err.name === 'TimeoutError' || err.name === 'AbortError');
       const e = new EblError(
         timedOut
-          ? 'eBL did not answer within ' + Math.round(REQUEST_TIMEOUT_MS / 60000)
+          ? 'eBL did not answer within ' + Math.round(timeoutMs / 60000)
             + ' minutes. The request was sent; whether it was applied is not known from here.'
           : 'The request never reached eBL: ' + (err && err.message ? err.message : String(err)),
         0, '', null);
       e.transport = true;
       e.timedOut = !!timedOut;
+      e.timeoutMs = timeoutMs;
       e.method = method;
       e.path = path;
       throw e;
@@ -321,12 +325,12 @@
 
   // The structured lines endpoint. `deleted` holds 0-based positions in the
   // chapter's current line list.
-  async function postLines(coords, { newLines = [], deleted = [], edited = [] } = {}) {
+  async function postLines(coords, { newLines = [], deleted = [], edited = [] } = {}, opts = {}) {
     return authedRequest('POST', `${chapterPath(coords)}/lines`, {
       new: newLines,
       deleted,
       edited,
-    });
+    }, opts);
   }
 
   // Token alignment: which word of a witness answers to which word of the
@@ -368,6 +372,17 @@
   // ---- Fragmentarium ----
   async function getFragment(museumNumber) {
     return publicGet(`/fragments/${encodeURIComponent(museumNumber)}`);
+  }
+
+  // eBL's join finder. Each side of a tablet is reduced to the sequence of its
+  // line types — text line, single/double/triple ruling, start and end of
+  // side — and every fragment is scored by how far the end of one sequence
+  // overlaps the start of the other, the shape a physical join has. Two
+  // rankings come back, fifteen each: plain overlap, and weighted, where a
+  // ruling or an edge counts for far more than a text line. Needs a login
+  // with the transliterate:fragments scope, which an editor's token has.
+  async function getLineToVecRanking(museumNumber) {
+    return authedRequest('GET', `/fragments/${encodeURIComponent(museumNumber)}/match`);
   }
 
   // Convert a Fragmentarium record into the subset of fields we can populate
@@ -852,6 +867,7 @@
 
     // fragmentarium
     getFragment,
+    getLineToVecRanking,
     fragmentToManuscriptFields,
 
     // manuscripts.json helpers

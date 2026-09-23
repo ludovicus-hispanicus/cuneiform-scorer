@@ -421,6 +421,7 @@ async function loadManuscripts() {
           displaySiglum: siglaMappings[fileName] || null,
           content
         };
+        noteWritten(id, content);
 
         addManuscriptToList(id, fileName);
       }
@@ -3621,6 +3622,7 @@ async function assignWitnessesToVariant(witnesses, lineNum, variantIndex) {
     if (content !== msEntry.content) {
       msEntry.content = content;
       await FileSystem.writeManuscript(dirHandle, msKey, content);
+      noteWritten(idOf(msKey), content);
       touched.push(msKey);
       if (activeManuscript === msEntry.id && aceEditor) {
         const pos = aceEditor.getCursorPosition();
@@ -5542,6 +5544,7 @@ async function addParallelAsSource(museum) {
   addManuscriptToList(id, museum);
   try {
     await FileSystem.writeManuscript(dirHandle, museum, res.content);
+    noteWritten(idOf(museum), res.content);
     await updateManuscriptIndex();
   } catch (err) {
     console.error('Failed to save fetched manuscript:', err);
@@ -5916,6 +5919,9 @@ function setupTabs() {
       if (targetTab === 'paradigms') {
         renderParadigmsTab();
       }
+      if (targetTab === 'joins') {
+        renderJoinsTab();
+      }
       if (targetTab === 'stats') {
         // Measured once and kept: switching away and back should not spend
         // the time again. "Measure again" is there for after an edit.
@@ -5968,6 +5974,7 @@ async function saveToFile(id) {
     setStatus('syncing', 'Saving...');
 
     await FileSystem.writeManuscript(dirHandle, ms.siglum, ms.content);
+    noteWritten(idOf(ms.siglum), ms.content);
     console.log(`Saved ${ms.siglum}.txt`);
     setStatus('connected', 'Saved');
     await updateManuscriptIndex();
@@ -6003,9 +6010,12 @@ async function saveAll() {
   try {
     setStatus('syncing', 'Saving...');
     if (scoreDataSaveTimer) { clearTimeout(scoreDataSaveTimer); scoreDataSaveTimer = null; }
-    if (activeManuscript) {
-      await saveToFile(activeManuscript);
-    }
+    // Every manuscript edited since it was last written, not only the open
+    // one: a source edited and then left for another was held in memory and
+    // never reached the disk, and the poll could then reload the file over it.
+    const toSave = dirtyManuscriptIds();
+    if (activeManuscript && toSave.indexOf(activeManuscript) < 0 && manuscripts[activeManuscript]) toSave.unshift(activeManuscript);
+    for (const id of toSave) await saveToFile(id);
     await saveScoreToFile();
     await saveScoreDataToFile();
     hasUnsavedChanges = false;
@@ -6611,9 +6621,275 @@ function closePullDialog() {
   pullState = null;
 }
 
+// ---- Join candidates ---------------------------------------------------------
+//
+// eBL's LineToVec ranking for one tablet: the Fragmentarium ordered by how far
+// the line structure of another fragment — text lines, rulings, the edges of a
+// side — continues this one's. Read only. It needs a login with the
+// transliterate:fragments scope, which the token pasted in Settings carries
+// when it is an editor's.
+//
+// A tab beside Parallels rather than an overlay, so the lists stay in view
+// while the candidates are read. Two lists, because they answer differently:
+// plain overlap finds the longest run, the weighted one the run that crosses
+// rulings, which is worth more. A candidate already in the project, or already
+// recorded at eBL as joined to this tablet, is marked rather than offered.
+const joinsState = { museum: null, ranking: null, joined: new Set(), error: null, running: false };
+
+async function runJoins(museum) {
+  if (!window.EblClient || !EblClient.getLineToVecRanking || !museum) return;
+  const primary = EblClient.extractMuseumNumber(museum).primary;
+  joinsState.museum = museum;
+  joinsState.ranking = null;
+  joinsState.joined = new Set();
+  joinsState.error = null;
+  joinsState.running = true;
+  renderJoinsTab();
+  try {
+    joinsState.ranking = await EblClient.getLineToVecRanking(primary);
+  } catch (err) {
+    const status = err && err.status;
+    joinsState.error = status === 0 || /No eBL token/.test(String(err && err.message))
+      ? 'No eBL token is configured. Paste one in Settings \u2014 the join finder needs a login.'
+      : status === 403 || status === 401
+        ? 'eBL refused: the login behind the token has no transliterate:fragments scope. An editor\u2019s login has it.'
+        : status === 404
+          ? 'eBL has no fragment "' + primary + '".'
+          : 'eBL could not be reached: ' + (err && err.message || err);
+  }
+  if (!joinsState.error) {
+    // What eBL already knows to be joined to this tablet, to mark rather than offer.
+    try {
+      const frag = await EblClient.getFragment(primary);
+      for (const group of (frag && frag.joins) || []) {
+        for (const piece of group) {
+          const mn = piece.museumNumber || {};
+          const n = (mn.prefix || '') + '.' + (mn.number || '') + (mn.suffix ? '.' + mn.suffix : '');
+          if (n && n !== primary) joinsState.joined.add(n);
+        }
+      }
+    } catch (_) { /* the ranking stands without it */ }
+  }
+  joinsState.running = false;
+  renderJoinsTab();
+  if (!joinsState.error) fetchJoinsMeta();
+}
+
+// What each candidate is, from its Fragmentarium record: genre, description,
+// site, collection, how many lines it has. The ranking says only how well the
+// line structure fits; a Šumma ālu fragment fits as well as any and is not
+// worth a look, and this is what says so. Kept for the session, fetched a few
+// at a time, and the table redrawn once when they are in.
+joinsState.meta = {};
+async function fetchJoinsMeta() {
+  const want = joinsRows().map((x) => x.n).filter((n) => !(n in joinsState.meta));
+  if (!want.length) return;
+  const asked = joinsState.museum;
+  const one = async (n) => {
+    try {
+      const f = await EblClient.getFragment(n);
+      const atf = String(f.atf || '');
+      joinsState.meta[n] = {
+        genres: (f.genres || []).map((g) => (g.category || []).join(' > ')).filter(Boolean),
+        description: String(f.description || ''),
+        site: (f.archaeology && f.archaeology.site) || '',
+        collection: f.collection || '',
+        lines: atf.split('\n').filter((l) => /^\s*\d+['\u2019]?[ab]?\./.test(l)).length,
+        joins: ((f.joins || []).flat().length || 0) > 1,
+      };
+    } catch (_) { joinsState.meta[n] = { genres: [], description: '', site: '', collection: '', lines: null, joins: false, failed: true }; }
+  };
+  const queue = want.slice();
+  const workers = Array.from({ length: Math.min(6, queue.length) }, async () => { while (queue.length) await one(queue.shift()); });
+  await Promise.all(workers);
+  if (joinsState.museum === asked) renderJoinsTab();
+}
+
+// One table rather than two lists: a candidate is one fragment with two
+// scores, and a table can be sorted by either, by number or by period, and
+// filtered — which is what reading thirty candidates against a memory of
+// the museum's numbering actually needs.
+Object.assign(joinsState, { sortKey: 'weighted', sortDir: -1, filter: '', hideKnown: false, genre: '' });
+
+function joinsRows() {
+  const r = joinsState.ranking;
+  if (!r) return [];
+  const by = new Map();
+  const period = (sc) => sc.script && (typeof sc.script.period === 'string' ? sc.script.period : (sc.script.period && sc.script.period.name)) || '';
+  const take = (list, key) => {
+    for (const sc of (list || [])) {
+      const n = String(sc.museumNumber || '');
+      if (!n) continue;
+      if (!by.has(n)) by.set(n, { n, period: period(sc), score: null, weighted: null });
+      by.get(n)[key] = Number(sc.score);
+    }
+  };
+  take(r.score, 'score');
+  take(r.scoreWeighted, 'weighted');
+  const inProject = (n) => !!manuscripts['ms-' + String(n).toLowerCase()];
+  const meta = joinsState.meta || {};
+  // The genre as a reader names it: the last, most specific part of eBL's path.
+  const short = (g) => g.split(' > ').filter((p) => p !== 'CANONICAL').slice(-1)[0] || g;
+  return [...by.values()].map((x) => {
+    const m = meta[x.n] || null;
+    return { ...x,
+      status: inProject(x.n) ? 'in project' : joinsState.joined.has(x.n) ? 'joined at eBL' : '',
+      genre: m ? m.genres.map(short).join(', ') : null,
+      genreFull: m ? m.genres.join(' ; ') : '',
+      description: m ? m.description : '',
+      site: m ? m.site : '',
+      lines: m ? m.lines : null,
+      metaKnown: !!m,
+    };
+  });
+}
+
+function joinsTableBody() {
+  const raw = joinsState.filter.trim().toLowerCase();
+  const terms = raw.split(/\s+/).filter(Boolean);
+  const must = terms.filter((t) => !t.startsWith('-'));
+  const mustNot = terms.filter((t) => t.startsWith('-') && t.length > 1).map((t) => t.slice(1));
+  let rows = joinsRows();
+  const hay = (x) => (x.n + ' ' + x.period + ' ' + x.status + ' ' + (x.genreFull || '') + ' ' + (x.site || '') + ' ' + (x.description || '')).toLowerCase();
+  if (must.length) rows = rows.filter((x) => { const h = hay(x); return must.every((t) => h.includes(t)); });
+  if (mustNot.length) rows = rows.filter((x) => { const h = hay(x); return !mustNot.some((t) => h.includes(t)); });
+  if (joinsState.hideKnown) rows = rows.filter((x) => !x.status);
+  if (joinsState.genre) rows = rows.filter((x) => (x.genreFull || '').split(' ; ').includes(joinsState.genre));
+  const k = joinsState.sortKey, d = joinsState.sortDir;
+  const num = (v) => (v == null ? -Infinity : v);
+  const cmp = (a, b) => {
+    if (k === 'score' || k === 'weighted' || k === 'lines') {
+      return (num(a[k]) - num(b[k])) * d || a.n.localeCompare(b.n, undefined, { numeric: true });
+    }
+    const va = String(a[k] || ''), vb = String(b[k] || '');
+    return va.localeCompare(vb, undefined, { numeric: true }) * d || a.n.localeCompare(b.n, undefined, { numeric: true });
+  };
+  rows.sort(cmp);
+  if (!rows.length) return '<tr><td colspan="8" class="parallels-message">nothing matches</td></tr>';
+  return rows.map((x) => '<tr>'
+    + '<td class="num"><a href="https://www.ebl.lmu.de/library/' + encodeURIComponent(x.n) + '" target="_blank" rel="noopener noreferrer"'
+      + (x.description ? ' title="' + escapeHtml(x.description) + '"' : '') + '>' + escapeHtml(x.n) + '</a></td>'
+    + '<td>' + escapeHtml(x.period) + (x.site ? ' <span class="joins-site">' + escapeHtml(x.site) + '</span>' : '') + '</td>'
+    + '<td class="genre"' + (x.genreFull ? ' title="' + escapeHtml(x.genreFull) + '"' : '') + '>' + (x.metaKnown ? escapeHtml(x.genre || '\u2014') : '<span class="joins-pending">\u2026</span>') + '</td>'
+    + '<td class="score">' + (x.lines == null ? (x.metaKnown ? '\u2014' : '') : x.lines) + '</td>'
+    + '<td class="score">' + (x.score == null ? '\u2014' : x.score) + '</td>'
+    + '<td class="score">' + (x.weighted == null ? '\u2014' : x.weighted) + '</td>'
+    + '<td>' + (x.status ? '<span class="joins-flag' + (x.status === 'joined at eBL' ? ' is-joined' : '') + '">' + escapeHtml(x.status) + '</span>' : '') + '</td>'
+    + '<td class="acts">' + (x.status === 'in project' ? ''
+      : '<button type="button" class="joins-open" data-museum="' + escapeHtml(x.n) + '" title="Read it in a tab beside Images">Open</button>'
+        + '<button type="button" class="joins-add" data-museum="' + escapeHtml(x.n) + '" title="Fetch it from eBL as a source of this project">Add as source</button>')
+    + '</td></tr>').join('');
+}
+
+function renderJoinsTab() {
+  const panel = document.getElementById('joins-tab');
+  if (!panel) return;
+  const sources = Object.values(manuscripts).map((m) => m.siglum).filter(Boolean)
+    .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+  const current = joinsState.museum || (activeManuscript && manuscripts[activeManuscript] && manuscripts[activeManuscript].siglum) || sources[0] || '';
+  const busy = joinsState.running;
+
+  let html = '<div class="parallels-bar"><div class="parallels-corpus">';
+  html += '<label title="Which tablet to ask about">Tablet <select id="joins-source"' + (busy ? ' disabled' : '') + '>'
+    + sources.map((m) => '<option value="' + escapeHtml(m) + '"' + (m === current ? ' selected' : '') + '>' + escapeHtml(displaySiglum(m)) + '</option>').join('')
+    + '</select></label> ';
+  html += '<button id="joins-run" class="parallels-link"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Asking eBL\u2026' : (joinsState.ranking && joinsState.museum === current ? 'Ask again' : 'Ask eBL')) + '</button>';
+  html += '<span class="parallels-corpus-state">eBL\u2019s join finder: the Fragmentarium ranked by how far another fragment\u2019s line structure \u2014 text lines, rulings, the edge of a side \u2014 continues this tablet\u2019s. Structure only: not the description, the columns, or where lines end.</span>';
+  html += '</div></div>';
+
+  if (joinsState.error) {
+    html += noteBlock(joinsState.error, 'bad');
+  } else if (joinsState.ranking && joinsState.museum === current) {
+    const th = (key, label, cls) => {
+      const on = joinsState.sortKey === key;
+      return '<th class="' + (cls || '') + (on ? ' is-sorted' : '') + '" data-sort="' + key + '" title="Sort by ' + escapeHtml(label.toLowerCase()) + '">'
+        + escapeHtml(label) + (on ? '<span class="sort-arrow">' + (joinsState.sortDir < 0 ? '\u25BC' : '\u25B2') + '</span>' : '') + '</th>';
+    };
+    const genres = [...new Set(joinsRows().flatMap((x) => (x.genreFull || '').split(' ; ').filter(Boolean)))].sort();
+    html += '<div class="joins-controls">'
+      + '<input type="search" id="joins-filter" placeholder="Filter: number, period, genre\u2026  (-word excludes)" value="' + escapeHtml(joinsState.filter) + '">'
+      + '<label>Genre <select id="joins-genre"><option value="">all</option>'
+        + genres.map((g) => '<option value="' + escapeHtml(g) + '"' + (joinsState.genre === g ? ' selected' : '') + '>' + escapeHtml(g.split(' > ').filter((p) => p !== 'CANONICAL').join(' > ')) + '</option>').join('')
+        + '</select></label>'
+      + '<label><input type="checkbox" id="joins-hide-known"' + (joinsState.hideKnown ? ' checked' : '') + '> hide what is in the project or already joined</label>'
+      + '<span class="parallels-corpus-state" id="joins-count"></span>'
+      + '</div>';
+    html += '<div class="joins-table-wrap"><table class="joins-table"><thead><tr>'
+      + th('n', 'Number', 'num') + th('period', 'Period') + th('genre', 'Genre') + th('lines', 'Lines', 'score')
+      + th('score', 'Score', 'score') + th('weighted', 'Weighted', 'score')
+      + '<th>Status</th><th></th></tr></thead><tbody id="joins-tbody">' + joinsTableBody() + '</tbody></table></div>';
+  } else if (!busy) {
+    html += '<div class="parallels-message">Nothing asked yet for ' + escapeHtml(displaySiglum(current) || 'this tablet') + '.</div>';
+  }
+  panel.innerHTML = html;
+
+  const sel = document.getElementById('joins-source');
+  if (sel) sel.addEventListener('change', () => { joinsState.museum = sel.value; joinsState.ranking = null; joinsState.error = null; joinsState.genre = ''; runJoins(sel.value); });
+  const run = document.getElementById('joins-run');
+  if (run) run.addEventListener('click', () => runJoins(current));
+  // Sorting and filtering redraw the body only, so the filter box keeps its caret.
+  const redraw = () => {
+    const body = document.getElementById('joins-tbody');
+    if (body) body.innerHTML = joinsTableBody();
+    const count = document.getElementById('joins-count');
+    if (count) {
+      const rows = joinsRows();
+      const all = rows.length, shown = body ? body.querySelectorAll('tr:not(:has(.parallels-message))').length : 0;
+      const both = rows.filter((x) => x.score != null && x.weighted != null).length;
+      const r = joinsState.ranking || {};
+      const pending = rows.filter((x) => !x.metaKnown).length;
+      count.textContent = (shown === all ? all : shown + ' of ' + all) + ' candidates \u2014 '
+        + ((r.score || []).length) + ' by score, ' + ((r.scoreWeighted || []).length) + ' by weight, ' + both + ' on both lists'
+        + (pending ? ' \u00b7 fetching details for ' + pending + '\u2026' : '');
+    }
+  };
+  for (const h of panel.querySelectorAll('th[data-sort]')) {
+    h.addEventListener('click', () => {
+      const key = h.dataset.sort;
+      if (joinsState.sortKey === key) joinsState.sortDir = -joinsState.sortDir;
+      else { joinsState.sortKey = key; joinsState.sortDir = (key === 'score' || key === 'weighted') ? -1 : 1; }
+      renderJoinsTab();
+    });
+  }
+  const filter = document.getElementById('joins-filter');
+  if (filter) filter.addEventListener('input', () => { joinsState.filter = filter.value; redraw(); });
+  const hide = document.getElementById('joins-hide-known');
+  if (hide) hide.addEventListener('change', () => { joinsState.hideKnown = hide.checked; redraw(); });
+  const genreSel = document.getElementById('joins-genre');
+  if (genreSel) genreSel.addEventListener('change', () => { joinsState.genre = genreSel.value; redraw(); });
+  redraw();
+  // First visit: ask without being told, it is one small read.
+  if (!busy && !joinsState.ranking && !joinsState.error && current && joinsState.museum !== current) runJoins(current);
+}
+
+// The header button is a way into the tab with the open tablet chosen.
+function findJoinsFor(museum) {
+  const tab = document.querySelector('.pane-tab[data-tab="joins"]');
+  joinsState.museum = museum;
+  joinsState.ranking = null;
+  joinsState.error = null;
+  if (tab) tab.click(); else renderJoinsTab();
+  runJoins(museum);
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.joins-open, .joins-add') : null;
+  if (!btn) return;
+  e.preventDefault();
+  const museum = btn.dataset.museum;
+  if (!museum) return;
+  if (btn.classList.contains('joins-open')) openTabletView(museum);
+  else addParallelAsSource(museum).then(() => renderJoinsTab());
+});
+
 function setupEblPull() {
   const btn = document.getElementById('ebl-pull-btn');
   if (btn) btn.addEventListener('click', pullFromEbl);
+  const joins = document.getElementById('ebl-joins-btn');
+  if (joins) joins.addEventListener('click', () => {
+    const ms = activeManuscript && manuscripts[activeManuscript];
+    if (ms) findJoinsFor(ms.siglum);
+  });
   const cancel = document.getElementById('pull-cancel-btn');
   if (cancel) cancel.addEventListener('click', closePullDialog);
   const apply = document.getElementById('pull-apply-btn');
@@ -6643,6 +6919,8 @@ function updateSourceHeader(id) {
   }
   const pull = document.getElementById('ebl-pull-btn');
   if (pull) pull.hidden = !ms;
+  const joins = document.getElementById('ebl-joins-btn');
+  if (joins) joins.hidden = !ms;
 
   if (!status) return;
   if (!ms) { status.hidden = true; return; }
@@ -6885,6 +7163,7 @@ async function fetchManuscriptFromEbl() {
   addManuscriptToList(id, museum);
   try {
     await FileSystem.writeManuscript(dirHandle, museum, res.content);
+    noteWritten(idOf(museum), res.content);
     await updateManuscriptIndex();
   } catch (err) {
     console.error('Failed to save fetched manuscript:', err);
@@ -6989,6 +7268,7 @@ async function createNewManuscript() {
   // Save to local folder immediately
   try {
     await FileSystem.writeManuscript(dirHandle, siglum, initialContent);
+    noteWritten(idOf(siglum), initialContent);
     await updateManuscriptIndex();
   } catch (err) {
     console.error('Failed to save new manuscript:', err);
@@ -7040,6 +7320,7 @@ async function importManuscripts() {
       // Save to local folder
       try {
         await FileSystem.writeManuscript(dirHandle, siglum, content);
+        noteWritten(idOf(siglum), content);
         importedCount++;
         lastImportedId = id;
       } catch (err) {
@@ -9284,6 +9565,20 @@ let filePollingInterval = null;
 const FILE_POLL_INTERVAL = 5000; // Check every 5 seconds
 let lastKnownTimestamps = {}; // { filename: lastModified }
 let isSaving = false; // Flag to skip polling during our own saves
+// What each manuscript last read as on disk — set when it is loaded, written,
+// or reloaded. A manuscript whose content differs from this has edits that
+// exist nowhere but here: Save writes every such one, not only the open one,
+// and the folder poll leaves it alone rather than reload the file over it.
+const lastWrittenContent = {};
+const idOf = (siglum) => 'ms-' + String(siglum).toLowerCase();
+function noteWritten(id, content) { lastWrittenContent[id] = content; }
+function isDirtyManuscript(id) {
+  const ms = manuscripts[id];
+  return !!ms && (id in lastWrittenContent) && ms.content !== lastWrittenContent[id];
+}
+function dirtyManuscriptIds() {
+  return Object.keys(manuscripts).filter(isDirtyManuscript);
+}
 // The savedAt of the last score-data.json written from here. A sync client
 // rewrites a file's time once the cloud has it, seconds after the save, and
 // the poll would take that for a change and reload the file over whatever had
@@ -9547,6 +9842,7 @@ async function pollForChanges() {
               displaySiglum: siglaMappings[fileName] || null,
               content
             };
+            noteWritten(id, content);
             addManuscriptToList(id, fileName);
             hasChanges = true;
           }
@@ -9617,6 +9913,7 @@ async function pollForChanges() {
                 displaySiglum: siglaMappings[fileName] || null,
                 content
               };
+              noteWritten(id, content);
               addManuscriptToList(id, fileName);
               hasChanges = true;
             }
@@ -9655,9 +9952,16 @@ async function pollForChanges() {
         if (content !== null && content === ms.content) {
           // Reads as it does here already: our own save, its time rewritten by
           // the sync client. Nothing to reload, and nothing to redraw.
+          noteWritten(id, content);
+        } else if (content !== null && isDirtyManuscript(id)) {
+          // Edits here that were never written, and a different file on disk.
+          // Reloading would throw the edits away without a word.
+          console.warn(`${ms.siglum}.txt changed on disk while it has unsaved edits here; kept the edits`);
+          setStatus('error', ms.siglum + '.txt changed on disk \u2014 your unsaved edits to it are kept. Save to overwrite it, or reload the page to take it.');
         } else if (content !== null) {
           console.log(`${ms.siglum}.txt changed on disk, reloading...`);
           ms.content = content;
+          noteWritten(id, content);
           // Update editor if this is the displayed manuscript
           if (id === activeManuscript) {
             isPollingUpdate = true;
@@ -9706,10 +10010,13 @@ try {
       if (id === activeManuscript && aceEditor && aceEditor.isFocused()) return;
 
       const ms = manuscripts[id];
-      if (ms) {
+      if (ms && isDirtyManuscript(id)) {
+        setStatus('error', 'Another window saved ' + ms.siglum + '.txt \u2014 your unsaved edits to it here are kept. Save to overwrite it, or reload the page to take it.');
+      } else if (ms) {
         const content = await FileSystem.readManuscript(dirHandle, ms.siglum);
         if (content !== null) {
           ms.content = content;
+          noteWritten(id, content);
           if (id === activeManuscript) {
             isPollingUpdate = true;
             setEditorContent(content);
@@ -11569,6 +11876,30 @@ function failureReport(label, err) {
       blocks: [
         outcomeBanner('notsent', label, 'eBL refused it. Nothing was changed.'),
         noteBlock('What eBL said, in full:', 'bad'),
+        rawBlock(detail),
+      ],
+    };
+  }
+  if (err.timedOut) {
+    const l = err.landing;
+    const at = l && l.readAt
+      ? ' (last read at ' + l.readAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : '';
+    return {
+      transport: true,
+      detail,
+      title: label + ' \u2014 eBL did not answer in time',
+      blocks: [
+        outcomeBanner('none', label, 'eBL took the request but did not answer within '
+          + Math.round((err.timeoutMs || 600000) / 60000) + ' minutes.'),
+        l && l.readAt
+          ? noteBlock('The chapter was read again for ten more minutes and still does not show '
+              + '\u00a7' + l.missing.join(', \u00a7') + ' as sent' + at + '.'
+              + (l.landed.length ? ' It does show \u00a7' + l.landed.join(', \u00a7') + '.' : '')
+              + ' eBL may still be working on it. Look at the chapter once more before sending again:'
+              + ' a section eBL did not hold before is appended, so a second send would add it twice.', 'warn')
+          : noteBlock('The chapter could not be read afterwards, so whether it was written is not known.'
+              + ' Open the chapter and look before sending again: a section eBL does not hold yet is'
+              + ' appended, so a second send would add it twice.', 'warn'),
         rawBlock(detail),
       ],
     };
@@ -15171,8 +15502,78 @@ async function exportLineRange(target, nums) {
   const payload = {};
   if (edited.length) payload.edited = edited;
   if (newLines.length) payload.newLines = newLines;
-  await EblClient.postLines(target, payload);
+
+  // eBL checks every witness line before it answers, so a long omen with
+  // thirty-odd witness lines can take longer than the ordinary ten minutes.
+  // The wait grows with what is sent, up to three quarters of an hour.
+  const rows = [...edited.map((e) => e.line), ...newLines]
+    .reduce((n, l) => n + (l.variants || []).reduce((k, v) => k + (v.manuscripts || []).length, 0), 0);
+  const timeoutMs = Math.min(45 * 60000, 10 * 60000 + rows * 20000);
+
+  try {
+    await EblClient.postLines(target, payload, { timeoutMs });
+  } catch (err) {
+    if (!(err && err.timedOut)) throw err;
+    // No answer in time is not the same as not applied. The chapter says
+    // which it was, so it is read, and read again for a while, because eBL
+    // may still be working when the wait runs out.
+    const sent = [
+      ...edited.map((e) => ({ line: e.line, before: ctx.lines[e.index] })),
+      ...newLines.map((l) => ({ line: l, before: null })),
+    ];
+    const landing = await awaitLanding(target, sent);
+    if (landing.missing.length) {
+      err.landing = landing;
+      throw err;
+    }
+    warnings.push('eBL did not answer within ' + Math.round(timeoutMs / 60000)
+      + ' minutes, but the chapter read afterwards shows '
+      + (sent.length === 1 ? 'the line' : 'all ' + sent.length + ' lines')
+      + ' as sent. Nothing needs to be sent again.');
+  }
   return { results, warnings, chapterLines: ctx.lines.length };
+}
+
+// What a line is, for telling whether eBL holds the one that was sent: its
+// number, and which witness line stands under which reading. eBL rewrites the
+// ATF text in small ways of its own, but it keeps the witnesses as sent.
+function lineFingerprint(line) {
+  if (!line) return '';
+  return String(line.number).trim() + '#' + (line.variants || []).map((v) =>
+    (v.manuscripts || []).map((m) => m.manuscriptId + '@' + String(m.number || '').trim())
+      .sort().join(',')).join('|');
+}
+
+// After a send that got no answer: read the chapter until every line sent is
+// there, or ten minutes have passed. A line counts as there when eBL holds it
+// with the witnesses it was sent with, or, for a line eBL had before, when it
+// no longer reads as it did.
+async function awaitLanding(target, sent) {
+  const give = Date.now() + 10 * 60000;
+  let landed = [];
+  let missing = sent.map((x) => x.line.number);
+  let readAt = null;
+  for (let attempt = 0; ; attempt++) {
+    exportStatus('eBL has not answered. Reading the chapter to see whether '
+      + (sent.length === 1 ? '\u00a7' + sent[0].line.number + ' arrived' : 'the lines arrived')
+      + (attempt ? ' (look ' + (attempt + 1) + ')' : '') + '\u2026');
+    try {
+      const lines = (await EblClient.getChapter(target)).lines || [];
+      readAt = new Date();
+      landed = [];
+      missing = [];
+      for (const x of sent) {
+        const now = lines.find((l) => String(l.number) === String(x.line.number));
+        const there = !!now && (lineFingerprint(now) === lineFingerprint(x.line)
+          || (!!x.before && JSON.stringify(now) !== JSON.stringify(x.before)));
+        (there ? landed : missing).push(x.line.number);
+      }
+      if (!missing.length) break;
+    } catch (_) { /* a failed read is one more reason to look again */ }
+    if (Date.now() + 60000 > give) break;
+    await new Promise((r) => setTimeout(r, 60000));
+  }
+  return { landed, missing, readAt };
 }
 
 // One section. The range is the general case and this is the same path with a
