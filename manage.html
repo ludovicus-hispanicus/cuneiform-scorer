@@ -635,6 +635,9 @@
         <button id="ebl-ms-siglum-btn" class="btn btn-secondary" type="button" hidden>Give the clashing tablets a free number</button>
         <button id="ebl-ms-renumber-btn" class="btn btn-secondary" type="button"
           title="Number each provenance–period–type group on its own, so the tenth excerpt is Ex10, not Ex37">Renumber sigla per group</button>
+        <button id="ebl-ms-series-btn" class="btn btn-secondary" type="button"
+          title="Set every tablet's siglum from the shared list for the whole series (e.g. EAE-56-sigla.json), so a tablet has the same siglum in every chapter">Apply the series sigla…</button>
+        <input type="file" id="ebl-ms-series-file" accept=".json,application/json" hidden>
         <button id="ebl-ms-send-btn" class="btn" type="button" disabled>Register manuscripts</button>
       </div>
       <div id="ebl-ms-report" class="ebl-hint" style="margin-top: 0.6rem;"></div>
@@ -1059,6 +1062,15 @@
       document.getElementById('ebl-ms-adopt-btn').addEventListener('click', adoptEblNumbering);
       document.getElementById('ebl-ms-siglum-btn').addEventListener('click', resolveSiglumClashes);
       document.getElementById('ebl-ms-renumber-btn').addEventListener('click', renumberSiglaPerGroup);
+      document.getElementById('ebl-ms-series-btn').addEventListener('click', () => {
+        const input = document.getElementById('ebl-ms-series-file');
+        input.value = '';
+        input.click();
+      });
+      document.getElementById('ebl-ms-series-file').addEventListener('change', (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (f) applySeriesSigla(f);
+      });
       document.getElementById('ebl-sync-meta-btn').addEventListener('click', syncMetadataFromEbl);
 
       renderEblStatus();
@@ -1326,6 +1338,63 @@
       } finally {
         btn.disabled = false;
       }
+    }
+
+    // Take every tablet's siglum from the series list, so a tablet is named the
+    // same in every chapter of the series. Only the local files change here;
+    // Register manuscripts then renames the sigla on eBL (the ids stay).
+    async function applySeriesSigla(file) {
+      const el = document.getElementById('ebl-ms-report');
+      let series;
+      try {
+        series = JSON.parse(await file.text());
+      } catch (err) {
+        el.textContent = file.name + ' is not a readable JSON file: ' + (err && err.message || err);
+        return;
+      }
+      if (!series || !Array.isArray(series.tablets)) {
+        el.textContent = file.name + ' has no list of tablets. Pick the series sigla file, e.g. EAE-56-sigla.json.';
+        return;
+      }
+      const res = EblClient.applySeriesSigla(manuscriptsMeta, series);
+      const missingNote = res.missing.length
+        ? ' Not in the series list, so left as they are: ' + res.missing.join(', ') + '. Add them to the list first.'
+        : '';
+      if (!res.changes.length) {
+        el.textContent = 'Every tablet already has its series siglum.' + missingNote;
+        return;
+      }
+      const lines = [];
+      for (const c of res.changes) {
+        lines.push(c.museumNumber + ': ' + ((await EblClient.buildSiglumPreview(c.before)) || '(none)')
+          + ' → ' + (await EblClient.buildSiglumPreview(c.after)));
+      }
+      const nl = String.fromCharCode(10);
+      if (!confirm('Change ' + res.changes.length + ' siglum/sigla to the series list (' + (series.series || file.name) + ')?'
+        + nl + nl + lines.join(nl)
+        + (res.missing.length ? nl + nl + 'Not in the list, left as they are: ' + res.missing.join(', ') : '')
+        + nl + nl + 'Only this project changes now. Register manuscripts afterwards to rename them on eBL.')) return;
+
+      manuscriptsMeta = res.meta;
+      await FileSystem.writeManuscriptsMeta(dirHandle, manuscriptsMeta);
+      await syncSiglaToProjectConfig();
+      // The "// eBL siglum:" line at the top of a tablet file is a note for the
+      // reader; it follows the new name where the file has one.
+      let headers = 0;
+      for (const c of res.changes) {
+        const key = (c.file || '').replace(/\.txt$/, '');
+        if (!key) continue;
+        const text = await FileSystem.readManuscript(dirHandle, key);
+        if (text == null) continue;
+        const siglum = await EblClient.buildSiglumPreview(c.after);
+        const updated = text.replace(/^(\/\/\s*eBL siglum:\s*)\S+/m, '$1' + siglum);
+        if (updated !== text) { await FileSystem.writeManuscript(dirHandle, key, updated); headers++; }
+      }
+      renderMappingTable();
+      showStatus(res.changes.length + ' siglum/sigla set from the series list'
+        + (headers ? ', ' + headers + ' file header(s) updated' : '') + '.', 'success');
+      await checkManuscriptsAgainstEbl();
+      if (missingNote) el.append(document.createTextNode(missingNote));
     }
 
     // Give every clashing tablet a number nothing else in its group is using.

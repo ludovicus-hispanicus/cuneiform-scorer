@@ -681,6 +681,43 @@
   // This is the check eBL actually enforces, and the one refusal that says
   // nothing useful when it comes back: "Duplicate sigla" followed by the whole
   // provenance record of one of them.
+  // One siglum per tablet across a series of chapters (EAE 56A, 56B, 56C…).
+  //
+  // eBL builds a siglum from provenance, period, type and a disambiguator, and
+  // only the disambiguator is a choice — one made per chapter, which is how the
+  // same tablet came to be NinNB1, NinNB2 and NinNB3 in three chapters. A
+  // series list fixes the choice once: it carries every tablet of the series
+  // with its group and number, and this sets each manuscript of a chapter
+  // from it. Ids are not touched, so on eBL the change is a rename only.
+  // Museum numbers are compared loosely ("Rm-II.116" = "Rm 2,116").
+  function seriesKey(n) {
+    return String(n || '').replace(/Rm[- ]II\b/i, 'Rm 2').replace(/[\s.,-]+/g, ' ').trim().toLowerCase();
+  }
+  function applySeriesSigla(meta, series) {
+    const list = (series && Array.isArray(series.tablets)) ? series.tablets : [];
+    const byKey = new Map(list.map((t) => [seriesKey(t.museumNumber), t]));
+    const changes = [];
+    const missing = [];
+    const rows = ((meta && meta.manuscripts) || []).map((m) => {
+      const t = byKey.get(seriesKey(museumNumberOf(m) || extractMuseumNumber(m.file || '').primary));
+      if (!t) { missing.push(museumNumberOf(m) || m.file); return m; }
+      const next = {
+        ...m,
+        provenance: t.provenance || m.provenance,
+        period: t.period || m.period,
+        periodModifier: t.periodModifier || m.periodModifier || 'None',
+        type: t.type || m.type,
+        siglumDisambiguator: String(t.disambiguator == null ? m.siglumDisambiguator || '' : t.disambiguator),
+      };
+      const fields = ['provenance', 'period', 'periodModifier', 'type', 'siglumDisambiguator'];
+      if (fields.some((f) => String(next[f] || '') !== String(m[f] || ''))) {
+        changes.push({ file: m.file, museumNumber: museumNumberOf(m), before: m, after: next, siglum: t.siglum || '' });
+      }
+      return next;
+    });
+    return { meta: { ...(meta || {}), version: 1, manuscripts: rows }, changes, missing };
+  }
+
   function siglumGroupKey(m) {
     return [m.provenance || '', m.periodModifier || 'None', m.period || '', m.type || ''].join('|');
   }
@@ -949,6 +986,7 @@
     extractMuseumNumber,
     defaultManuscriptEntry,
     nextManuscriptId,
+    applySeriesSigla,
     reconcileManuscripts,
     toEblManuscripts,
     museumNumberOf,
