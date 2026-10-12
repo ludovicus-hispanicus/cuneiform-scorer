@@ -151,6 +151,8 @@
     .chip.k-notice  { background: var(--notice-light);  color: var(--notice-accent); }
     .chip.k-ok      { background: var(--sent-light);    color: var(--sent-accent); }
     .r-date { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+    .r-who { color: var(--muted); font-size: 0.8rem; white-space: nowrap; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
+    .r-by { font-size: 0.83rem; color: var(--muted); margin-bottom: 0.4rem; }
     .r-sec {
       font-size: 0.8rem;
       padding: 0.05rem 0.4rem;
@@ -441,17 +443,25 @@
         ? `done${r.how ? ' — ' + escapeHtml(r.how) : ''}`
         : 'open';
       const stateClass = r.done ? '' : (kind === 'error' ? ' is-open-err' : ' is-open-warn');
+      // Who sent it: reports from both editors' machines land in one shared log.
+      // Reports filed before this was recorded carry no sender.
+      const by = r.by || {};
+      const who = by.name || by.user || '';
+      const byLine = [who, by.host ? (who ? 'on ' : '') + by.host : '', by.ebl ? '(eBL login: ' + by.ebl + ')' : '']
+        .filter(Boolean).join(' ');
       return `
       <details class="report k-${kind} ${r.done ? 'is-done' : ''}" data-id="${escapeHtml(r.id)}"${open ? ' open' : ''}>
         <summary>
           <span class="chip k-${kind}">${KIND_WORD[kind]}</span>
           <span class="r-date">${escapeHtml(time)}</span>
+          ${who ? `<span class="r-who" title="${escapeHtml(byLine)}">${escapeHtml(who)}</span>` : ''}
           ${r.sec != null ? `<span class="r-sec">§ ${escapeHtml(String(r.sec))}</span>`
             : '<span class="r-sec">chapter</span>'}
           <span class="r-title">${escapeHtml(r.title || '(untitled)')}</span>
           <span class="r-state${stateClass}">${state}</span>
         </summary>
         <div class="r-body">
+          ${byLine ? `<div class="r-by">Sent from ${escapeHtml(byLine)}</div>` : ''}
           ${notes.length ? `<div class="r-notes"><h4>To check on eBL later</h4>
             <ul>${notes.map((n) => `<li>${escapeHtml(n)}</li>`).join('')}</ul></div>` : ''}
           ${r.done

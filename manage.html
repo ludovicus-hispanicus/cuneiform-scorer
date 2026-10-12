@@ -578,6 +578,11 @@
         <input type="text" id="ebl-api-url" placeholder="https://www.ebl.lmu.de/api">
       </div>
 
+      <div class="ebl-form-row">
+        <label for="editor-name">Your name</label>
+        <input type="text" id="editor-name" placeholder="e.g. Esa — shown on every report you send, so a shared project’s log says who sent what">
+      </div>
+
       <div class="ebl-form-row ebl-token-row">
         <label for="ebl-token">Bearer token (paste)</label>
         <textarea id="ebl-token"
@@ -1034,6 +1039,9 @@
         EblClient.setToken(e.target.value);
         renderEblStatus();
       });
+      const editorNameEl = document.getElementById('editor-name');
+      editorNameEl.value = EblClient.getEditorName();
+      editorNameEl.addEventListener('change', (e) => EblClient.setEditorName(e.target.value));
       ['genre', 'category', 'index', 'stage', 'name'].forEach((k) => {
         document.getElementById('ebl-target-' + k).addEventListener('input', () => debouncedSaveTarget());
       });

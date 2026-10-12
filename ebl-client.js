@@ -120,6 +120,31 @@
     }
   }
 
+  // The editor's own name, typed once in Settings. It goes on every report this
+  // copy files, next to the computer's name, so a shared project's log says who sent what.
+  const EDITOR_NAME_KEY = 'scorer.editorName';
+  function getEditorName() {
+    return localStorage.getItem(EDITOR_NAME_KEY) || '';
+  }
+  function setEditorName(name) {
+    const v = String(name || '').trim();
+    if (v) localStorage.setItem(EDITOR_NAME_KEY, v);
+    else localStorage.removeItem(EDITOR_NAME_KEY);
+  }
+
+  // Which eBL login a token belongs to, in words a person recognizes: an email
+  // or a name claim when the token carries one (Auth0 namespaces them, so the
+  // key is matched by its ending), else nothing. `sub` is an opaque id.
+  function tokenAccount(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    for (const want of [/email$/i, /(^|[/:])name$/i, /nickname$/i]) {
+      for (const [k, v] of Object.entries(payload)) {
+        if (typeof v === 'string' && v && want.test(k)) return v;
+      }
+    }
+    return '';
+  }
+
   function tokenStatus() {
     const jwt = getToken();
     if (!jwt) return { hasToken: false };
@@ -142,6 +167,7 @@
       expiresInSec,
       exp: payload.exp,
       sub: payload.sub,
+      account: tokenAccount(payload),
       scopes: allScopes,
       hasWriteTexts: allScopes.includes('write:texts'),
       hasReadTexts: allScopes.includes('read:texts'),
@@ -149,13 +175,42 @@
   }
 
   // ---- HTTP helpers ----
+  // A read is bounded too. A whole chapter is several megabytes and takes
+  // eBL a quarter of a minute on a normal day. Without a limit, a read that
+  // stalls holds a send at "reading the chapter" for as long as the window
+  // stays open. Nothing has been written when a read fails, so the error says so.
+  const READ_TIMEOUT_MS = 5 * 60 * 1000;
+
   async function publicGet(path) {
-    const res = await fetch(`${getApiUrl()}${path}`);
+    let signal;
+    try {
+      if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) signal = AbortSignal.timeout(READ_TIMEOUT_MS);
+    } catch (_) { signal = undefined; }
+    const fail = (err) => {
+      const timedOut = err && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      const e = new EblError(timedOut
+        ? 'Reading from eBL did not finish within ' + Math.round(READ_TIMEOUT_MS / 60000) + ' minutes.'
+        : 'Reading from eBL failed: ' + (err && err.message ? err.message : String(err)), 0, '', null);
+      e.transport = true;
+      e.readOnly = true;
+      e.timedOut = !!timedOut;
+      e.method = 'GET';
+      e.path = path;
+      return e;
+    };
+    let res;
+    try {
+      res = await fetch(`${getApiUrl()}${path}`, { signal });
+    } catch (err) { throw fail(err); }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new EblError(`GET ${path} failed`, res.status, body);
     }
-    return res.json();
+    // The limit covers the download too: a chapter can stall halfway through.
+    try { return await res.json(); } catch (err) {
+      if (err && (err.name === 'TimeoutError' || err.name === 'AbortError' || err.name === 'TypeError')) throw fail(err);
+      throw err;
+    }
   }
 
   // How long to wait for eBL before calling it. Generous, because a
@@ -413,6 +468,15 @@
     return { primary: parts[0] || base, joins: parts.slice(1) };
   }
 
+  // The id a newly added manuscript gets: one above every id in use. Not the
+  // count plus one — a removed tablet leaves a gap, eBL keeps it, and the
+  // count then lands on an id another tablet already holds.
+  function nextManuscriptId(meta) {
+    const ids = ((meta && meta.manuscripts) || [])
+      .map((m) => Number(m.id)).filter((n) => Number.isInteger(n) && n >= 1);
+    return ids.length ? Math.max.apply(null, ids) + 1 : 1;
+  }
+
   // Build a default manuscript metadata entry from a filename. The primary
   // museum number is the first segment before any "(+)" join marker.
   function defaultManuscriptEntry(filename, id) {
@@ -458,9 +522,18 @@
     // number. Removing a manuscript leaves a gap, which eBL permits.
     const idFor = new Map();
     const taken = new Set();
-    // Whoever holds an id keeps it. If two files somehow claim the same one,
-    // the first in file order keeps it and the other is treated as new.
-    for (const file of sortedFiles) {
+    // Whoever holds an id keeps it. If two files claim the same one, the one
+    // that has held it longest keeps it — the earlier entry in manuscripts.json,
+    // since new tablets are appended — and the other is treated as new. Going
+    // by file name instead once handed Sm.1905's id to a newly added K.15158
+    // and moved Sm.1905, whose lines on eBL point at that id.
+    const onDisk = new Set(sortedFiles);
+    const claimOrder = [
+      ...(existing?.manuscripts || []).map((m) => m.file).filter((f) => onDisk.has(f)),
+      ...sortedFiles,
+    ];
+    for (const file of claimOrder) {
+      if (idFor.has(file)) continue;
       const held = Number((byFile.get(file) || {}).id);
       if (!Number.isInteger(held) || held < 1 || taken.has(held)) continue;
       taken.add(held);
@@ -849,6 +922,8 @@
     setApiUrl,
     decodeToken,
     tokenStatus,
+    getEditorName,
+    setEditorName,
 
     // vocabularies
     getProvenances,
@@ -873,6 +948,7 @@
     // manuscripts.json helpers
     extractMuseumNumber,
     defaultManuscriptEntry,
+    nextManuscriptId,
     reconcileManuscripts,
     toEblManuscripts,
     museumNumberOf,

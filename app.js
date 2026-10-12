@@ -7116,13 +7116,13 @@ async function askSourceMeta(siglum, prefill = {}) {
   if (!saved) return;
 
   // Upsert the manuscripts.json row this source will get anyway, now with
-  // the answers. Settings and export reconcile ids later, so the id only
-  // has to be unused.
+  // the answers. The id must be one no tablet holds: the count plus one is
+  // not, once a tablet has been removed — that gave K.15158 the id of Sm.1905.
   if (!manuscriptsMeta) manuscriptsMeta = { version: 1, manuscripts: [] };
   const file = siglum + '.txt';
   let entry = manuscriptsMeta.manuscripts.find((m) => m.file === file);
   if (!entry) {
-    entry = EblClient.defaultManuscriptEntry(file, manuscriptsMeta.manuscripts.length + 1);
+    entry = EblClient.defaultManuscriptEntry(file, EblClient.nextManuscriptId(manuscriptsMeta));
     manuscriptsMeta.manuscripts.push(entry);
   }
   entry.type = typeEl.value || entry.type || '';
@@ -11868,6 +11868,37 @@ function failureReport(label, err) {
         .join(String.fromCharCode(10))
     : ((err && (err.rawBody || err.message)) || String(err));
 
+  // A refused login is not a refused line. eBL answers 401 when it cannot use
+  // the token at all (expired or revoked) and 403 when it reads the token but
+  // will not let that login write to the chapter. Neither says anything about
+  // the ATF, and both read like one when reported as a plain refusal.
+  if (err && !err.transport && (err.status === 401 || err.status === 403)) {
+    const sender = senderLabel(senderInfo());
+    const forbidden = err.status === 403;
+    return {
+      transport: false,
+      auth: true,
+      detail,
+      title: label + (forbidden
+        ? ' was refused — eBL did not accept this login (403)'
+        : ' was refused — eBL did not accept the token (401)'),
+      blocks: [
+        outcomeBanner('notsent', label, 'eBL refused the login. Nothing was changed.'),
+        noteBlock(forbidden
+          ? 'eBL answered 403 Forbidden: it read the token but would not let this login write to'
+            + ' the chapter. The text was never checked, so nothing is wrong with the line.'
+          : 'eBL answered 401 Unauthorized: it could not use the token, which has expired or been'
+            + ' revoked. The text was never checked, so nothing is wrong with the line.', 'bad'),
+        noteBlock('Log out of eBL and back in, copy a fresh token into Settings, and send again.'
+          + (forbidden ? ' If a fresh token is refused too, the eBL account behind it has lost'
+            + ' editing rights for this chapter: ask the eBL team to check the account’s'
+            + ' write:texts permission.' : ''), 'warn'),
+        sender ? noteBlock('Sent from ' + sender + '.') : '',
+        rawBlock(detail),
+      ],
+    };
+  }
+
   if (!(err && err.transport)) {
     return {
       transport: false,
@@ -11876,6 +11907,20 @@ function failureReport(label, err) {
       blocks: [
         outcomeBanner('notsent', label, 'eBL refused it. Nothing was changed.'),
         noteBlock('What eBL said, in full:', 'bad'),
+        rawBlock(detail),
+      ],
+    };
+  }
+  if (err.readOnly) {
+    return {
+      transport: true,
+      readOnly: true,
+      detail,
+      title: label + ' \u2014 not sent: the chapter could not be read',
+      blocks: [
+        outcomeBanner('notsent', label, 'Nothing was sent: the chapter could not be read from eBL.'),
+        noteBlock('The line is sent only after the chapter has been read, and that read did not'
+          + ' finish. eBL has received nothing, so sending again is safe.', 'warn'),
         rawBlock(detail),
       ],
     };
@@ -12647,6 +12692,32 @@ function issueState(sec) {
   return open.some((r) => r.kind === 'error') ? 'error' : 'warning';
 }
 
+// Who is sending. A project lives on a shared Drive, so its log gathers
+// reports from more than one editor's machine. Each report carries the
+// editor's name (from Settings), the computer and Windows user the local
+// server runs as, and the eBL login named in the token, when the token names one.
+let whoAmI = null;
+fetch('/api/whoami').then((r) => (r.ok ? r.json() : null)).then((j) => { whoAmI = j; }).catch(() => {});
+
+function senderInfo() {
+  const by = {};
+  const name = (EblClient.getEditorName && EblClient.getEditorName()) || '';
+  if (name) by.name = name;
+  if (whoAmI && whoAmI.user) by.user = whoAmI.user;
+  if (whoAmI && whoAmI.host) by.host = whoAmI.host;
+  const ts = EblClient.tokenStatus();
+  if (ts && ts.account) by.ebl = ts.account;
+  return by;
+}
+
+function senderLabel(by) {
+  if (!by) return '';
+  const who = by.name || by.user || '';
+  const where = by.host ? (who ? ' on ' : '') + by.host : '';
+  const login = by.ebl ? ' (eBL login: ' + by.ebl + ')' : '';
+  return (who + where + login).trim();
+}
+
 function addExportIssue(o) {
   const rec = {
     id: Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
@@ -12665,6 +12736,7 @@ function addExportIssue(o) {
     done: !!o.done,
     doneAt: o.done ? new Date().toISOString() : null,
     how: o.done ? (o.how || 'nothing to do') : null,
+    by: senderInfo(),
   };
   exportIssues.unshift(rec);
   return rec;
@@ -15268,8 +15340,8 @@ async function exportOmen(lineNum) {
     // Whole-chapter request: this decides for every section, not only this one.
     const withSuggested = !!(document.getElementById('send-suggested') || {}).checked;
 
-    exportStatus(label + ' — sending the line…');
-    const res = await exportSingleLine(target, lineNum);
+    exportStatus(label + ' — reading the chapter from eBL…');
+    const res = await exportSingleLine(target, lineNum, (step) => exportStatus(label + ' — ' + step));
     const what = res.inserted ? 'added to' : 'updated on';
 
     // The line is on eBL now, so that is written down now.
@@ -15371,6 +15443,9 @@ async function exportOmen(lineNum) {
   } catch (err) {
     setStatus('connected', 'Ready');
     const fail = failureReport(label, err);
+    // The running clock stops here. Left going, it kept counting "sending the
+    // line" long after the send had failed and its report was on screen.
+    exportStatus(label + (fail.readOnly ? ' \u2014 not sent' : fail.transport ? ' \u2014 no answer' : ' \u2014 not sent'), 'error');
     const blocks = fail.blocks.concat([noteBlock('Press Copy below to send this on.')]);
     // Nothing came back: the section wears an error until a later send
     // supersedes it or the editor repairs it on eBL and ticks the report done.
@@ -15467,7 +15542,7 @@ function buildLineForExport(lineNum, ctx, scoreLines) {
 // them together means the chapter is read once and cannot shift underneath the
 // run. Every other line keeps its lemmatization and alignment, exactly as a
 // single-line update does.
-async function exportLineRange(target, nums) {
+async function exportLineRange(target, nums, say) {
   const ctx = await lineExportContext(target);
   const { scoreLines } = buildScore();
 
@@ -15510,6 +15585,7 @@ async function exportLineRange(target, nums) {
     .reduce((n, l) => n + (l.variants || []).reduce((k, v) => k + (v.manuscripts || []).length, 0), 0);
   const timeoutMs = Math.min(45 * 60000, 10 * 60000 + rows * 20000);
 
+  if (say) say('sending the line\u2026');
   try {
     await EblClient.postLines(target, payload, { timeoutMs });
   } catch (err) {
@@ -15578,8 +15654,8 @@ async function awaitLanding(target, sent) {
 
 // One section. The range is the general case and this is the same path with a
 // single number, so the two cannot drift apart.
-async function exportSingleLine(target, lineNum) {
-  const res = await exportLineRange(target, [lineNum]);
+async function exportSingleLine(target, lineNum, say) {
+  const res = await exportLineRange(target, [lineNum], say);
   const one = res.results[0] || { inserted: false, index: -1 };
   return {
     inserted: one.inserted,

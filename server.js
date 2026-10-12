@@ -142,6 +142,21 @@ const server = http.createServer((req, res) => {
   }
 
   // ===========================================
+  // WHO IS SENDING — the computer and the Windows user this copy runs on.
+  // Projects are shared through the Drive, so a report filed into one can come
+  // from either editor's machine; without this nobody could tell whose send
+  // eBL refused.
+  // ===========================================
+  if (req.method === 'GET' && req.url === '/api/whoami') {
+    const os = require('os');
+    let user = '';
+    try { user = os.userInfo().username || ''; } catch (_) { user = ''; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ user, host: os.hostname() || '' }));
+    return;
+  }
+
+  // ===========================================
   // eBL ATF VALIDATOR — spawns Python or the bundled PyInstaller binary
   // ===========================================
   //
