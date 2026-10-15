@@ -70,6 +70,34 @@
     </div>
   </dialog>
 
+  <!-- Add texts from other projects (after a new project is named) -->
+  <dialog id="add-texts-dialog" class="dialog folder-preview-dialog">
+    <h2>Add texts from other projects?</h2>
+    <p>Each tablet you add stays linked: a correction saved in any project that has it reaches the others.
+      Which lines go to which section is decided in this project. You can also skip this and add tablets of your own.</p>
+    <div id="add-texts-folder" class="contents-section hidden">
+      <h3>Shared texts folder on this computer</h3>
+      <p>Linked texts are kept in one folder that every project can reach, e.g. next to the project folders.</p>
+      <label class="project-name-input" id="add-texts-folder-path">
+        Folder
+        <input type="text" id="add-texts-folder-input" placeholder="e.g. G:\My Drive\EAE Collaboration\_shared-texts">
+      </label>
+      <div class="dialog-actions" style="justify-content:flex-start">
+        <button type="button" id="add-texts-folder-btn">Use this folder</button>
+        <button type="button" id="add-texts-choose-btn" hidden>Choose folder…</button>
+        <button type="button" id="add-texts-allow-btn" hidden>Allow access</button>
+        <span id="add-texts-folder-status"></span>
+      </div>
+    </div>
+    <div id="add-texts-sources" class="folder-contents"></div>
+    <div class="dialog-actions">
+      <span id="add-texts-status" style="flex:1"></span>
+      <button type="button" id="add-texts-skip">Skip</button>
+      <button type="button" id="add-texts-confirm" class="btn-primary" disabled>Add selected</button>
+    </div>
+  </dialog>
+
+  <script src="shared-texts.js"></script>
   <script>
     const projectsGrid = document.getElementById('projects-grid');
     const projectsContainer = document.getElementById('projects-container');
@@ -237,6 +265,9 @@
         const projectId = FileSystem.generateProjectId();
         await FileSystem.saveProject(projectId, dirHandle, projectName);
 
+        // Texts from other projects, linked, before the score opens.
+        await offerSharedTexts(dirHandle, projectId);
+
         // Store project ID and navigate to scorer
         sessionStorage.setItem('currentProjectId', projectId);
         window.location.href = 'scorer.html';
@@ -247,6 +278,192 @@
         alert('Failed to create project: ' + err.message);
       }
     });
+
+    // ---- Add texts from other projects --------------------------------------
+    // A tablet chosen here is shared (see shared-texts.js): its transliteration
+    // goes to the shared texts folder if it is not there yet — and the project
+    // it came from is linked to it too — and this project gets a copy without §
+    // markers, linked, with the tablet's eBL metadata from where it came.
+    // Resolves when the editor adds or skips.
+    function offerSharedTexts(newHandle, newId) {
+      return new Promise(async (resolve) => {
+        const dlg = document.getElementById('add-texts-dialog');
+        const sourcesEl = document.getElementById('add-texts-sources');
+        const folderBox = document.getElementById('add-texts-folder');
+        const statusEl = document.getElementById('add-texts-status');
+        const confirmBtn = document.getElementById('add-texts-confirm');
+        const chosen = new Map();   // tablet -> { from: 'shared' } | { from: 'project', project }
+        let sharedNames = new Set();
+
+        const refreshConfirm = () => {
+          confirmBtn.disabled = chosen.size === 0;
+          confirmBtn.textContent = chosen.size ? 'Add ' + chosen.size + ' text(s)' : 'Add selected';
+        };
+        const tick = (name, source) => (e) => {
+          if (e.target.checked) chosen.set(name, source); else chosen.delete(name);
+          // the same tablet offered twice is one tablet
+          sourcesEl.querySelectorAll('input[data-tablet="' + CSS.escape(name) + '"]').forEach((c) => { c.checked = e.target.checked; });
+          refreshConfirm();
+        };
+        const checkbox = (name, source, note) => {
+          const li = document.createElement('li');
+          const label = document.createElement('label');
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.dataset.tablet = name;
+          cb.addEventListener('change', tick(name, source));
+          label.append(cb, ' ' + name + (note ? ' ' : ''));
+          if (note) { const s = document.createElement('small'); s.textContent = note; label.append(s); }
+          li.append(label);
+          return li;
+        };
+
+        async function render() {
+          sourcesEl.textContent = '';
+          let config = null;
+          try { config = await SharedTexts.client.config(); } catch (_) { config = null; }
+          if (!config) {
+            sourcesEl.textContent = 'The shared texts folder could not be reached. You can skip this and share tablets later in Settings.';
+            return;
+          }
+          // With the local server the folder is a path; in the web version it is picked.
+          const server = config.route === 'server';
+          // style.display, not hidden: some of these have a display of their own in the CSS
+          const show = (id, on) => { const el = document.getElementById(id); el.hidden = false; el.style.display = on ? '' : 'none'; };
+          show('add-texts-folder-path', server);
+          show('add-texts-folder-btn', server);
+          show('add-texts-choose-btn', !server);
+          show('add-texts-allow-btn', !server && !!config.needsPermission);
+          folderBox.classList.toggle('hidden', !!config.path && !config.needsPermission);
+          if (!config.path || config.needsPermission) return;
+          const { files } = await SharedTexts.client.list();
+          sharedNames = new Set(files.map((f) => f.name));
+
+          if (files.length) {
+            const sec = document.createElement('div');
+            sec.className = 'contents-section';
+            sec.innerHTML = '<h3>Already shared</h3>';
+            const ul = document.createElement('ul');
+            ul.className = 'preview-file-list';
+            for (const f of files.map((x) => x.name).sort()) ul.append(checkbox(f, { from: 'shared' }));
+            sec.append(ul);
+            sourcesEl.append(sec);
+          }
+
+          const projects = (await FileSystem.getSavedProjects()).filter((p) => p.id !== newId);
+          for (const p of projects) {
+            const sec = document.createElement('div');
+            sec.className = 'contents-section';
+            const h = document.createElement('h3');
+            h.textContent = p.name || p.id;
+            const show = document.createElement('button');
+            show.type = 'button';
+            show.textContent = 'Show its tablets';
+            show.style.marginLeft = '0.6rem';
+            const ul = document.createElement('ul');
+            ul.className = 'preview-file-list';
+            show.addEventListener('click', async () => {
+              show.disabled = true;
+              // A click is what lets the browser ask for the folder again.
+              const ok = await FileSystem.requestPermission(p.handle);
+              if (!ok) { show.textContent = 'No access to that folder'; return; }
+              const names = (await FileSystem.readManuscriptIndex(p.handle)) || [];
+              for (const n of names.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))) {
+                ul.append(checkbox(n, { from: 'project', project: p }, sharedNames.has(n) ? '(already shared)' : ''));
+              }
+              show.remove();
+            });
+            h.append(show);
+            sec.append(h, ul);
+            sourcesEl.append(sec);
+          }
+          if (!files.length && !projects.length) sourcesEl.textContent = 'There are no other projects or shared texts yet.';
+        }
+
+        document.getElementById('add-texts-folder-btn').onclick = async () => {
+          const st = document.getElementById('add-texts-folder-status');
+          try {
+            const r = await SharedTexts.client.setFolder(document.getElementById('add-texts-folder-input').value.trim());
+            st.textContent = 'Using ' + r.path;
+            await render();
+          } catch (err) { st.textContent = err.message || String(err); }
+        };
+
+        document.getElementById('add-texts-choose-btn').onclick = async () => {
+          const st = document.getElementById('add-texts-folder-status');
+          try { const r = await SharedTexts.client.chooseFolder(); st.textContent = 'Using ' + r.path; await render(); }
+          catch (err) { if (!err || err.name !== 'AbortError') st.textContent = err.message || String(err); }
+        };
+        document.getElementById('add-texts-allow-btn').onclick = async () => {
+          await SharedTexts.client.reconnect();
+          await render();
+        };
+
+        document.getElementById('add-texts-skip').onclick = () => { dlg.close(); resolve(); };
+        // Esc is a skip too, or creating the project would never finish.
+        dlg.oncancel = (e) => { e.preventDefault(); dlg.close(); resolve(); };
+
+        confirmBtn.onclick = async () => {
+          confirmBtn.disabled = true;
+          statusEl.textContent = 'Adding…';
+          try {
+            const now = new Date().toISOString();
+            const config = (await FileSystem.readProjectConfig(newHandle)) || {};
+            config.shared = config.shared || {};
+            const meta = (await FileSystem.readManuscriptsMeta(newHandle)) || { version: 1, manuscripts: [] };
+            const index = new Set((await FileSystem.readManuscriptIndex(newHandle)) || []);
+            const sourceConfigs = new Map();
+            for (const [name, src] of chosen) {
+              let text;
+              const remote = await SharedTexts.client.read(name);
+              if (remote) {
+                text = remote.content;
+              } else {
+                // First time this tablet is shared: from the project it came from,
+                // which is linked to it from now on as well.
+                const raw = await FileSystem.readManuscript(src.project.handle, name);
+                if (raw == null) throw new Error('could not read ' + name + ' in ' + (src.project.name || 'that project'));
+                text = SharedTexts.strip(raw);
+                await SharedTexts.client.write(name, text);
+                const key = src.project.id;
+                if (!sourceConfigs.has(key)) sourceConfigs.set(key, { project: src.project, config: (await FileSystem.readProjectConfig(src.project.handle)) || {} });
+                const sc = sourceConfigs.get(key).config;
+                sc.shared = { ...(sc.shared || {}), [name]: { since: now } };
+                await FileSystem.writeSharedBase(src.project.handle, name, text);
+              }
+              await FileSystem.writeManuscript(newHandle, name, text);
+              await FileSystem.writeSharedBase(newHandle, name, text);
+              config.shared[name] = { since: now };
+              index.add(name);
+              // The tablet's eBL description comes with it, when there is one.
+              if (src.from === 'project' && !meta.manuscripts.some((m) => m.file === name + '.txt')) {
+                const srcMeta = await FileSystem.readManuscriptsMeta(src.project.handle);
+                const entry = srcMeta && (srcMeta.manuscripts || []).find((m) => m.file === name + '.txt');
+                if (entry) {
+                  const ids = meta.manuscripts.map((m) => Number(m.id)).filter(Number.isInteger);
+                  meta.manuscripts.push({ ...entry, id: ids.length ? Math.max(...ids) + 1 : 1 });
+                }
+              }
+            }
+            for (const { project, config: sc } of sourceConfigs.values()) await FileSystem.writeProjectConfig(project.handle, sc);
+            await FileSystem.writeProjectConfig(newHandle, config);
+            await FileSystem.writeManuscriptIndex(newHandle, [...index]);
+            await FileSystem.writeManuscriptsMeta(newHandle, meta);
+            dlg.close();
+            resolve();
+          } catch (err) {
+            statusEl.textContent = 'Not added: ' + (err.message || err);
+            confirmBtn.disabled = false;
+          }
+        };
+
+        chosen.clear();
+        refreshConfirm();
+        statusEl.textContent = '';
+        dlg.showModal();
+        await render();
+      });
+    }
 
     // Open project button - uses File System Access API with preview dialog
     const previewDialog = document.getElementById('folder-preview-dialog');

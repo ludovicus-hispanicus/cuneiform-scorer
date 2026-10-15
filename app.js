@@ -9606,6 +9606,15 @@ saveToFile = async function(id) {
   } finally {
     isSaving = false;
   }
+  // A shared tablet's transliteration goes to the shared copy with the save.
+  const ms = manuscripts[id];
+  if (ms && typeof sharedSync === 'function' && isSharedTablet(ms.siglum)) {
+    try { await sharedSync(ms.siglum, 'save'); }
+    catch (err) {
+      console.error('Shared text ' + ms.siglum + ':', err);
+      setStatus('error', ms.siglum + ' was saved here, but the shared copy could not be updated: ' + (err.message || err));
+    }
+  }
 };
 
 const originalSaveScoreData = saveScoreDataToFile;
@@ -9668,6 +9677,10 @@ async function collectTimestamps() {
     const ts = await getFileTimestamp(dirHandle, key);
     if (ts) timestamps[key] = ts;
   }
+
+  // project.json: the list of shared tablets is changed from Settings
+  const pjTs = await getFileTimestamp(dirHandle, 'project.json');
+  if (pjTs) timestamps['project.json'] = pjTs;
 
   // Track index.json for new manuscripts
   const idxTs = await getFileTimestamp(dirHandle, 'manuscripts/index.json');
@@ -9973,6 +9986,16 @@ async function pollForChanges() {
       }
     }
 
+    // project.json: Settings may have shared or unlinked a tablet.
+    if (currentTimestamps['project.json'] !== lastKnownTimestamps['project.json']) {
+      const cfg = await FileSystem.readProjectConfig(dirHandle);
+      if (cfg && projectConfig) {
+        const wasShared = Object.keys(sharedLinks()).length;
+        projectConfig.shared = cfg.shared;
+        if (!wasShared && Object.keys(sharedLinks()).length) await sharedInit();
+      }
+    }
+
     // Update baseline timestamps
     lastKnownTimestamps = currentTimestamps;
 
@@ -9980,9 +10003,260 @@ async function pollForChanges() {
       if (!hasUnsavedChanges) setStatus('connected', 'Synced');
       renderScoreInBackground();
     }
+
+    await sharedPoll();
   } catch (err) {
     console.error('Polling error:', err);
   }
+}
+
+// ===========================================
+// SHARED TEXTS
+// ===========================================
+// A tablet can be shared with other projects (see shared-texts.js): its
+// transliteration lives once, in the shared texts folder, and every project
+// that has the tablet keeps it in step — saving pushes this project's
+// transliteration there, a change made elsewhere is pulled in here, each line
+// keeping this project's § markers. project.json lists the shared tablets:
+//   "shared": { "K.2246": { "since": "2026-10-15T…" } }
+// and shared-base/ holds each one as this project last agreed with it, so a
+// change on both sides merges line by line and only a line both changed
+// differently is put to the editor.
+
+let sharedOn = false;      // a shared texts folder is set on this computer
+const sharedSeen = {};     // tablet -> mtime of the shared copy last synced
+let sharedBusy = false;
+
+const sharedLinks = () => (projectConfig && projectConfig.shared) || {};
+const isSharedTablet = (siglum) => Object.prototype.hasOwnProperty.call(sharedLinks(), siglum);
+
+async function sharedInit() {
+  if (!window.SharedTexts || !dirHandle || !Object.keys(sharedLinks()).length) return;
+  let c = null;
+  try { c = await SharedTexts.client.config(); } catch (_) { c = null; }
+  sharedOn = !!(c && c.path) && !c.needsPermission;
+  if (c && c.path && c.needsPermission) {
+    // The web version: the browser has dropped its permission for the shared
+    // folder since last time, and asking again takes a click.
+    try { sharedOn = await SharedTexts.client.reconnect(); } catch (_) { sharedOn = false; }
+    if (!sharedOn) { sharedOfferReconnect(); return; }
+  }
+  if (!sharedOn) {
+    setStatus('error', 'This project shares tablets with other projects, but no shared texts folder is set on this computer. Set it in Settings.');
+    return;
+  }
+  for (const siglum of Object.keys(sharedLinks())) {
+    try { await sharedSync(siglum, 'open'); }
+    catch (err) { console.error('Shared text ' + siglum + ':', err); }
+  }
+}
+
+// One click gives the browser its permission back; then the shared tablets sync.
+function sharedOfferReconnect() {
+  if (document.getElementById('shared-reconnect')) return;
+  const btn = document.createElement('button');
+  btn.id = 'shared-reconnect';
+  btn.type = 'button';
+  btn.className = 'shared-reconnect';
+  btn.textContent = 'Connect the shared texts folder';
+  btn.title = 'This project shares tablets with other projects. The browser needs your permission again to reach the shared texts folder.';
+  btn.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await SharedTexts.client.reconnect(); } catch (_) { ok = false; }
+    if (!ok) { btn.textContent = 'No access — choose the folder again in Settings'; return; }
+    btn.remove();
+    await sharedInit();
+  });
+  document.body.appendChild(btn);
+  setStatus('error', 'Shared tablets are not syncing until the shared texts folder is connected (button at the bottom right).');
+}
+
+// Carry one witness row's boxes from the old wording of its line to the new,
+// the way rebaseReading carries a reading's: words paired by the longest
+// common subsequence, a respelt word keeping its box, a word with no
+// counterpart taking its box with it.
+function rebaseWitnessText(sec, key, oldText, newText) {
+  const store = lineAlignments[sec];
+  if (!store || !store[key] || !Object.keys(store[key]).length) return false;
+  const words = (t) => witnessWords(t).filter((w) => w.index != null).map((w) => w.text);
+  const remap = tokenRemap(words(oldText), words(newText));
+  const row = store[key];
+  const out = {};
+  for (const k of Object.keys(row)) {
+    if (!/^\d+$/.test(k)) { out[k] = row[k]; continue; }
+    const to = remap.map.get(Number(k));
+    if (to != null) out[to] = row[k];
+  }
+  store[key] = out;
+  return true;
+}
+
+// Write a shared text into this project's file: the lines take this
+// project's markers back, the boxes of every changed witness line follow
+// its words, and the editor shows the new text if the tablet is open.
+async function sharedApplyToProject(siglum, text) {
+  const id = idOf(siglum);
+  const ms = manuscripts[id];
+  if (!ms) return;
+  const before = ms.content;
+  const after = SharedTexts.reattach(before, text);
+  if (after === before) return;
+  const changed = SharedTexts.merge3(SharedTexts.strip(before), SharedTexts.strip(before), text).changed;
+  let realigned = false;
+  for (const c of SharedTexts.witnessChanges(before, changed)) {
+    if (rebaseWitnessText(c.section, siglum + '|' + c.sourceLine, c.before, c.after)) realigned = true;
+  }
+  ms.content = after;
+  isSaving = true;
+  try {
+    await FileSystem.writeManuscript(dirHandle, siglum, after);
+    noteWritten(id, after);
+    await refreshTimestamp(`manuscripts/${siglum}.txt`);
+  } finally { isSaving = false; }
+  if (id === activeManuscript) {
+    isPollingUpdate = true;
+    setEditorContent(after);
+    isPollingUpdate = false;
+  }
+  if (realigned) scheduleScoreDataSave();
+  renderScoreInBackground();
+}
+
+// Bring one shared tablet into step. why: 'open' | 'save' | 'poll'.
+async function sharedSync(siglum, why) {
+  if (!sharedOn || !isSharedTablet(siglum)) return;
+  const id = idOf(siglum);
+  const ms = manuscripts[id];
+  if (!ms) return;
+  // Unsaved edits here are not yet this project's text; the save brings them.
+  if (why !== 'save' && isDirtyManuscript(id)) return;
+
+  const remote = await SharedTexts.client.read(siglum);
+  const base = await FileSystem.readSharedBase(dirHandle, siglum);
+  const mine = SharedTexts.strip(ms.content);
+
+  if (!remote) {
+    // No shared copy (yet, or deleted): this project's becomes it.
+    const w = await SharedTexts.client.write(siglum, mine);
+    sharedSeen[siglum] = w.mtimeMs;
+    await FileSystem.writeSharedBase(dirHandle, siglum, mine);
+    return;
+  }
+  sharedSeen[siglum] = remote.mtimeMs;
+  const theirs = remote.content;
+  if (SharedTexts.same(mine, theirs)) {
+    if (base == null || !SharedTexts.same(base, theirs)) await FileSystem.writeSharedBase(dirHandle, siglum, theirs);
+    return;
+  }
+
+  let merged = SharedTexts.merge3(base || '', mine, theirs);
+  if (merged.conflicts.length) {
+    const choice = await sharedAskConflicts(siglum, merged.conflicts);
+    if (!choice) {
+      setStatus('error', siglum + ': its lines differ from the shared copy and are waiting for your choice. Save the tablet to be asked again.');
+      return;
+    }
+    merged = SharedTexts.merge3(base || '', mine, theirs, (c) => choice[c.key] || 'theirs');
+  }
+  const text = merged.text;
+  if (!SharedTexts.same(text, mine)) await sharedApplyToProject(siglum, text);
+  if (!SharedTexts.same(text, theirs)) {
+    const w = await SharedTexts.client.write(siglum, text);
+    sharedSeen[siglum] = w.mtimeMs;
+  }
+  await FileSystem.writeSharedBase(dirHandle, siglum, text);
+  if (why !== 'open') {
+    setStatus('connected', siglum + (SharedTexts.same(text, mine) ? ' — shared copy updated' : ' — updated from the shared copy'));
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
+}
+
+// Every poll: a shared copy that changed since it was last synced is pulled in.
+async function sharedPoll() {
+  if (!sharedOn || sharedBusy || !Object.keys(sharedLinks()).length) return;
+  sharedBusy = true;
+  try {
+    const { files } = await SharedTexts.client.list();
+    const mtime = new Map(files.map((f) => [f.name, f.mtimeMs]));
+    for (const siglum of Object.keys(sharedLinks())) {
+      if (!mtime.has(siglum) || mtime.get(siglum) === sharedSeen[siglum]) continue;
+      if (isDirtyManuscript(idOf(siglum))) {
+        setStatus('error', siglum + ' was changed in another project. Save your edits to it to bring the two together.');
+        continue;
+      }
+      await sharedSync(siglum, 'poll');
+    }
+  } catch (err) {
+    console.warn('Shared texts poll:', err.message || err);
+  } finally { sharedBusy = false; }
+}
+
+// The lines both sides changed, one choice each. Resolves { key: 'mine'|'theirs' }
+// or null when the editor puts it off.
+function sharedAskConflicts(siglum, conflicts) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.className = 'dialog shared-conflict-dialog';
+    const label = (k) => k.replace(/^line:/, '').replace(/^dir:/, 'ruling after ').replace('|', ' ').replace(/#\d+$/, '');
+    // The words that differ, marked in each reading, so DIŠ against DIS is
+    // not a hunt through two long lines.
+    const marked = (a, b) => {
+      if (a == null) return { a: '<em>(line removed)</em>', b: b == null ? '<em>(line removed)</em>' : escapeHtml(b) };
+      if (b == null) return { a: escapeHtml(a), b: '<em>(line removed)</em>' };
+      const ta = a.split(/\s+/), tb = b.split(/\s+/);
+      const r = tokenRemap(ta, tb);
+      const keptB = new Set();
+      const outA = ta.map((t, i) => {
+        const j = r.map.get(i);
+        const same = j != null && !r.replaced.has(j);
+        if (same) keptB.add(j);
+        return same ? escapeHtml(t) : '<mark>' + escapeHtml(t) + '</mark>';
+      });
+      const outB = tb.map((t, j) => (keptB.has(j) ? escapeHtml(t) : '<mark>' + escapeHtml(t) + '</mark>'));
+      return { a: outA.join(' '), b: outB.join(' ') };
+    };
+    const rows = conflicts.map((c, i) => {
+      const m = marked(c.mine, c.theirs);
+      return `
+      <fieldset class="shared-conflict">
+        <legend>${escapeHtml(label(c.key))}</legend>
+        <label><input type="radio" name="sc-${i}" value="mine" checked>
+          <span class="shared-conflict-who">This project</span><span class="shared-conflict-text">${m.a}</span></label>
+        <label><input type="radio" name="sc-${i}" value="theirs">
+          <span class="shared-conflict-who">Shared copy</span><span class="shared-conflict-text">${m.b}</span></label>
+      </fieldset>`;
+    }).join('');
+    dlg.innerHTML = `
+      <form method="dialog">
+        <h2>${escapeHtml(siglum)}: ${conflicts.length} line${conflicts.length === 1 ? '' : 's'} read differently here and in the shared copy</h2>
+        <p class="shared-conflict-intro">Choose which reading each line keeps. The choice goes to the shared copy, and so to every project that has this tablet.</p>
+        <div class="shared-conflict-list">${rows}</div>
+        <div class="dialog-actions">
+          <button type="button" data-all="mine">All: this project</button>
+          <button type="button" data-all="theirs">All: shared copy</button>
+          <span class="shared-conflict-spacer"></span>
+          <button type="button" value="later">Decide later</button>
+          <button type="submit" value="ok" class="shared-conflict-apply">Apply</button>
+        </div>
+      </form>`;
+    document.body.appendChild(dlg);
+    const done = (val) => { dlg.close(); dlg.remove(); resolve(val); };
+    dlg.querySelectorAll('[data-all]').forEach((b) => b.addEventListener('click', () => {
+      dlg.querySelectorAll(`input[value="${b.dataset.all}"]`).forEach((r) => { r.checked = true; });
+    }));
+    dlg.querySelector('[value="later"]').addEventListener('click', () => done(null));
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    dlg.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const out = {};
+      conflicts.forEach((c, i) => {
+        const r = dlg.querySelector(`input[name="sc-${i}"]:checked`);
+        out[c.key] = r ? r.value : 'theirs';
+      });
+      done(out);
+    });
+    dlg.showModal();
+  });
 }
 
 // Stop polling when page is hidden, resume when visible
@@ -10160,6 +10434,9 @@ async function init() {
 
   // Start file polling for auto-sync
   await initFilePolling();
+
+  // Shared tablets: bring each into step with its shared copy.
+  await sharedInit();
 
   console.log('Manuscript Scorer initialized');
 }

@@ -37,3 +37,6 @@ __pycache__/
 
 # per-machine: where each project folder lives, for in-place writes
 project-paths.json
+
+# per-machine: where the shared texts folder is
+shared-texts-path.json

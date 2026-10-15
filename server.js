@@ -996,6 +996,88 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ===========================================
+  // SHARED TEXTS — one transliteration of a tablet used by several projects
+  // (see shared-texts.js). They live in one folder, set once per computer,
+  // and are written here, in place, for the same reason project files are:
+  // both editors write them, and Drive can strand a browser's
+  // delete-and-create of a file that another account owns.
+  // ===========================================
+  const SHARED_PATH_FILE = path.join(__dirname, 'shared-texts-path.json');
+  const sharedFolder = () => {
+    try { return JSON.parse(fs.readFileSync(SHARED_PATH_FILE, 'utf8')).path || null; }
+    catch (_) { return null; }
+  };
+  // A shared text is named after its tablet file: "K.2246", "1881,0204.234".
+  const sharedName = (n) => {
+    const s = String(n || '');
+    return /^[^\\/:*?"<>|\r\n]+$/.test(s) && s !== '.' && s !== '..' && !s.includes('..') ? s : null;
+  };
+
+  if (req.method === 'GET' && req.url === '/api/shared/config') {
+    reply(200, { path: sharedFolder() });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/shared/config') {
+    if (!sameOrigin()) { reply(403, { error: 'foreign origin' }); return; }
+    readJsonBody((err, b) => {
+      if (err) { reply(400, { error: 'bad JSON' }); return; }
+      const folder = String(b.path || '').trim();
+      if (!folder) { fs.rmSync(SHARED_PATH_FILE, { force: true }); reply(200, { path: null }); return; }
+      if (!path.isAbsolute(folder)) { reply(400, { error: 'give the full path of the folder, e.g. G:\\My Drive\\EAE Collaboration\\_shared-texts' }); return; }
+      try { fs.mkdirSync(folder, { recursive: true }); } catch (e) { reply(400, { error: 'cannot create or open ' + folder + ': ' + e.message }); return; }
+      if (!fs.statSync(folder).isDirectory()) { reply(400, { error: 'not a folder: ' + folder }); return; }
+      fs.writeFileSync(SHARED_PATH_FILE, JSON.stringify({ path: path.resolve(folder) }, null, 2));
+      reply(200, { path: path.resolve(folder) });
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/shared/list') {
+    const folder = sharedFolder();
+    if (!folder) { reply(409, { error: 'no shared texts folder is set on this computer' }); return; }
+    try {
+      const files = fs.readdirSync(folder).filter((f) => f.endsWith('.txt')).map((f) => {
+        const st = fs.statSync(path.join(folder, f));
+        return { name: f.slice(0, -4), mtimeMs: st.mtimeMs, size: st.size };
+      });
+      reply(200, { path: folder, files });
+    } catch (e) { reply(500, { error: e.message }); }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/api/shared/file')) {
+    const folder = sharedFolder();
+    if (!folder) { reply(409, { error: 'no shared texts folder is set on this computer' }); return; }
+    const name = sharedName(new URL(req.url, 'http://x').searchParams.get('name'));
+    if (!name) { reply(400, { error: 'bad name' }); return; }
+    const file = path.join(folder, name + '.txt');
+    if (!fs.existsSync(file)) { reply(404, { error: 'no shared text ' + name }); return; }
+    try {
+      reply(200, { name, content: fs.readFileSync(file, 'utf8'), mtimeMs: fs.statSync(file).mtimeMs });
+    } catch (e) { reply(500, { error: e.message }); }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/shared/file') {
+    if (!sameOrigin()) { reply(403, { error: 'foreign origin' }); return; }
+    const folder = sharedFolder();
+    if (!folder) { reply(409, { error: 'no shared texts folder is set on this computer' }); return; }
+    readJsonBody((err, b) => {
+      if (err) { reply(400, { error: 'bad JSON' }); return; }
+      const name = sharedName(b.name);
+      if (!name || typeof b.content !== 'string') { reply(400, { error: 'name and content are required' }); return; }
+      const file = path.join(folder, name + '.txt');
+      try {
+        // Into the existing file when there is one: the same file, modified.
+        fs.writeFileSync(file, b.content, 'utf8');
+        reply(200, { name, mtimeMs: fs.statSync(file).mtimeMs });
+      } catch (e) { reply(500, { error: e.message }); }
+    });
+    return;
+  }
+
   // Serve static files: GET only
   if (req.method !== 'GET') {
     res.writeHead(404);

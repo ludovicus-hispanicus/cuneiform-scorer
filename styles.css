@@ -2382,6 +2382,86 @@ body.dark-mode .search-match {
   border-color: var(--accent);
 }
 
+/* Shared texts: the lines a tablet reads differently here and in its shared
+   copy, one choice each. Wide, because a witness line is long. */
+.dialog.shared-conflict-dialog {
+  max-width: min(980px, 95vw);
+  max-height: 88vh;
+  overflow: auto;
+}
+.shared-conflict-intro {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin: -0.4rem 0 1rem;
+}
+.shared-conflict-list {
+  display: grid;
+  gap: 0.6rem;
+}
+.shared-conflict {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem 0.5rem;
+}
+.shared-conflict legend {
+  padding: 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.shared-conflict label {
+  display: grid;
+  grid-template-columns: auto 7.5rem 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.3rem 0.4rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.shared-conflict label:hover { background: var(--bg-light); }
+.shared-conflict label:has(input:checked) { background: var(--accent-light); }
+.shared-conflict-who {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.shared-conflict-text {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.shared-conflict-text mark {
+  background: #f6d48b;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+body.dark-mode .shared-conflict-text mark { background: #6b5320; }
+.shared-conflict-text em { color: var(--text-muted); }
+.shared-conflict-spacer { flex: 1; }
+.dialog-actions .shared-conflict-apply {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+.dialog-actions .shared-conflict-apply:hover { filter: brightness(1.08); background: var(--accent); }
+
+.shared-reconnect {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 1000;
+  padding: 0.55rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 0.9rem;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+}
+
 /* Add Manuscript Dialog */
 .add-manuscript-options {
   display: flex;

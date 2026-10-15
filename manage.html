@@ -7,6 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="index.css">
   <script src="file-system.js"></script>
+  <script src="shared-texts.js"></script>
   <script src="ebl-client.js"></script>
   <script src="ebl-fetch.js"></script>
   <style>
@@ -523,6 +524,26 @@
       </div>
     </div>
 
+    <!-- Shared Texts Section -->
+    <div class="section">
+      <h2>Shared texts</h2>
+      <p>A shared tablet has one transliteration for every project that has it: a correction saved in any of
+        them reaches the others. Which lines go to which section stays each project's own.</p>
+      <div class="ebl-form-row" id="shared-folder-row">
+        <label for="shared-folder">Shared texts folder on this computer</label>
+        <input type="text" id="shared-folder" placeholder="e.g. G:\My Drive\EAE Collaboration\_shared-texts">
+      </div>
+      <div class="actions">
+        <button id="shared-folder-btn" class="btn btn-secondary" type="button">Save folder</button>
+        <button id="shared-choose-btn" class="btn btn-secondary" type="button" hidden
+          title="Pick the folder that holds the shared texts, e.g. EAE Collaboration\_shared-texts on your Drive">Choose folder…</button>
+        <button id="shared-allow-btn" class="btn btn-secondary" type="button" hidden>Allow access</button>
+        <span id="shared-folder-status" class="ebl-hint" style="margin:0;"></span>
+      </div>
+      <div id="shared-list" class="file-list" style="margin-top:0.8rem;"></div>
+      <div id="shared-report" class="ebl-hint" style="margin-top:0.6rem;"></div>
+    </div>
+
     <!-- eBL Manuscript Metadata Section -->
     <div class="section">
       <h2>eBL Manuscript Metadata <span id="mapping-save-indicator" class="save-indicator"></span></h2>
@@ -739,6 +760,9 @@
         // Load file list (reconciles manuscripts.json against on-disk files)
         await loadFiles();
 
+        // Shared texts: the folder on this computer and which tablets are shared
+        await loadShared();
+
         // Hydrate eBL settings UI from localStorage + project.json
         initEblPanel();
 
@@ -809,6 +833,150 @@
     }
 
     // Render file list
+    // ---- Shared texts ----
+    // Sharing a tablet puts its transliteration (the file without its § markers)
+    // in the shared folder and records it in project.json; the scorer keeps it in
+    // step from then on. Unlinking leaves this project a private copy.
+    let sharedFiles = new Set();
+    let sharedFolderSet = false;
+    const sharedOf = () => (projectConfig && projectConfig.shared) || {};
+    const tabletName = (file) => String(file).replace(/\.txt$/, '');
+
+    async function loadShared() {
+      const status = document.getElementById('shared-folder-status');
+      // style.display, not hidden: these rows have a display of their own in the CSS
+      const show = (id, on) => { const el = document.getElementById(id); el.hidden = false; el.style.display = on ? '' : 'none'; };
+      try {
+        const c = await SharedTexts.client.config();
+        const server = c.route === 'server';
+        // With the local server the folder is a path; in the web version it is picked.
+        show('shared-folder-row', server);
+        show('shared-folder-btn', server);
+        show('shared-choose-btn', !server);
+        show('shared-allow-btn', !server && !!c.needsPermission);
+        if (server) document.getElementById('shared-folder').value = c.path || '';
+        document.getElementById('shared-choose-btn').textContent = c.path ? 'Change folder…' : 'Choose folder…';
+        sharedFolderSet = !!c.path && !c.needsPermission;
+        if (c.path && c.needsPermission) {
+          sharedFiles = new Set();
+          status.textContent = 'Folder: ' + c.path + ' — the browser needs your permission again: click Allow access.';
+        } else if (c.path) {
+          const { files } = await SharedTexts.client.list();
+          sharedFiles = new Set(files.map((f) => f.name));
+          status.textContent = (server ? '' : 'Folder: ' + c.path + '. ') + files.length + ' shared text(s) in it.';
+        } else {
+          sharedFiles = new Set();
+          status.textContent = server ? 'No shared texts folder set on this computer yet.'
+            : 'No shared texts folder chosen in this browser yet: click Choose folder…';
+        }
+      } catch (err) {
+        sharedFolderSet = false;
+        status.textContent = 'The shared texts folder could not be read: ' + (err.message || err);
+      }
+      renderShared();
+    }
+
+    document.getElementById('shared-choose-btn').addEventListener('click', async () => {
+      const status = document.getElementById('shared-folder-status');
+      try {
+        await SharedTexts.client.chooseFolder();
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        status.textContent = 'Not chosen: ' + (err.message || err);
+        return;
+      }
+      await loadShared();
+    });
+    document.getElementById('shared-allow-btn').addEventListener('click', async () => {
+      await SharedTexts.client.reconnect();
+      await loadShared();
+    });
+
+    function renderShared() {
+      const el = document.getElementById('shared-list');
+      const linked = sharedOf();
+      if (!manuscriptFiles.length) { el.innerHTML = ''; return; }
+      el.innerHTML = manuscriptFiles.map((file) => {
+        const name = tabletName(file);
+        const on = Object.prototype.hasOwnProperty.call(linked, name);
+        const inFolder = sharedFiles.has(name);
+        const said = on ? 'shared' + (linked[name].since ? ' since ' + new Date(linked[name].since).toLocaleDateString() : '')
+          : inFolder ? 'not shared here — another project shares it' : 'not shared';
+        const btn = on
+          ? `<button class="btn btn-secondary shared-unlink" data-name="${escapeHtml(name)}" type="button">Unlink</button>`
+          : `<button class="btn btn-secondary shared-share" data-name="${escapeHtml(name)}" type="button"${sharedFolderSet ? '' : ' disabled'}>Share</button>`;
+        return `<div class="file-item"><span class="use-dot ${on ? 'is-used' : 'is-idle'}"></span>
+          <span>${escapeHtml(name)}</span><span class="file-use">${escapeHtml(said)}</span>${btn}</div>`;
+      }).join('');
+    }
+
+    async function saveSharedFolder() {
+      const status = document.getElementById('shared-folder-status');
+      try {
+        const r = await SharedTexts.client.setFolder(document.getElementById('shared-folder').value.trim());
+        status.textContent = r.path ? 'Saved: ' + r.path : 'Cleared.';
+      } catch (err) {
+        status.textContent = 'Not saved: ' + (err.message || err);
+        return;
+      }
+      await loadShared();
+    }
+
+    async function shareTablet(name) {
+      const report = document.getElementById('shared-report');
+      const content = await FileSystem.readManuscript(dirHandle, name);
+      if (content == null) { report.textContent = 'Could not read ' + name + '.txt.'; return; }
+      const mine = SharedTexts.strip(content);
+      const remote = await SharedTexts.client.read(name);
+      let said;
+      if (!remote) {
+        await SharedTexts.client.write(name, mine);
+        await FileSystem.writeSharedBase(dirHandle, name, mine);
+        said = name + ' is now shared, from this project’s transliteration.';
+      } else if (SharedTexts.same(mine, remote.content)) {
+        await FileSystem.writeSharedBase(dirHandle, name, remote.content);
+        said = name + ' is now shared. Its transliteration already matched the shared copy.';
+      } else {
+        // No common ancestor yet: the scorer will put every differing line to
+        // the editor the next time this project is opened.
+        const n = SharedTexts.differences(mine, remote.content).length;
+        said = name + ' is now shared. Its transliteration differs from the shared copy in ' + n
+          + ' line(s): open the score and you will be asked, line by line, which reading each keeps.';
+      }
+      projectConfig = projectConfig || {};
+      projectConfig.shared = { ...sharedOf(), [name]: { since: new Date().toISOString() } };
+      await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+      report.textContent = said;
+      await loadShared();
+    }
+
+    async function unlinkTablet(name) {
+      if (!confirm('Unlink ' + name + '?\n\nThis project keeps its own copy of the text, which stops following the shared one. Other projects stay linked.')) return;
+      const next = { ...sharedOf() };
+      delete next[name];
+      projectConfig.shared = next;
+      await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+      document.getElementById('shared-report').textContent = name + ' is unlinked: this project now has its own copy.';
+      renderShared();
+    }
+
+    document.getElementById('shared-folder-btn').addEventListener('click', saveSharedFolder);
+    document.getElementById('shared-list').addEventListener('click', async (e) => {
+      const share = e.target.closest('.shared-share');
+      const unlink = e.target.closest('.shared-unlink');
+      const btn = share || unlink;
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        if (share) await shareTablet(btn.dataset.name);
+        else await unlinkTablet(btn.dataset.name);
+      } catch (err) {
+        document.getElementById('shared-report').textContent = 'Not done: ' + (err.message || err);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     function renderFileList() {
       const container = document.getElementById('file-list');
 

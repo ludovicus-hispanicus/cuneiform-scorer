@@ -298,6 +298,23 @@ async function writeProjectFile(dirHandle, name, content) {
   return name;
 }
 
+// A shared text as this project last agreed with it (see shared-texts.js): the
+// common ancestor a three-way merge needs, kept per project because each
+// project agreed with the shared copy at its own moment.
+async function readSharedBase(dirHandle, name) {
+  try {
+    const dir = await dirHandle.getDirectoryHandle('shared-base');
+    const fh = await dir.getFileHandle(`${name}.txt`);
+    return await (await fh.getFile()).text();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function writeSharedBase(dirHandle, name, content) {
+  await writeText(dirHandle, `shared-base/${name}.txt`, content);
+}
+
 // Which parallel candidates someone has already been through.
 // A project-level file rather than browser storage: the point of it is that
 // the next person to open the project sees what has been checked.
@@ -516,6 +533,20 @@ async function getSavedProjects() {
   return projects;
 }
 
+// The shared texts folder, when the browser reaches it itself (the web version,
+// with no local server): picked once and remembered like a project folder.
+const SHARED_FOLDER_KEY = 'shared-texts-folder';
+async function saveSharedFolder(handle) {
+  await saveHandle(SHARED_FOLDER_KEY, handle, { type: 'shared-texts', name: handle.name });
+}
+async function getSharedFolder() {
+  const item = await getHandle(SHARED_FOLDER_KEY);
+  return (item && item.handle) || null;
+}
+async function clearSharedFolder() {
+  await deleteHandle(SHARED_FOLDER_KEY);
+}
+
 // Remove a project from IndexedDB
 async function removeProject(projectId) {
   await deleteHandle(projectId);
@@ -616,6 +647,11 @@ window.FileSystem = {
   requestPermission,
   verifyHandle,
 
+  // Shared texts folder (browser-only route)
+  saveSharedFolder,
+  getSharedFolder,
+  clearSharedFolder,
+
   // Project management
   saveProject,
   getSavedProjects,
@@ -635,6 +671,8 @@ window.FileSystem = {
   readScoreData,
   writeScoreData,
   writeProjectFile,
+  readSharedBase,
+  writeSharedBase,
   readAnnotations,
   writeAnnotations,
   readManuscriptsMeta,
