@@ -254,45 +254,106 @@
       if (!h) return false;
       return (await h.requestPermission({ mode: 'readwrite' })) === 'granted';
     },
-    list: async () => {
-      if ((await route()) === 'server') return call('GET', '/api/shared/list');
+    // kind: 'text' (a tablet, NAME.txt) or 'omen' (a linked omen, omens/NAME.json)
+    list: async (kind) => {
+      if ((await route()) === 'server') return call('GET', '/api/shared/list' + (kind === 'omen' ? '?kind=omen' : ''));
       const h = await readyHandle();
+      const { dir, ext } = await place(h, kind, false);
       const files = [];
-      for await (const entry of h.values()) {
-        if (entry.kind !== 'file' || !entry.name.endsWith('.txt')) continue;
-        const f = await entry.getFile();
-        files.push({ name: entry.name.slice(0, -4), mtimeMs: f.lastModified, size: f.size });
+      if (dir) {
+        for await (const entry of dir.values()) {
+          if (entry.kind !== 'file' || !entry.name.endsWith(ext)) continue;
+          const f = await entry.getFile();
+          files.push({ name: entry.name.slice(0, -ext.length), mtimeMs: f.lastModified, size: f.size });
+        }
       }
       return { path: h.name, files };
     },
-    read: async (name) => {
+    read: async (name, kind) => {
       if ((await route()) === 'server') {
-        try { return await call('GET', '/api/shared/file?name=' + encodeURIComponent(name)); }
+        try { return await call('GET', '/api/shared/file?name=' + encodeURIComponent(name) + (kind === 'omen' ? '&kind=omen' : '')); }
         catch (e) { if (e.status === 404) return null; throw e; }
       }
       if (!validName(name)) throw new Error('bad name');
       const h = await readyHandle();
+      const { dir, ext } = await place(h, kind, false);
+      if (!dir) return null;
       try {
-        const f = await (await h.getFileHandle(name + '.txt')).getFile();
+        const f = await (await dir.getFileHandle(name + ext)).getFile();
         return { name, content: await f.text(), mtimeMs: f.lastModified };
       } catch (e) {
         if (e && e.name === 'NotFoundError') return null;
         throw e;
       }
     },
-    write: async (name, content) => {
-      if ((await route()) === 'server') return call('POST', '/api/shared/file', { name, content });
+    write: async (name, content, kind) => {
+      if ((await route()) === 'server') return call('POST', '/api/shared/file', { name, content, kind: kind === 'omen' ? 'omen' : 'text' });
       if (!validName(name)) throw new Error('bad name');
       const h = await readyHandle();
-      const fh = await h.getFileHandle(name + '.txt', { create: true });
+      const { dir, ext } = await place(h, kind, true);
+      const fh = await dir.getFileHandle(name + ext, { create: true });
       const w = await fh.createWritable();
       await w.write(content);
       await w.close();
       return { name, mtimeMs: (await fh.getFile()).lastModified };
     },
   };
+  // Browser route: the folder a kind lives in (omens/ is made on first write).
+  async function place(h, kind, create) {
+    if (kind !== 'omen') return { dir: h, ext: '.txt' };
+    try { return { dir: await h.getDirectoryHandle('omens', { create }), ext: '.json' }; }
+    catch (e) { if (e && e.name === 'NotFoundError') return { dir: null, ext: '.json' }; throw e; }
+  }
 
-  const api = { parse, strip, reattach, merge3, differences, witnessChanges, normalise, same, client };
+  // ---- linked omens ----
+  //
+  // An omen two chapters share can be linked: its reconstruction, translation
+  // and variants live once, as a small JSON record in the shared folder, and
+  // each linked project keeps them in step. Section numbers, notes, parallels,
+  // which witness lines belong to which variant, alignments and lemmas stay
+  // each project's own.
+  //   { id, reconstruction, translation, variants: [{ text, note? }] }
+  // Merging is by part: a part changed on one side only is taken; a part both
+  // sides changed differently is put to the editor.
+  const OMEN_PARTS = ['reconstruction', 'translation', 'variants'];
+  // An edit box hands back a non-breaking space for a typed one; it is not a
+  // difference between two editions, so a record never carries one.
+  const plain = (t) => String(t || '').replace(/ /g, ' ');
+  const omenText = (t) => normalise(plain(t));
+  const variantKey = (vs) => JSON.stringify((vs || []).map((v) => [omenText(v.text), plain(v.note)]));
+  const partKey = (rec, part) => (rec == null ? null
+    : part === 'variants' ? variantKey(rec.variants) : omenText(rec[part]));
+  function omenRecord(id, recon, tr, variants) {
+    return {
+      id,
+      reconstruction: plain(recon),
+      translation: plain(tr),
+      variants: (variants || []).map((v) => (v.note ? { text: plain(v.text), note: plain(v.note) } : { text: plain(v.text) })),
+    };
+  }
+  function sameOmen(a, b) { return OMEN_PARTS.every((p) => partKey(a, p) === partKey(b, p)); }
+  // { merged, conflicts: [{ part, mine, theirs }] } — merged takes theirs for a
+  // conflict unless resolve(conflict) says 'mine'.
+  function mergeOmen(base, mine, theirs, resolve) {
+    const merged = { id: (theirs && theirs.id) || (mine && mine.id) };
+    const conflicts = [];
+    for (const p of OMEN_PARTS) {
+      const b = partKey(base, p), m = partKey(mine, p), t = partKey(theirs, p);
+      let take;
+      if (m === t || t === b) take = mine;
+      else if (m === b) take = theirs;
+      else {
+        const c = { part: p, mine: mine[p], theirs: theirs[p] };
+        conflicts.push(c);
+        take = resolve && resolve(c) === 'mine' ? mine : theirs;
+      }
+      merged[p] = p === 'variants' ? JSON.parse(JSON.stringify(take.variants || [])) : (take[p] || '');
+    }
+    return { merged, conflicts };
+  }
+
+  const api = { parse, strip, reattach, merge3, differences, witnessChanges, normalise, same, client,
+    omenRecord, sameOmen, mergeOmen, OMEN_PARTS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root) root.SharedTexts = api;
 })(typeof window !== 'undefined' ? window : null);

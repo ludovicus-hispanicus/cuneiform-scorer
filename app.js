@@ -2367,6 +2367,9 @@ function renderScore() {
       const sentClass = vi ? '' : ' sent-' + sentState(lineNum);
       html += `<div class="score-line-header${vi ? ' is-variant' : ''}${sentClass}">`;
       html += `<span class="line-label">§ ${lineNum}${letter}</span> `;
+      if (!vi && typeof linkedOmenOf === 'function' && linkedOmenOf(lineNum)) {
+        html += `<span class="omen-linked" title="Linked omen (${escapeHtml(linkedOmenOf(lineNum))}): its reconstruction, translation and variants are kept in step with the other projects linked to it.">⇄</span> `;
+      }
 
       if (lemmasOn(lineNum)) {
         // Same ruler as Positions, read the same way, but each word shows the
@@ -9618,6 +9621,7 @@ saveToFile = async function(id) {
 };
 
 const originalSaveScoreData = saveScoreDataToFile;
+let omenPushing = false;
 saveScoreDataToFile = async function() {
   isSaving = true;
   try {
@@ -9626,6 +9630,11 @@ saveScoreDataToFile = async function() {
     notifyOtherTabs('score-data-saved');
   } finally {
     isSaving = false;
+  }
+  // Linked omens changed here go to their shared records with the save.
+  if (!omenPushing && typeof omenPushChanged === 'function') {
+    omenPushing = true;
+    try { await omenPushChanged(); } finally { omenPushing = false; }
   }
 };
 
@@ -9990,9 +9999,13 @@ async function pollForChanges() {
     if (currentTimestamps['project.json'] !== lastKnownTimestamps['project.json']) {
       const cfg = await FileSystem.readProjectConfig(dirHandle);
       if (cfg && projectConfig) {
-        const wasShared = Object.keys(sharedLinks()).length;
+        const before = JSON.stringify([sharedLinks(), omenLinks()]);
         projectConfig.shared = cfg.shared;
-        if (!wasShared && Object.keys(sharedLinks()).length) await sharedInit();
+        projectConfig.linkedOmens = cfg.linkedOmens;
+        if (JSON.stringify([sharedLinks(), omenLinks()]) !== before) {
+          await sharedInit();
+          renderScoreInBackground();
+        }
       }
     }
 
@@ -10029,9 +10042,13 @@ let sharedBusy = false;
 
 const sharedLinks = () => (projectConfig && projectConfig.shared) || {};
 const isSharedTablet = (siglum) => Object.prototype.hasOwnProperty.call(sharedLinks(), siglum);
+// Linked omens: project.json "linkedOmens": { "<section>": "<shared omen id>" }
+const omenLinks = () => (projectConfig && projectConfig.linkedOmens) || {};
+const linkedOmenOf = (sec) => omenLinks()[String(sec)] || null;
+const anySharing = () => Object.keys(sharedLinks()).length > 0 || Object.keys(omenLinks()).length > 0;
 
 async function sharedInit() {
-  if (!window.SharedTexts || !dirHandle || !Object.keys(sharedLinks()).length) return;
+  if (!window.SharedTexts || !dirHandle || !anySharing()) return;
   let c = null;
   try { c = await SharedTexts.client.config(); } catch (_) { c = null; }
   sharedOn = !!(c && c.path) && !c.needsPermission;
@@ -10042,13 +10059,161 @@ async function sharedInit() {
     if (!sharedOn) { sharedOfferReconnect(); return; }
   }
   if (!sharedOn) {
-    setStatus('error', 'This project shares tablets with other projects, but no shared texts folder is set on this computer. Set it in Settings.');
+    setStatus('error', 'This project shares tablets or omens with other projects, but no shared texts folder is set on this computer. Set it in Settings.');
     return;
   }
   for (const siglum of Object.keys(sharedLinks())) {
     try { await sharedSync(siglum, 'open'); }
     catch (err) { console.error('Shared text ' + siglum + ':', err); }
   }
+  for (const sec of Object.keys(omenLinks())) {
+    try { await omenSync(sec, 'open'); }
+    catch (err) { console.error('Linked omen §' + sec + ':', err); }
+  }
+}
+
+// ---- Linked omens ----
+// A section linked to a shared omen keeps its reconstruction, translation and
+// variants in step with every other project linked to it (see shared-texts.js).
+// Its section number, notes, parallels, which witness lines go to which
+// variant, alignments and lemmas stay this project's own.
+const omenSeen = {};       // shared omen id -> mtime last synced
+const omenSnapshot = {};   // section -> its record as last synced, to see a local change
+
+function omenNow(sec) {
+  return SharedTexts.omenRecord(linkedOmenOf(sec), reconstructedLines[sec], translationLines[sec], variantLines[sec]);
+}
+
+// Write a shared omen's parts into this project the way an edit here would:
+// readings through writeReading (boxes and lemmas follow the words), a variant
+// that goes taking its witnesses back to the main reading, a new one coming in
+// without witnesses for the editor to assign.
+async function omenApplyToProject(sec, rec) {
+  const want = rec.variants || [];
+  const have = (variantLines[sec] || []).length;
+  for (let vi = have; vi > want.length; vi--) {
+    const { scoreLines } = buildScore();
+    const attached = (scoreLines[sec] || []).filter((w) => w.type === 'line' && (w.variant || 0) === vi);
+    await assignWitnessesToVariant(attached, sec, 0);
+    variantLines[sec].splice(vi - 1, 1);
+    if (lemmaChoices[sec] && lemmaChoices[sec][vi]) delete lemmaChoices[sec][vi];
+    if (!variantLines[sec].length) delete variantLines[sec];
+  }
+  const added = [];
+  want.forEach((v, i) => {
+    const vi = i + 1;
+    if (!variantSlot(sec, vi)) {
+      if (!Array.isArray(variantLines[sec])) variantLines[sec] = [];
+      variantLines[sec].push({ text: '', parallels: [] });
+      added.push('§' + sec + variantLetterOf(vi));
+    }
+    writeReading(sec, vi, v.text || '');
+    const slot = variantSlot(sec, vi);
+    if (slot) { if (v.note) slot.note = v.note; else delete slot.note; }
+  });
+  writeReading(sec, 0, rec.reconstruction || '');
+  translationLines[sec] = rec.translation || '';
+  if (typeof refreshSentMark === 'function') refreshSentMark(sec);
+  // This save is the sync's own: it must not set off another push.
+  const wasPushing = omenPushing;
+  omenPushing = true;
+  try { await saveScoreDataToFile(); } finally { omenPushing = wasPushing; }
+  renderScoreInBackground();
+  if (added.length) {
+    setStatus('error', 'New variant ' + added.join(', ') + ' came from a linked project: drag the tablets that attest it onto it.');
+  }
+  return added;
+}
+
+async function omenSync(sec, why) {
+  const id = linkedOmenOf(sec);
+  if (!sharedOn || !id || !(sec in reconstructedLines || sec in translationLines)) return;
+  const remote = await SharedTexts.client.read(id, 'omen');
+  const base = await FileSystem.readOmenBase(dirHandle, id);
+  const mine = omenNow(sec);
+  if (!remote) {
+    const w = await SharedTexts.client.write(id, JSON.stringify(mine, null, 2), 'omen');
+    omenSeen[id] = w.mtimeMs;
+    await FileSystem.writeOmenBase(dirHandle, id, mine);
+    omenSnapshot[sec] = JSON.stringify(mine);
+    return;
+  }
+  omenSeen[id] = remote.mtimeMs;
+  let theirs;
+  try { theirs = JSON.parse(remote.content); } catch (_) {
+    setStatus('error', 'The shared omen ' + id + ' could not be read (not valid JSON); §' + sec + ' was left as it is.');
+    return;
+  }
+  if (SharedTexts.sameOmen(mine, theirs)) {
+    if (!base || !SharedTexts.sameOmen(base, theirs)) await FileSystem.writeOmenBase(dirHandle, id, theirs);
+    omenSnapshot[sec] = JSON.stringify(mine);
+    return;
+  }
+  let r = SharedTexts.mergeOmen(base, mine, theirs);
+  if (r.conflicts.length) {
+    const asText = (p, v) => (p === 'variants'
+      ? ((v || []).length ? (v || []).map((x, i) => variantLetterOf(i + 1) + ': ' + x.text).join('   ') : '(no variants)')
+      : (v || ''));
+    const items = r.conflicts.map((c) => ({ key: c.part, mine: asText(c.part, c.mine), theirs: asText(c.part, c.theirs) }));
+    const label = { reconstruction: 'Reconstruction', translation: 'Translation', variants: 'Variants' };
+    const choice = await sharedAskConflicts('§ ' + sec, items, {
+      title: '§ ' + sec + ': changed here and in a linked project',
+      intro: 'Choose which version each part keeps. The choice goes to the shared omen, and so to every project linked to it.',
+      label: (k) => label[k] || k,
+      theirs: 'Linked omen',
+    });
+    if (!choice) {
+      // Not asked again at every autosave: only when this section or the
+      // linked omen changes again, or the project is opened.
+      omenSnapshot[sec] = JSON.stringify(mine);
+      setStatus('error', '§' + sec + ' differs from its linked omen and is waiting for your choice. Reopen the project to be asked again.');
+      return;
+    }
+    r = SharedTexts.mergeOmen(base, mine, theirs, (c) => choice[c.part] || 'theirs');
+  }
+  const merged = r.merged;
+  const added = SharedTexts.sameOmen(merged, mine) ? [] : await omenApplyToProject(sec, merged);
+  if (!SharedTexts.sameOmen(merged, theirs)) {
+    const w = await SharedTexts.client.write(id, JSON.stringify(merged, null, 2), 'omen');
+    omenSeen[id] = w.mtimeMs;
+  }
+  await FileSystem.writeOmenBase(dirHandle, id, merged);
+  omenSnapshot[sec] = JSON.stringify(omenNow(sec));
+  if (why !== 'open' && !added.length) {
+    setStatus('connected', '§' + sec + (SharedTexts.sameOmen(merged, mine) ? ' — linked omen updated' : ' — updated from the linked omen'));
+    setTimeout(() => setStatus('connected', 'Ready'), 4000);
+  }
+}
+
+// After a save: every linked section that changed here since it was last synced.
+async function omenPushChanged() {
+  if (!sharedOn) return;
+  for (const sec of Object.keys(omenLinks())) {
+    if (!(sec in reconstructedLines || sec in translationLines)) continue;
+    if (omenSnapshot[sec] === JSON.stringify(omenNow(sec))) continue;
+    try { await omenSync(sec, 'save'); }
+    catch (err) { console.error('Linked omen §' + sec + ':', err); setStatus('error', '§' + sec + ' was saved here, but its linked omen could not be updated: ' + (err.message || err)); }
+  }
+}
+
+let omenBusy = false;
+async function omenPoll() {
+  if (!sharedOn || omenBusy || !Object.keys(omenLinks()).length) return;
+  omenBusy = true;
+  try {
+    const { files } = await SharedTexts.client.list('omen');
+    const mtime = new Map(files.map((f) => [f.name, f.mtimeMs]));
+    for (const [sec, id] of Object.entries(omenLinks())) {
+      if (!mtime.has(id) || mtime.get(id) === omenSeen[id]) continue;
+      if (hasUnsavedChanges || scoreDataSaveTimer) {
+        setStatus('error', '§' + sec + ' was changed in a linked project. Save your changes here to bring the two together.');
+        continue;
+      }
+      await omenSync(sec, 'poll');
+    }
+  } catch (err) {
+    console.warn('Linked omens poll:', err.message || err);
+  } finally { omenBusy = false; }
 }
 
 // One click gives the browser its permission back; then the shared tablets sync.
@@ -10173,6 +10338,7 @@ async function sharedSync(siglum, why) {
 
 // Every poll: a shared copy that changed since it was last synced is pulled in.
 async function sharedPoll() {
+  await omenPoll();
   if (!sharedOn || sharedBusy || !Object.keys(sharedLinks()).length) return;
   sharedBusy = true;
   try {
@@ -10192,12 +10358,14 @@ async function sharedPoll() {
 }
 
 // The lines both sides changed, one choice each. Resolves { key: 'mine'|'theirs' }
-// or null when the editor puts it off.
-function sharedAskConflicts(siglum, conflicts) {
+// or null when the editor puts it off. opts, for a linked omen: title, intro,
+// label(key) and theirs (what the other side is called).
+function sharedAskConflicts(siglum, conflicts, opts = {}) {
   return new Promise((resolve) => {
     const dlg = document.createElement('dialog');
     dlg.className = 'dialog shared-conflict-dialog';
-    const label = (k) => k.replace(/^line:/, '').replace(/^dir:/, 'ruling after ').replace('|', ' ').replace(/#\d+$/, '');
+    const theirsName = opts.theirs || 'Shared copy';
+    const label = opts.label || ((k) => k.replace(/^line:/, '').replace(/^dir:/, 'ruling after ').replace('|', ' ').replace(/#\d+$/, ''));
     // The words that differ, marked in each reading, so DIŠ against DIS is
     // not a hunt through two long lines.
     const marked = (a, b) => {
@@ -10223,17 +10391,17 @@ function sharedAskConflicts(siglum, conflicts) {
         <label><input type="radio" name="sc-${i}" value="mine" checked>
           <span class="shared-conflict-who">This project</span><span class="shared-conflict-text">${m.a}</span></label>
         <label><input type="radio" name="sc-${i}" value="theirs">
-          <span class="shared-conflict-who">Shared copy</span><span class="shared-conflict-text">${m.b}</span></label>
+          <span class="shared-conflict-who">${escapeHtml(theirsName)}</span><span class="shared-conflict-text">${m.b}</span></label>
       </fieldset>`;
     }).join('');
     dlg.innerHTML = `
       <form method="dialog">
-        <h2>${escapeHtml(siglum)}: ${conflicts.length} line${conflicts.length === 1 ? '' : 's'} read differently here and in the shared copy</h2>
-        <p class="shared-conflict-intro">Choose which reading each line keeps. The choice goes to the shared copy, and so to every project that has this tablet.</p>
+        <h2>${escapeHtml(opts.title || `${siglum}: ${conflicts.length} line${conflicts.length === 1 ? '' : 's'} read differently here and in the shared copy`)}</h2>
+        <p class="shared-conflict-intro">${escapeHtml(opts.intro || 'Choose which reading each line keeps. The choice goes to the shared copy, and so to every project that has this tablet.')}</p>
         <div class="shared-conflict-list">${rows}</div>
         <div class="dialog-actions">
           <button type="button" data-all="mine">All: this project</button>
-          <button type="button" data-all="theirs">All: shared copy</button>
+          <button type="button" data-all="theirs">All: ${escapeHtml(theirsName.toLowerCase())}</button>
           <span class="shared-conflict-spacer"></span>
           <button type="button" value="later">Decide later</button>
           <button type="submit" value="ok" class="shared-conflict-apply">Apply</button>

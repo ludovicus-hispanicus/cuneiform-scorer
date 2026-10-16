@@ -315,6 +315,21 @@ async function writeSharedBase(dirHandle, name, content) {
   await writeText(dirHandle, `shared-base/${name}.txt`, content);
 }
 
+// The same for a linked omen: its shared record as this project last agreed with it.
+async function readOmenBase(dirHandle, id) {
+  try {
+    const dir = await (await dirHandle.getDirectoryHandle('shared-base')).getDirectoryHandle('omens');
+    const fh = await dir.getFileHandle(`${id}.json`);
+    return JSON.parse(await (await fh.getFile()).text());
+  } catch (e) {
+    return null;
+  }
+}
+
+async function writeOmenBase(dirHandle, id, record) {
+  await writeText(dirHandle, `shared-base/omens/${id}.json`, JSON.stringify(record, null, 2));
+}
+
 // Which parallel candidates someone has already been through.
 // A project-level file rather than browser storage: the point of it is that
 // the next person to open the project sees what has been checked.
@@ -673,6 +688,8 @@ window.FileSystem = {
   writeProjectFile,
   readSharedBase,
   writeSharedBase,
+  readOmenBase,
+  writeOmenBase,
   readAnnotations,
   writeAnnotations,
   readManuscriptsMeta,

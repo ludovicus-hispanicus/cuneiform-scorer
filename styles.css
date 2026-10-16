@@ -2447,6 +2447,12 @@ body.dark-mode .shared-conflict-text mark { background: #6b5320; }
 }
 .dialog-actions .shared-conflict-apply:hover { filter: brightness(1.08); background: var(--accent); }
 
+.omen-linked {
+  color: var(--accent);
+  font-weight: 600;
+  cursor: help;
+}
+
 .shared-reconnect {
   position: fixed;
   right: 1rem;

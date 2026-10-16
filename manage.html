@@ -542,6 +542,20 @@
       </div>
       <div id="shared-list" class="file-list" style="margin-top:0.8rem;"></div>
       <div id="shared-report" class="ebl-hint" style="margin-top:0.6rem;"></div>
+
+      <h3 style="margin-top:1.4rem;">Linked omens</h3>
+      <p>A linked omen keeps its reconstruction, translation and variants the same in every project linked to it.
+        Its section number, notes, parallels, and which tablets attest which variant stay each project's own.</p>
+      <div class="actions">
+        <label for="omen-link-sec">Link §</label>
+        <input type="number" id="omen-link-sec" min="1" style="width:5em;">
+        <label for="omen-link-to">to</label>
+        <select id="omen-link-to"></select>
+        <button id="omen-link-btn" class="btn btn-secondary" type="button">Link</button>
+      </div>
+      <div id="omen-link-preview" class="ebl-hint" style="margin-top:0.4rem;"></div>
+      <div id="omen-list" class="file-list" style="margin-top:0.8rem;"></div>
+      <div id="omen-report" class="ebl-hint" style="margin-top:0.6rem;"></div>
     </div>
 
     <!-- eBL Manuscript Metadata Section -->
@@ -874,6 +888,7 @@
         status.textContent = 'The shared texts folder could not be read: ' + (err.message || err);
       }
       renderShared();
+      await loadOmens();
     }
 
     document.getElementById('shared-choose-btn').addEventListener('click', async () => {
@@ -975,6 +990,123 @@
       } finally {
         btn.disabled = false;
       }
+    });
+
+    // ---- Linked omens ----
+    // project.json "linkedOmens": { "<section>": "<shared omen id>" }. Linking
+    // to a new omen puts this section's record in the shared folder; linking to
+    // one already there leaves any difference for the scorer to put to the
+    // editor, part by part, when the score is next open.
+    let sharedOmens = [];
+    let scoreData = null;
+    const omensOf = () => (projectConfig && projectConfig.linkedOmens) || {};
+    const omenIdFor = (sec) => String(projectConfig.name || 'omen').replace(/[^\w.-]+/g, '-') + '_' + sec;
+    const omenOfSection = (sec) => SharedTexts.omenRecord(null,
+      (scoreData.reconstructed || {})[sec], (scoreData.translations || {})[sec], (scoreData.variants || {})[sec]);
+
+    async function loadOmens() {
+      try { scoreData = await FileSystem.readScoreData(dirHandle); } catch (_) { scoreData = null; }
+      scoreData = scoreData || {};
+      sharedOmens = [];
+      if (sharedFolderSet) {
+        try { sharedOmens = (await SharedTexts.client.list('omen')).files.map((f) => f.name).sort(); } catch (_) { sharedOmens = []; }
+      }
+      renderOmens();
+    }
+
+    function renderOmens() {
+      const linked = omensOf();
+      const taken = new Set(Object.values(linked));
+      const sel = document.getElementById('omen-link-to');
+      sel.innerHTML = '<option value="">a new shared omen, from this section</option>'
+        + sharedOmens.filter((id) => !taken.has(id)).map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+      document.getElementById('omen-link-btn').disabled = !sharedFolderSet;
+      const secs = Object.keys(linked).sort((a, b) => a - b);
+      document.getElementById('omen-list').innerHTML = secs.length
+        ? secs.map((sec) => `<div class="file-item"><span class="use-dot is-used"></span>
+            <span>§ ${escapeHtml(sec)} ⇄ ${escapeHtml(linked[sec])}</span>
+            <span class="file-use">${escapeHtml(((scoreData.reconstructed || {})[sec] || '').slice(0, 70))}</span>
+            <button class="btn btn-secondary omen-unlink" data-sec="${escapeHtml(sec)}" type="button">Unlink</button></div>`).join('')
+        : '<div class="file-item">No linked omens in this project.</div>';
+      showOmenPreview();
+    }
+
+    async function showOmenPreview() {
+      const out = document.getElementById('omen-link-preview');
+      const sec = document.getElementById('omen-link-sec').value.trim();
+      const id = document.getElementById('omen-link-to').value;
+      const parts = [];
+      if (sec) parts.push('§' + sec + ' here: ' + (((scoreData || {}).reconstructed || {})[sec] || '(no reconstruction)'));
+      if (id) {
+        try {
+          const r = await SharedTexts.client.read(id, 'omen');
+          parts.push(id + ': ' + ((r && JSON.parse(r.content).reconstruction) || '(empty)'));
+        } catch (_) { parts.push(id + ': could not be read'); }
+      }
+      out.textContent = parts.join('  —  ');
+    }
+
+    async function linkOmen(sec, id) {
+      const report = document.getElementById('omen-report');
+      if (!/^\d+$/.test(sec)) { report.textContent = 'Give the section number to link.'; return; }
+      if (!((scoreData.reconstructed || {})[sec] || (scoreData.translations || {})[sec])) {
+        report.textContent = '§' + sec + ' has no reconstruction or translation in this project yet.'; return;
+      }
+      if (omensOf()[sec]) { report.textContent = '§' + sec + ' is already linked to ' + omensOf()[sec] + '.'; return; }
+      let said;
+      if (!id) {
+        id = omenIdFor(sec);
+        if (sharedOmens.includes(id)) { report.textContent = 'A shared omen ' + id + ' already exists: choose it in the list to link to it.'; return; }
+        const rec = { ...omenOfSection(sec), id };
+        await SharedTexts.client.write(id, JSON.stringify(rec, null, 2), 'omen');
+        await FileSystem.writeOmenBase(dirHandle, id, rec);
+        said = '§' + sec + ' is now the shared omen ' + id + '. Link the matching section in the other project to it.';
+      } else {
+        const r = await SharedTexts.client.read(id, 'omen');
+        const theirs = r && JSON.parse(r.content);
+        const mine = { ...omenOfSection(sec), id };
+        if (theirs && SharedTexts.sameOmen(mine, theirs)) {
+          await FileSystem.writeOmenBase(dirHandle, id, theirs);
+          said = '§' + sec + ' is now linked to ' + id + '. They already read the same.';
+        } else {
+          const n = SharedTexts.OMEN_PARTS.filter((p) => JSON.stringify(mine[p]) !== JSON.stringify(theirs && theirs[p])).length;
+          said = '§' + sec + ' is now linked to ' + id + '. They differ in ' + n
+            + ' part(s): open the score and you will be asked which version each keeps.';
+        }
+      }
+      projectConfig.linkedOmens = { ...omensOf(), [sec]: id };
+      await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+      report.textContent = said;
+      document.getElementById('omen-link-sec').value = '';
+      await loadOmens();
+    }
+
+    async function unlinkOmen(sec) {
+      if (!confirm('Unlink §' + sec + ' from ' + omensOf()[sec] + '?\n\nThis section keeps its text, which stops following the linked omen. Other projects stay linked.')) return;
+      const next = { ...omensOf() };
+      delete next[sec];
+      projectConfig.linkedOmens = next;
+      await FileSystem.writeProjectConfig(dirHandle, projectConfig);
+      document.getElementById('omen-report').textContent = '§' + sec + ' is unlinked: its text is now this project’s own.';
+      renderOmens();
+    }
+
+    document.getElementById('omen-link-sec').addEventListener('change', showOmenPreview);
+    document.getElementById('omen-link-to').addEventListener('change', showOmenPreview);
+    document.getElementById('omen-link-btn').addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try {
+        await linkOmen(document.getElementById('omen-link-sec').value.trim(), document.getElementById('omen-link-to').value);
+      } catch (err) {
+        document.getElementById('omen-report').textContent = 'Not done: ' + (err.message || err);
+      } finally { e.target.disabled = !sharedFolderSet; }
+    });
+    document.getElementById('omen-list').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.omen-unlink');
+      if (!btn) return;
+      btn.disabled = true;
+      try { await unlinkOmen(btn.dataset.sec); }
+      catch (err) { document.getElementById('omen-report').textContent = 'Not done: ' + (err.message || err); btn.disabled = false; }
     });
 
     function renderFileList() {

@@ -1034,13 +1034,20 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && req.url === '/api/shared/list') {
+  // Two kinds live in the folder: tablets ("text": NAME.txt at the top) and
+  // linked omens ("omen": omens/NAME.json).
+  const sharedPlace = (folder, kind) => (kind === 'omen'
+    ? { dir: path.join(folder, 'omens'), ext: '.json' }
+    : { dir: folder, ext: '.txt' });
+
+  if (req.method === 'GET' && req.url.startsWith('/api/shared/list')) {
     const folder = sharedFolder();
     if (!folder) { reply(409, { error: 'no shared texts folder is set on this computer' }); return; }
+    const { dir, ext } = sharedPlace(folder, new URL(req.url, 'http://x').searchParams.get('kind'));
     try {
-      const files = fs.readdirSync(folder).filter((f) => f.endsWith('.txt')).map((f) => {
-        const st = fs.statSync(path.join(folder, f));
-        return { name: f.slice(0, -4), mtimeMs: st.mtimeMs, size: st.size };
+      const files = !fs.existsSync(dir) ? [] : fs.readdirSync(dir).filter((f) => f.endsWith(ext)).map((f) => {
+        const st = fs.statSync(path.join(dir, f));
+        return { name: f.slice(0, -ext.length), mtimeMs: st.mtimeMs, size: st.size };
       });
       reply(200, { path: folder, files });
     } catch (e) { reply(500, { error: e.message }); }
@@ -1050,9 +1057,11 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url.startsWith('/api/shared/file')) {
     const folder = sharedFolder();
     if (!folder) { reply(409, { error: 'no shared texts folder is set on this computer' }); return; }
-    const name = sharedName(new URL(req.url, 'http://x').searchParams.get('name'));
+    const q = new URL(req.url, 'http://x').searchParams;
+    const name = sharedName(q.get('name'));
     if (!name) { reply(400, { error: 'bad name' }); return; }
-    const file = path.join(folder, name + '.txt');
+    const { dir, ext } = sharedPlace(folder, q.get('kind'));
+    const file = path.join(dir, name + ext);
     if (!fs.existsSync(file)) { reply(404, { error: 'no shared text ' + name }); return; }
     try {
       reply(200, { name, content: fs.readFileSync(file, 'utf8'), mtimeMs: fs.statSync(file).mtimeMs });
@@ -1068,8 +1077,10 @@ const server = http.createServer((req, res) => {
       if (err) { reply(400, { error: 'bad JSON' }); return; }
       const name = sharedName(b.name);
       if (!name || typeof b.content !== 'string') { reply(400, { error: 'name and content are required' }); return; }
-      const file = path.join(folder, name + '.txt');
+      const { dir, ext } = sharedPlace(folder, b.kind);
+      const file = path.join(dir, name + ext);
       try {
+        fs.mkdirSync(dir, { recursive: true });
         // Into the existing file when there is one: the same file, modified.
         fs.writeFileSync(file, b.content, 'utf8');
         reply(200, { name, mtimeMs: fs.statSync(file).mtimeMs });
